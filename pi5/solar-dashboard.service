@@ -1,0 +1,27 @@
+[Unit]
+Description=Solar Dashboard - Modbus TCP Monitor
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=michael
+Group=michael
+WorkingDirectory=/home/michael/solar_dashboard
+Environment="PATH=/home/michael/solar_dashboard/venv/bin"
+# Use gunicorn for production (recommended)
+ExecStart=/home/michael/solar_dashboard/venv/bin/gunicorn --bind 0.0.0.0:8080 --workers 1 --threads 4 solar_dashboard:app
+# Alternative: run directly with Flask dev server (simpler)
+#ExecStart=/home/michael/solar_dashboard/venv/bin/python solar_dashboard.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/log
+
+[Install]
+WantedBy=multi-user.target
