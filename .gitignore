@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+venv/
+*.egg-info/
+
+# Config (contains site-specific settings and voltages)
+pi5/config.json
+
+# Logs
+*.log
+
+# Backups
+*.backup*
+*.bak*
+*.old
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets
+*.env
+secrets.py
