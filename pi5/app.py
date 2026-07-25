@@ -1956,10 +1956,16 @@ function startPolling(){
   cfgTimer=setInterval(fetchConfig,15000);
 }
 document.addEventListener('visibilitychange',()=>{
-  if(document.hidden){clearInterval(dataTimer);clearInterval(cfgTimer);}
-  if(document.hidden&&window.Site3D)Site3D.stop();
-  else if(s3dOn&&window.Site3D&&Site3D.isReady())Site3D.start();
-  else{fetchData();fetchConfig();startPolling();}
+  if(document.hidden){
+    clearInterval(dataTimer);clearInterval(cfgTimer);
+    if(window.Site3D)Site3D.stop();
+    return;
+  }
+  /* on return: ALWAYS restart data polling, then resume the 3D if it is on.
+     The old logic put these in an if/else, so with the 3D active the polling
+     restart never ran and every value froze until a manual refresh. */
+  fetchData();fetchConfig();startPolling();
+  if(s3dOn&&window.Site3D&&Site3D.isReady())Site3D.start();
 });
 document.addEventListener('DOMContentLoaded',()=>{
   document.getElementById('capKw_value').textContent=(CAPS.total/1000).toFixed(1);
