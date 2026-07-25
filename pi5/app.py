@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Solar Dashboard - Pi 5 Flask Application V2.4
+Solar Dashboard - Pi 5 Flask Application V2.5
 Full autonomous control with persistent settings
 
 FIXES in V2.4:
@@ -57,7 +57,7 @@ import logging
 import copy
 import requests as http_requests
 from datetime import datetime
-from flask import Flask, jsonify, request, render_template_string
+from flask import Flask, jsonify, request, render_template_string, send_file
 
 from schneider_modbus import SchneiderModbusTCP
 
@@ -88,6 +88,7 @@ REG_PV_CURRENT = 0x004E
 REG_PV_POWER = 0x0050
 REG_CHARGER_STATUS = 0x0049
 REG_GENERATOR_MODE = 0x004D
+REG_GENERATOR_ACTION = 0x0043   # AGS spec 2.3: 9=Running, 10=Stopped
 REG_CHARGE_MODE_FORCE = 0x00AA
 REG_CHARGER_ENABLE = 0x0164
 REG_MAX_CHARGE_RATE = 0x016F
@@ -154,7 +155,8 @@ system_data = {
     "southArrayPVPower": 0, "southArrayPVVoltage": 0.0, "southArrayPVCurrent": 0.0, "southArrayChargeStatus": 0,
     "westArrayPVPower": 0, "westArrayPVVoltage": 0.0, "westArrayPVCurrent": 0.0, "westArrayChargeStatus": 0,
     "mep803aMode": 0, "kubotaMode": 0,
-    "lastUpdate": "00:00:00", "pollErrors": 0,
+    "mep803aAction": 10, "kubotaAction": 10,
+    "lastUpdate": "00:00:00", "clockTime": "--:--:--", "pollErrors": 0,
     "mepChargeRateLive": 0, "kubotaChargeRateLive": 0,
     "chargePower1": 0, "chargePower2": 0, "chargePower3": 0,
     "mepAgsOnline": True, "kubotaAgsOnline": True,
@@ -793,6 +795,10 @@ def poll_modbus():
             if val is None:
                 errors += 1
                 mep_ok = False
+            else:
+                act = modbus.read_holding_register_16(
+                    MODBUS_HOST, MODBUS_PORT, AGS_MEP803A_ID, REG_GENERATOR_ACTION)
+                new_data["mep803aAction"] = act if act is not None else 255
 
             val = modbus.read_holding_register_16(MODBUS_HOST, MODBUS_PORT, AGS_KUBOTA_ID, REG_GENERATOR_MODE)
             new_data["kubotaMode"] = val if val is not None else 0
@@ -800,6 +806,10 @@ def poll_modbus():
             if val is None:
                 errors += 1
                 kubota_ok = False
+            else:
+                act = modbus.read_holding_register_16(
+                    MODBUS_HOST, MODBUS_PORT, AGS_KUBOTA_ID, REG_GENERATOR_ACTION)
+                new_data["kubotaAction"] = act if act is not None else 255
 
             mep_rate = modbus.read_holding_register_16(MODBUS_HOST, MODBUS_PORT, INVERTER_1_ID, REG_MAX_CHARGE_RATE)
             new_data["mepChargeRateLive"] = mep_rate if mep_rate is not None else 0
@@ -817,7 +827,10 @@ def poll_modbus():
             new_data["chargePower3"] = val if val is not None else 0
 
             elapsed = int(time.time() - start_time)
+            # lastUpdate is really uptime; kept as-is for the ESP32 display and
+            # Alexa webhook. clockTime is the actual wall clock of this poll.
             new_data["lastUpdate"] = f"{(elapsed//3600)%24:02d}:{(elapsed//60)%60:02d}:{elapsed%60:02d}"
+            new_data["clockTime"] = datetime.now().strftime("%H:%M:%S")
             new_data["pollErrors"] = errors
 
             with data_lock:
@@ -847,377 +860,871 @@ def poll_modbus():
 app = Flask(__name__)
 
 DASHBOARD_HTML = """<!DOCTYPE html>
-<html>
+<html lang='en'>
 <head>
 <meta charset='UTF-8'>
 <meta name='viewport' content='width=device-width, initial-scale=1.0'>
+<meta name='theme-color' content='#0b0f14'>
 <title>Solar Dashboard - Pi 5</title>
 <style>
-body{font-family:'Inter',sans-serif;background:linear-gradient(135deg,#2c3e50,#34495e);color:#ecf0f1;margin:0;padding:20px;display:flex;flex-direction:column;align-items:center;min-height:100vh;}
-.container{background:#3b5167;border-radius:15px;box-shadow:0 10px 30px rgba(0,0,0,0.6);padding:30px;max-width:900px;width:100%;box-sizing:border-box;text-align:center;}
-h2{color:#82e0aa;margin-bottom:25px;font-size:1.8em;}
-.data-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:20px;margin-bottom:20px;}
-.solar-data-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:20px;margin-bottom:20px;}
-.generator-data-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:20px;margin-bottom:20px;}
-@media(max-width:600px){.data-grid,.solar-data-grid,.generator-data-grid{grid-template-columns:1fr;}}
-.card{background:#4a6582;border-radius:10px;padding:20px;box-shadow:0 5px 15px rgba(0,0,0,0.5);}
-.card h3{font-size:1em;color:#bbdefb;margin:0 0 10px 0;}
-.card p{font-size:2em;font-weight:bold;margin:0;color:#fff;}
-.card .small-text{font-size:1.1em;font-weight:normal;margin-top:5px;color:#b0c4de;}
-.bar-container{background-color:#5d7a96;border-radius:5px;height:15px;margin-top:10px;overflow:hidden;}
-.bar{height:100%;background:linear-gradient(90deg,#00e0a8,#00c0ff);border-radius:5px;transition:width 0.5s;}
-.section-title{color:#82e0aa;margin:20px 0 15px 0;font-size:1.5em;border-bottom:2px solid #5d7a96;padding-bottom:10px;}
-.gen-controls{margin-top:15px;display:flex;flex-direction:column;align-items:center;gap:8px;}
-.gen-controls select{padding:8px;border-radius:5px;border:1px solid #5d7a96;background:#3b5167;color:#ecf0f1;width:100%;max-width:150px;}
-.gen-controls button{padding:8px 12px;border-radius:5px;border:none;background:#82e0aa;color:#2c3e50;font-weight:bold;cursor:pointer;}
-.gen-controls button:hover{background:#5cb85c;}
-.settings-panel{background:#3d566e;border-radius:10px;padding:20px;margin-top:20px;text-align:left;}
-.settings-panel h3{color:#f39c12;margin:0 0 15px 0;}
-.settings-row{display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-bottom:15px;}
-@media(max-width:600px){.settings-row{grid-template-columns:1fr;}}
-.settings-group{background:#4a6582;border-radius:8px;padding:15px;}
-.settings-group h4{color:#82e0aa;margin:0 0 10px 0;font-size:1em;}
-.setting-item{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;}
-.setting-item label{color:#b0c4de;font-size:0.9em;}
-.setting-item input{width:80px;padding:5px 8px;border-radius:4px;border:1px solid #5d7a96;background:#3b5167;color:#ecf0f1;text-align:right;}
-.setting-item input[type=text]{width:160px;text-align:left;}
-.toggle-row{display:flex;justify-content:space-between;align-items:center;margin-bottom:15px;padding:10px;background:#4a6582;border-radius:8px;}
-.toggle-btn{padding:10px 20px;border-radius:5px;border:none;font-weight:bold;cursor:pointer;transition:all 0.3s;min-width:100px;}
-.toggle-btn.enabled{background:#27ae60;color:white;}
-.toggle-btn.disabled{background:#c0392b;color:white;}
-.save-btn{background:#3498db;color:white;padding:10px 20px;border:none;border-radius:5px;cursor:pointer;font-weight:bold;margin-top:10px;margin-right:5px;}
-.save-btn:hover{background:#2980b9;}
-.test-btn{background:#9b59b6;color:white;padding:10px 20px;border:none;border-radius:5px;cursor:pointer;font-weight:bold;margin-top:10px;}
-.test-btn:hover{background:#8e44ad;}
-.event-log{background:#1a252f;border-radius:5px;padding:10px;height:220px;overflow-y:auto;font-family:monospace;font-size:0.78em;text-align:left;line-height:1.5;}
-.ev-error{color:#e74c3c;}
-.ev-warn{color:#f39c12;}
-.ev-ok{color:#2ecc71;}
-.ev-info{color:#b0c4de;}
-.footer{margin-top:20px;font-size:0.8em;color:#b0c4de;}
-.status-indicator{display:inline-block;width:12px;height:12px;border-radius:50%;margin-right:8px;}
-.status-ok{background:#82e0aa;}
-.status-error{background:#e74c3c;animation:blink 1s infinite;}
-@keyframes blink{0%,100%{opacity:1}50%{opacity:0.3}}
-.live-rate{font-size:0.8em;color:#f39c12;margin-top:5px;}
-.ags-status{font-size:0.75em;margin-top:4px;}
-.ags-online{color:#2ecc71;}
-.ags-offline{color:#e74c3c;font-weight:bold;}
-.error-banner{background:#c0392b;color:white;padding:10px 15px;border-radius:8px;margin-bottom:15px;font-weight:bold;display:none;}
-/* V2.4 AC Diag styles */
-.diag-panel{background:#2c3e50;border-radius:10px;padding:15px;margin-top:10px;}
-.diag-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:10px;}
-@media(max-width:600px){.diag-grid{grid-template-columns:1fr;}}
-.diag-card{background:#3d566e;border-radius:8px;padding:12px;text-align:center;}
-.diag-card .label{font-size:0.75em;color:#82e0aa;margin-bottom:4px;}
-.diag-card .val{font-size:1.3em;font-weight:bold;color:#ecf0f1;}
-.diag-card .val.warn{color:#f39c12;}
-.diag-card .val.ok{color:#2ecc71;}
-.diag-card .sub{font-size:0.7em;color:#b0c4de;margin-top:2px;}
-.diag-btn{padding:8px 14px;border-radius:5px;border:none;font-weight:bold;cursor:pointer;margin-right:6px;margin-top:8px;}
-.diag-btn-snap{background:#16a085;color:white;}
-.diag-btn-snap:hover{background:#1abc9c;}
-.diag-btn-stream{background:#8e44ad;color:white;}
-.diag-btn-stream:hover{background:#9b59b6;}
-.diag-btn-clear{background:#7f8c8d;color:white;font-size:0.8em;padding:6px 10px;}
-.diag-btn-clear:hover{background:#95a5a6;}
-.diag-status{font-size:0.8em;color:#b0c4de;margin-top:6px;min-height:1.2em;}
-.diag-status.running{color:#f39c12;}
-.diag-status.done{color:#2ecc71;}
-.diag-status.error{color:#e74c3c;}
-.diag-log-table{width:100%;border-collapse:collapse;font-size:0.72em;font-family:monospace;margin-top:10px;}
-.diag-log-table th{background:#1a252f;color:#82e0aa;padding:4px 8px;text-align:left;position:sticky;top:0;}
-.diag-log-table td{padding:3px 8px;border-bottom:1px solid #2c3e50;color:#ecf0f1;}
-.diag-log-table tr:nth-child(even) td{background:#2c3e50;}
-.diag-log-wrap{max-height:250px;overflow-y:auto;border-radius:5px;background:#1a252f;}
-.delta-warn{color:#f39c12;font-weight:bold;}
-.delta-ok{color:#2ecc71;}
+:root{
+  --bg:#0b0f14; --bg2:#111823; --panel:rgba(255,255,255,0.035);
+  --panel-hi:rgba(255,255,255,0.06); --line:rgba(255,255,255,0.08);
+  --txt:#e8eef5; --dim:#8fa0b3; --dim2:#7d8da1;
+  --solar:#ffb020; --batt:#3ddc97; --ac:#4cc9f0; --gen:#c084fc;
+  --bad:#ff5d5d; --warn:#ffb020; --good:#3ddc97;
+  --r:16px; --ease:cubic-bezier(.22,.61,.36,1);
+}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0}
+body{
+  font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+  background:var(--bg); color:var(--txt); min-height:100vh; padding:18px 14px 40px;
+  -webkit-font-smoothing:antialiased;
+}
+body::before{
+  content:''; position:fixed; inset:0; z-index:-1; pointer-events:none;
+  background:
+    radial-gradient(900px 500px at 12% -8%, rgba(255,176,32,.10), transparent 60%),
+    radial-gradient(800px 500px at 92% 4%, rgba(76,201,240,.09), transparent 60%),
+    linear-gradient(180deg,#0d131b,#080b10 70%);
+}
+.wrap{max-width:1120px;margin:0 auto}
+.num{font-variant-numeric:tabular-nums;font-feature-settings:'tnum'}
+
+/* ---------- header ---------- */
+.top{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:18px}
+.brand{display:flex;align-items:center;gap:11px;margin-right:auto}
+.sunmark{width:34px;height:34px;flex:0 0 34px}
+.sunmark .core{fill:var(--solar)}
+.sunmark .rays{stroke:var(--solar);stroke-width:2.4;stroke-linecap:round;transform-origin:50% 50%;opacity:.9}
+.sunmark.spin .rays{animation:spin 14s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.brand h1{margin:0;font-size:1.18rem;font-weight:650;letter-spacing:-.015em}
+.brand span{display:block;font-size:.72rem;color:var(--dim2);font-weight:450;letter-spacing:.04em}
+.pill{
+  display:inline-flex;align-items:center;gap:8px;padding:7px 13px;border-radius:999px;
+  background:var(--panel);border:1px solid var(--line);font-size:.78rem;color:var(--dim2);
+}
+.pill a{color:var(--batt);text-decoration:none}
+.pill a:hover{text-decoration:underline}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--good);flex:0 0 8px}
+.dot.beat{animation:beat .9s var(--ease)}
+@keyframes beat{0%{box-shadow:0 0 0 0 rgba(61,220,151,.55)}100%{box-shadow:0 0 0 11px rgba(61,220,151,0)}}
+.dot.err{background:var(--bad);animation:blink 1.1s infinite}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:.25}}
+
+.banner{
+  display:none;align-items:center;gap:10px;padding:13px 16px;border-radius:13px;margin-bottom:16px;
+  background:linear-gradient(90deg,rgba(255,93,93,.16),rgba(255,93,93,.05));
+  border:1px solid rgba(255,93,93,.34);color:#ffc9c9;font-size:.88rem;font-weight:500;
+  animation:slideDown .35s var(--ease);
+}
+@keyframes slideDown{from{opacity:0;transform:translateY(-8px)}to{opacity:1;transform:none}}
+
+/* ---------- cards ---------- */
+.card{
+  background:var(--panel);border:1px solid var(--line);border-radius:var(--r);padding:18px;
+  position:relative;overflow:hidden;
+  transition:border-color .3s var(--ease),transform .3s var(--ease),background .3s var(--ease);
+}
+.card:hover{border-color:var(--panel-hi);background:rgba(255,255,255,.05)}
+.card::after{
+  content:'';position:absolute;top:0;left:0;right:0;height:1px;
+  background:linear-gradient(90deg,transparent,var(--accent,transparent),transparent);opacity:.55;
+}
+.lbl{font-size:.72rem;text-transform:uppercase;letter-spacing:.09em;color:var(--dim2);
+  display:flex;align-items:center;gap:7px;margin-bottom:12px;font-weight:600}
+.val{font-size:2.05rem;font-weight:660;line-height:1;letter-spacing:-.03em}
+.val .u{font-size:.9rem;font-weight:500;color:var(--dim2);margin-left:4px;letter-spacing:0}
+.sub{font-size:.8rem;color:var(--dim2);margin-top:8px;min-height:1.1em}
+
+.hero{display:grid;grid-template-columns:1.45fr 1fr 1fr;gap:14px;margin-bottom:14px}
+.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-bottom:14px}
+.grid2{display:grid;grid-template-columns:repeat(2,1fr);gap:14px;margin-bottom:14px}
+.grid4{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:14px}
+@media(max-width:880px){.hero,.grid3,.grid4{grid-template-columns:1fr 1fr}.hero>:first-child{grid-column:1/-1}}
+@media(max-width:560px){.hero,.grid2,.grid3,.grid4{grid-template-columns:1fr}}
+
+h2.sec{
+  font-size:.76rem;text-transform:uppercase;letter-spacing:.13em;color:var(--dim2);
+  font-weight:650;margin:26px 0 12px;display:flex;align-items:center;gap:12px;
+}
+h2.sec::after{content:'';flex:1;height:1px;background:var(--line)}
+
+/* ---------- bars ---------- */
+.track{height:6px;border-radius:99px;background:rgba(255,255,255,.07);overflow:hidden;margin-top:13px;position:relative}
+.fill{height:100%;border-radius:99px;width:0;transition:width .9s var(--ease);position:relative;
+  background:linear-gradient(90deg,var(--c1,#3ddc97),var(--c2,#4cc9f0))}
+.fill.live::after{
+  content:'';position:absolute;inset:0;border-radius:99px;
+  background:linear-gradient(90deg,transparent,rgba(255,255,255,.55),transparent);
+  animation:sweep 2.1s linear infinite;
+}
+@keyframes sweep{from{transform:translateX(-100%)}to{transform:translateX(100%)}}
+
+/* ---------- big hero solar ---------- */
+.hero-main{display:flex;flex-direction:column;justify-content:space-between}
+.hero-main .val{font-size:3.1rem}
+.spark{display:flex;align-items:flex-end;gap:3px;height:34px;margin-top:14px}
+.spark i{flex:1;background:linear-gradient(180deg,var(--solar),rgba(255,176,32,.25));
+  border-radius:2px 2px 0 0;height:4%;transition:height .6s var(--ease);min-height:2px;opacity:.85}
+
+/* ---------- soc ring ---------- */
+.ring-wrap{display:flex;align-items:center;gap:16px}
+.ring{width:96px;height:96px;flex:0 0 96px;transform:rotate(-90deg)}
+.ring .bg{fill:none;stroke:rgba(255,255,255,.08);stroke-width:9}
+.ring .fg{fill:none;stroke:url(#socGrad);stroke-width:9;stroke-linecap:round;
+  stroke-dasharray:295.3;stroke-dashoffset:295.3;transition:stroke-dashoffset 1s var(--ease)}
+.ring-txt{font-size:1.85rem;font-weight:660;letter-spacing:-.03em}
+
+/* ---------- status chips ---------- */
+.chip{display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border-radius:99px;
+  font-size:.7rem;font-weight:650;letter-spacing:.04em;text-transform:uppercase}
+.chip.ok{background:rgba(61,220,151,.13);color:var(--good);border:1px solid rgba(61,220,151,.28)}
+.chip.off{background:rgba(255,255,255,.05);color:var(--dim2);border:1px solid var(--line)}
+.chip.bad{background:rgba(255,93,93,.14);color:var(--bad);border:1px solid rgba(255,93,93,.3)}
+.chip.run{background:rgba(192,132,252,.14);color:var(--gen);border:1px solid rgba(192,132,252,.32)}
+.chip.run .dot{background:var(--gen);animation:pulse 1.6s infinite}
+.chip.warn{background:rgba(255,176,32,.14);color:var(--warn);border:1px solid rgba(255,176,32,.32)}
+.chip.warn .dot{background:var(--warn);animation:pulse 1.6s infinite}
+@keyframes pulse{0%{box-shadow:0 0 0 0 rgba(192,132,252,.6)}70%{box-shadow:0 0 0 8px rgba(192,132,252,0)}100%{box-shadow:0 0 0 0 rgba(192,132,252,0)}}
+
+/* ---------- gen card ---------- */
+.gen-card .row{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:14px}
+select,input,button{font-family:inherit;font-size:.85rem}
+select,input{background:rgba(0,0,0,.3);border:1px solid var(--line);color:var(--txt);
+  padding:9px 11px;border-radius:10px;outline:none;transition:border-color .2s,box-shadow .2s}
+select:focus,input:focus{border-color:var(--ac);box-shadow:0 0 0 3px rgba(76,201,240,.13)}
+select{flex:1}
+.btn{border:none;border-radius:10px;padding:9px 16px;font-weight:600;cursor:pointer;
+  transition:transform .15s var(--ease),filter .2s,box-shadow .2s;color:#08111a}
+.btn:hover{filter:brightness(1.1)}
+.btn:active{transform:scale(.96)}
+.btn.p{background:var(--ac)}
+.btn.s{background:rgba(255,255,255,.09);color:var(--txt);border:1px solid var(--line)}
+.btn.g{background:var(--good)}
+.btn.d{background:var(--bad);color:#fff}
+.btn.v{background:var(--gen);color:#160c22}
+.btn.sm{padding:7px 13px;font-size:.78rem}
+
+/* ---------- settings ---------- */
+.acc{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);margin-bottom:12px;overflow:hidden}
+.acc>summary{
+  padding:16px 18px;cursor:pointer;font-weight:600;font-size:.92rem;list-style:none;
+  display:flex;align-items:center;gap:10px;transition:background .2s;
+}
+.acc>summary::-webkit-details-marker{display:none}
+.acc>summary:hover{background:rgba(255,255,255,.03)}
+.acc>summary .caret{margin-left:auto;color:var(--dim2);transition:transform .3s var(--ease)}
+.acc[open]>summary .caret{transform:rotate(90deg)}
+.acc[open]>summary{border-bottom:1px solid var(--line)}
+.acc-body{padding:18px;animation:fadeIn .3s var(--ease)}
+@keyframes fadeIn{from{opacity:0;transform:translateY(-6px)}to{opacity:1;transform:none}}
+.fieldset{background:rgba(0,0,0,.22);border:1px solid var(--line);border-radius:13px;padding:16px}
+.fieldset h4{margin:0 0 13px;font-size:.78rem;text-transform:uppercase;letter-spacing:.09em;color:var(--solar);font-weight:650}
+.frow{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px}
+.frow label{font-size:.83rem;color:var(--dim2)}
+.frow input{width:92px;text-align:right}
+.frow input[type=text]{width:100%;max-width:190px;text-align:left}
+.togrow{display:flex;align-items:center;justify-content:space-between;gap:12px;
+  padding:13px 15px;background:rgba(0,0,0,.22);border:1px solid var(--line);border-radius:13px;margin-bottom:16px}
+.togrow .t{font-size:.88rem}
+
+/* ---------- log ---------- */
+.log{background:rgba(0,0,0,.42);border:1px solid var(--line);border-radius:13px;padding:13px;
+  height:230px;overflow-y:auto;font-family:ui-monospace,'SF Mono',Menlo,monospace;font-size:.76rem;line-height:1.65}
+.log::-webkit-scrollbar{width:7px}
+.log::-webkit-scrollbar-thumb{background:rgba(255,255,255,.14);border-radius:9px}
+.log div{padding:1px 0;animation:logIn .3s var(--ease)}
+@keyframes logIn{from{opacity:0;transform:translateX(-6px)}to{opacity:1;transform:none}}
+.e-err{color:#ff8f8f}.e-warn{color:#ffcb6b}.e-ok{color:#7ce8b4}.e-info{color:#94a6bb}
+
+/* ---------- toast ---------- */
+#toasts{position:fixed;bottom:22px;right:22px;z-index:99;display:flex;flex-direction:column;gap:9px;max-width:330px}
+.toast{padding:13px 17px;border-radius:12px;font-size:.85rem;font-weight:500;color:#fff;
+  background:#1b2532;border:1px solid var(--line);box-shadow:0 14px 34px rgba(0,0,0,.5);
+  animation:toastIn .34s var(--ease)}
+.toast.ok{border-color:rgba(61,220,151,.4);background:linear-gradient(90deg,rgba(61,220,151,.15),#1b2532)}
+.toast.bad{border-color:rgba(255,93,93,.4);background:linear-gradient(90deg,rgba(255,93,93,.15),#1b2532)}
+.toast.out{animation:toastOut .3s var(--ease) forwards}
+@keyframes toastIn{from{opacity:0;transform:translateX(40px) scale(.96)}to{opacity:1;transform:none}}
+@keyframes toastOut{to{opacity:0;transform:translateX(40px) scale(.96)}}
+@media(max-width:560px){ #toasts{left:14px;right:14px;bottom:14px;max-width:none}}
+
+.foot{margin-top:26px;text-align:center;font-size:.75rem;color:#5f6f83}
+
+/* entrance stagger */
+.rise{opacity:0;animation:rise .55s var(--ease) forwards}
+@keyframes rise{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:none}}
+
+/* ---------- AC diagnostic ---------- */
+.mgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(148px,1fr));gap:10px}
+.metric{background:rgba(0,0,0,.22);border:1px solid var(--line);border-radius:11px;padding:12px 13px}
+.metric .k{font-size:.68rem;text-transform:uppercase;letter-spacing:.07em;color:var(--dim2);font-weight:600;margin-bottom:6px}
+.metric .v{font-size:1.22rem;font-weight:650;letter-spacing:-.02em;font-variant-numeric:tabular-nums}
+.metric .s{font-size:.7rem;color:#5f6f83;margin-top:3px;font-variant-numeric:tabular-nums}
+.delta-ok{color:var(--good)}
+.delta-warn{color:var(--warn)}
+.dbar{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px;align-items:center}
+.dstat{font-size:.78rem;color:var(--dim2);margin-top:11px;min-height:1.2em}
+.dstat.running{color:var(--warn)}
+.dstat.done{color:var(--good)}
+.dstat.error{color:var(--bad)}
+.dwrap{max-height:250px;overflow-y:auto;border:1px solid var(--line);border-radius:11px;margin-top:13px}
+.dwrap::-webkit-scrollbar{width:7px}
+.dwrap::-webkit-scrollbar-thumb{background:rgba(255,255,255,.14);border-radius:9px}
+.dtable{width:100%;border-collapse:collapse;font-family:ui-monospace,'SF Mono',Menlo,monospace;font-size:.72rem}
+.dtable th{position:sticky;top:0;background:#141c26;color:var(--dim2);font-weight:600;
+  text-transform:uppercase;letter-spacing:.05em;font-size:.64rem;padding:9px 8px;text-align:right;
+  border-bottom:1px solid var(--line);white-space:nowrap}
+.dtable th:first-child,.dtable td:first-child{text-align:left}
+.dtable td{padding:6px 8px;text-align:right;border-bottom:1px solid rgba(255,255,255,.04);color:var(--txt);white-space:nowrap}
+.dtable tbody tr:hover{background:rgba(255,255,255,.03)}
+.dtable td[colspan]{text-align:center;color:#5f6f83;padding:18px}
+
+input[type=range]{-webkit-appearance:none;appearance:none;background:transparent;height:18px;padding:0}
+input[type=range]::-webkit-slider-runnable-track{height:4px;border-radius:9px;background:rgba(255,255,255,.16)}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:14px;height:14px;border-radius:50%;
+  background:var(--solar);margin-top:-5px;cursor:pointer;border:none}
+input[type=range]::-moz-range-track{height:4px;border-radius:9px;background:rgba(255,255,255,.16)}
+input[type=range]::-moz-range-thumb{width:14px;height:14px;border-radius:50%;background:var(--solar);
+  border:none;cursor:pointer}
+.suncap{position:absolute;top:11px;left:13px;right:13px;display:flex;gap:11px;align-items:center;
+  background:rgba(10,15,21,.72);border:1px solid var(--line);border-radius:11px;padding:8px 12px}
+.suncap .lab{font-size:.72rem;color:var(--dim2);white-space:nowrap;font-variant-numeric:tabular-nums}
+
+/* ---------- 3D hero + floating HUD ---------- */
+.stage{position:relative;height:72vh;min-height:430px;margin:-18px -14px 22px;
+  overflow:hidden;background:linear-gradient(180deg,#0e1620,#080b10)}
+.stage #stage3d{position:absolute;top:0;left:0;right:0;bottom:0}
+.hud{position:absolute;z-index:4;background:rgba(9,13,19,.62);
+  border:1px solid rgba(255,255,255,.09);border-radius:14px;
+  backdrop-filter:blur(11px);-webkit-backdrop-filter:blur(11px);
+  padding:13px 16px;pointer-events:auto}
+.hud-tl{top:16px;left:18px;display:flex;align-items:center;gap:11px}
+.hud-tr{top:16px;right:18px;display:flex;align-items:center;gap:14px;font-size:.76rem;
+  color:var(--dim2)}
+.hud-tr a{color:var(--batt);text-decoration:none}
+.hud-bl{bottom:18px;left:18px;display:flex;gap:26px;align-items:flex-end}
+.hud-br{bottom:18px;right:18px;display:flex;gap:10px;align-items:center;flex-wrap:wrap;
+  max-width:min(460px,52vw)}
+.hud-gen{top:50%;right:18px;transform:translateY(-50%);display:flex;
+  flex-direction:column;gap:9px;align-items:flex-end}
+.hud .k{font-size:.63rem;text-transform:uppercase;letter-spacing:.1em;
+  color:var(--dim2);font-weight:650;margin-bottom:5px}
+.hud .v{font-size:1.85rem;font-weight:660;letter-spacing:-.03em;line-height:1;
+  font-variant-numeric:tabular-nums}
+.hud .v .u{font-size:.72rem;font-weight:500;color:var(--dim2);margin-left:3px}
+.hud .s{font-size:.7rem;color:var(--dim2);margin-top:5px;font-variant-numeric:tabular-nums}
+.hudring{width:62px;height:62px;transform:rotate(-90deg);flex:0 0 62px}
+.hudring .bg{fill:none;stroke:rgba(255,255,255,.1);stroke-width:7}
+.hudring .fg{fill:none;stroke:url(#socGrad);stroke-width:7;stroke-linecap:round;
+  stroke-dasharray:295.3;stroke-dashoffset:295.3;transition:stroke-dashoffset 1s var(--ease)}
+.scrollhint{position:absolute;bottom:14px;left:50%;transform:translateX(-50%);
+  font-size:.66rem;letter-spacing:.14em;text-transform:uppercase;color:#5f6f83;
+  z-index:3;pointer-events:none;animation:bob 2.4s ease-in-out infinite}
+@keyframes bob{0%,100%{transform:translateX(-50%) translateY(0)}
+  50%{transform:translateX(-50%) translateY(4px)}}
+@media(max-width:820px){
+  .stage{height:58vh}
+  .hud-bl{gap:16px;padding:10px 12px}
+  .hud .v{font-size:1.35rem}
+  .hud-gen{display:none}
+  .hud-tr{display:none}
+}
+
+@media(prefers-reduced-motion:reduce){
+  *,*::before,*::after{animation-duration:.001ms!important;animation-iteration-count:1!important;transition-duration:.001ms!important}
+}
 </style>
 </head>
 <body>
-<div class='container'>
-<h2>☀️ Solar Inverter Dashboard</h2>
-<div id='errorBanner' class='error-banner'></div>
+<svg width='0' height='0' style='position:absolute'>
+  <defs>
+    <linearGradient id='socGrad' x1='0' y1='0' x2='1' y2='1'>
+      <stop offset='0%' stop-color='#3ddc97'/><stop offset='100%' stop-color='#4cc9f0'/>
+    </linearGradient>
+  </defs>
+</svg>
 
-<h3 class='section-title'>Inverters & Battery</h3>
-<div class='data-grid'>
-  <div class='card'><h3>🔌 Inverter M</h3><p><span id='acPower1_value'>--</span> W</p><p class='small-text'><span id='acCurrent1_value'>--</span> A</p></div>
-  <div class='card'><h3>🔌 Inverter S</h3><p><span id='acPower2_value'>--</span> W</p><p class='small-text'><span id='acCurrent2_value'>--</span> A</p></div>
-  <div class='card'><h3>🔋 Voltage</h3><p><span id='batteryVoltage_value'>--</span> V</p></div>
-  <div class='card'><h3>🔋 SOC</h3><p><span id='batterySOC_value'>--</span> %</p><div class='bar-container'><div id='batterySOC_bar' class='bar' style='width:0%'></div></div></div>
-</div>
+<div class='wrap'>
 
-<h3 class='section-title'>Solar Arrays</h3>
-<div class='solar-data-grid'>
-  <div class='card'><h3>☀️ MPPT 80 (Roof)</h3><p><span id='mppt80PVPower_value'>--</span> W</p><p class='small-text'><span id='mppt80ChargeStatus_value'>--</span></p></div>
-  <div class='card'><h3>☀️ South Array</h3><p><span id='southArrayPVPower_value'>--</span> W</p><p class='small-text'><span id='southArrayChargeStatus_value'>--</span></p></div>
-  <div class='card'><h3>☀️ West Array</h3><p><span id='westArrayPVPower_value'>--</span> W</p><p class='small-text'><span id='westArrayChargeStatus_value'>--</span></p></div>
-</div>
+<section class='stage' id='stage3dCard'>
+  <div id='stage3d'></div>
+  <div id='stage3dMsg' style='position:absolute;top:50%;left:22px;right:22px;text-align:center;
+    transform:translateY(-50%);color:var(--dim2);font-size:.82rem;line-height:1.6;
+    white-space:pre-wrap;word-break:break-word;user-select:text;font-family:ui-monospace,
+    Menlo,monospace'>Loading renderer...</div>
 
-<h3 class='section-title'>Generators</h3>
-<div class='generator-data-grid'>
-  <div class='card'>
-    <h3>🔧 MEP-803A</h3>
-    <p><span id='mep803aMode_value'>--</span></p>
-    <p class='live-rate'>Live Rate: <span id='mepChargeRateLive_value'>--</span>%</p>
-    <p class='ags-status' id='mep_ags_status'>AGS: --</p>
-    <div class='gen-controls'>
-      <select id='mep803a_select'><option value='0'>OFF</option><option value='1'>ON</option><option value='2'>AUTO</option></select>
-      <button onclick='setGeneratorMode(51,document.getElementById("mep803a_select").value)'>Set</button>
-    </div>
-  </div>
-  <div class='card'>
-    <h3>🔧 Kubota</h3>
-    <p><span id='kubotaMode_value'>--</span></p>
-    <p class='live-rate'>Live Rate: <span id='kubotaChargeRateLive_value'>--</span>%</p>
-    <p class='ags-status' id='kubota_ags_status'>AGS: --</p>
-    <div class='gen-controls'>
-      <select id='kubota_select'><option value='0'>OFF</option><option value='1'>ON</option><option value='2'>AUTO</option></select>
-      <button onclick='setGeneratorMode(50,document.getElementById("kubota_select").value)'>Set</button>
-    </div>
-  </div>
-</div>
-
-<!-- V2.4: AC DIAGNOSTIC SECTION -->
-<h3 class='section-title'>🔬 AC Diagnostic — Inverter Sync Monitor</h3>
-<div class='diag-panel'>
-  <!-- Live snapshot cards: 3 columns (Master | Slave | Delta) -->
-  <div class='diag-grid'>
-    <div class='diag-card'>
-      <div class='label'>Master ID10 — L1 Voltage</div>
-      <div class='val' id='diag_m_v1'>--</div>
-      <div class='sub'>L2: <span id='diag_m_v2'>--</span></div>
-    </div>
-    <div class='diag-card'>
-      <div class='label'>Slave ID12 — L1 Voltage</div>
-      <div class='val' id='diag_s_v1'>--</div>
-      <div class='sub'>L2: <span id='diag_s_v2'>--</span></div>
-    </div>
-    <div class='diag-card'>
-      <div class='label'>ΔVoltage (M−S)</div>
-      <div class='val' id='diag_dv'>--</div>
-      <div class='sub'>Target: ±0.0–0.6V</div>
-    </div>
-    <div class='diag-card'>
-      <div class='label'>Master — Frequency</div>
-      <div class='val' id='diag_m_hz'>--</div>
-      <div class='sub'>Hz</div>
-    </div>
-    <div class='diag-card'>
-      <div class='label'>Slave — Frequency</div>
-      <div class='val' id='diag_s_hz'>--</div>
-      <div class='sub'>Hz</div>
-    </div>
-    <div class='diag-card'>
-      <div class='label'>ΔFrequency (M−S)</div>
-      <div class='val' id='diag_dhz'>--</div>
-      <div class='sub'>Target: 0.00 Hz</div>
-    </div>
-    <div class='diag-card'>
-      <div class='label'>Master — Power</div>
-      <div class='val' id='diag_m_pw'>--</div>
-      <div class='sub'>W</div>
-    </div>
-    <div class='diag-card'>
-      <div class='label'>Slave — Power</div>
-      <div class='val' id='diag_s_pw'>--</div>
-      <div class='sub'>W</div>
-    </div>
-    <div class='diag-card'>
-      <div class='label'>Last Reading</div>
-      <div class='val' style='font-size:0.9em;' id='diag_ts'>--</div>
-      <div class='sub' id='diag_log_count'>Log: 0 entries</div>
+  <div class='hud hud-tl'>
+    <svg class='sunmark spin' id='sunmark' viewBox='0 0 40 40' style='width:26px;height:26px'>
+      <circle class='core' cx='20' cy='20' r='7.5'/>
+      <g class='rays'>
+        <line x1='20' y1='2.5' x2='20' y2='8'/><line x1='20' y1='32' x2='20' y2='37.5'/>
+        <line x1='2.5' y1='20' x2='8' y2='20'/><line x1='32' y1='20' x2='37.5' y2='20'/>
+        <line x1='7.6' y1='7.6' x2='11.5' y2='11.5'/><line x1='28.5' y1='28.5' x2='32.4' y2='32.4'/>
+        <line x1='32.4' y1='7.6' x2='28.5' y2='11.5'/><line x1='11.5' y1='28.5' x2='7.6' y2='32.4'/>
+      </g>
+    </svg>
+    <div>
+      <div style='font-weight:650;font-size:.94rem;letter-spacing:-.015em'>Mercalde Solar</div>
+      <div style='font-size:.68rem;color:var(--dim2);letter-spacing:.05em'>Rosarito &middot; Off-Grid</div>
     </div>
   </div>
 
-  <!-- Controls -->
-  <div style='margin-top:8px;'>
-    <button class='diag-btn diag-btn-snap' onclick='diagSnapshot()'>📷 Snapshot</button>
-    <button class='diag-btn diag-btn-stream' onclick='diagStream()'>▶ Capture 20s</button>
-    <button class='diag-btn diag-btn-clear' onclick='diagClearLog()'>🗑 Clear Log</button>
-    <div class='diag-status' id='diag_status'>Ready — click Snapshot for a single reading, or Capture 20s to record a stream.</div>
+  <div class='hud hud-tr'>
+    <span><span class='dot' id='liveDot'></span>&nbsp;<span class='num' id='lastUpdate_value'>--:--:--</span></span>
+    <span>Errors <strong class='num' id='pollErrors_value' style='color:var(--txt)'>0</strong></span>
+    <a href='/registers'>Registers &rarr;</a>
   </div>
 
-  <!-- Log table -->
-  <div style='margin-top:12px;'>
-    <div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;'>
-      <span style='font-size:0.8em;color:#82e0aa;'>📋 Recent Log Entries</span>
-      <button class='diag-btn diag-btn-clear' onclick='diagLoadLog()'>↻ Refresh Log</button>
+  <div class='hud hud-bl'>
+    <div>
+      <div class='k'>Solar</div>
+      <div class='v num'><span id='hudPv'>0</span><span class='u'>W</span></div>
+      <div class='s'><span id='hudPvPct'>0</span>% of <span id='capKw_value'>--</span> kW</div>
     </div>
-    <div class='diag-log-wrap'>
-      <table class='diag-log-table'>
-        <thead>
-          <tr>
-            <th>Time</th>
-            <th>M-V1</th>
-            <th>S-V1</th>
-            <th>ΔV</th>
-            <th>M-Hz</th>
-            <th>S-Hz</th>
-            <th>ΔHz</th>
-            <th>M-W</th>
-            <th>S-W</th>
-          </tr>
-        </thead>
-        <tbody id='diag_log_body'>
-          <tr><td colspan='9' style='text-align:center;color:#7f8c8d;'>No log data — click Snapshot or Capture</td></tr>
-        </tbody>
-      </table>
-    </div>
-  </div>
-</div>
-<!-- END AC DIAGNOSTIC SECTION -->
-
-<div class='settings-panel'>
-  <h3>⚡ Automatic Generator Control</h3>
-  <div class='toggle-row'>
-    <span>Auto Control: <strong id='autoGenStatus' style='color:#c0392b;'>DISABLED</strong></span>
-    <button id='autoGenToggle' class='toggle-btn disabled' onclick='toggleAutoGen()'>ENABLE</button>
-  </div>
-  <div class='settings-row'>
-    <div class='settings-group'>
-      <h4>MEP-803A Thresholds</h4>
-      <div class='setting-item'><label>Start Voltage (V)</label><input type='number' id='mepStartV' step='0.1'></div>
-      <div class='setting-item'><label>Stop Voltage (V)</label><input type='number' id='mepStopV' step='0.1'></div>
-      <div class='setting-item'><label>Charge Rate (%)</label><input type='number' id='mepChargeRate' min='10' max='100'></div>
-      <div class='setting-item'><label>Max Runtime (min)</label><input type='number' id='mepMaxRuntime' min='10' max='480'></div>
-      <div class='setting-item'><label>Cooldown (min)</label><input type='number' id='mepCooldown' min='1' max='60'></div>
-      <button class='save-btn' onclick='saveMepSettings()'>SAVE MEP</button>
-    </div>
-    <div class='settings-group'>
-      <h4>Kubota Thresholds</h4>
-      <div class='setting-item'><label>Start Voltage (V)</label><input type='number' id='kubStartV' step='0.1'></div>
-      <div class='setting-item'><label>Stop Voltage (V)</label><input type='number' id='kubStopV' step='0.1'></div>
-      <div class='setting-item'><label>Charge Rate (%)</label><input type='number' id='kubChargeRate' min='10' max='100'></div>
-      <div class='setting-item'><label>Max Runtime (min)</label><input type='number' id='kubMaxRuntime' min='10' max='480'></div>
-      <div class='setting-item'><label>Cooldown (min)</label><input type='number' id='kubCooldown' min='1' max='60'></div>
-      <button class='save-btn' onclick='saveKubSettings()'>SAVE KUBOTA</button>
-    </div>
-  </div>
-
-  <h4 style='color:#f39c12;margin-top:15px;'>🔧 System Settings</h4>
-  <div class='settings-row'>
-    <div class='settings-group'>
-      <h4>Ramp-Down Settings</h4>
-      <div class='setting-item'><label>Step Delay (sec)</label><input type='number' id='rampStepDelay' min='5' max='60'></div>
-      <div class='setting-item'><label>Zero Hold (sec)</label><input type='number' id='rampZeroHold' min='30' max='300'></div>
-      <button class='save-btn' onclick='saveRampSettings()'>SAVE RAMP</button>
-    </div>
-    <div class='settings-group'>
-      <h4>📱 Telegram Alerts</h4>
-      <div class='toggle-row' style='margin-bottom:8px;padding:8px;'>
-        <span style='font-size:0.9em;'>Alerts: <strong id='telegramStatus' style='color:#c0392b;'>OFF</strong></span>
-        <button id='telegramToggle' class='toggle-btn disabled' style='min-width:70px;padding:6px 12px;' onclick='toggleTelegram()'>ENABLE</button>
+    <div style='display:flex;align-items:center;gap:11px'>
+      <svg class='hudring' viewBox='0 0 108 108'>
+        <circle class='bg' cx='54' cy='54' r='47'/>
+        <circle class='fg' id='hudRing' cx='54' cy='54' r='47'/>
+      </svg>
+      <div>
+        <div class='k'>Battery</div>
+        <div class='v num'><span id='hudSoc'>0</span><span class='u'>%</span></div>
+        <div class='s'><span class='num' id='hudVolts'>0</span> V</div>
       </div>
-      <div class='setting-item'><label>Bot Token</label><input type='text' id='tgToken' placeholder='123456:ABC...'></div>
-      <div class='setting-item'><label>Chat ID</label><input type='text' id='tgChatId' placeholder='123456789'></div>
-      <button class='save-btn' onclick='saveTelegramSettings()'>SAVE</button>
-      <button class='test-btn' onclick='testTelegram()'>TEST</button>
+    </div>
+    <div>
+      <div class='k'>Load</div>
+      <div class='v num'><span id='hudLoad'>0</span><span class='u'>W</span></div>
+      <div class='s'>charging <span class='num' id='hudCharge'>0</span> W</div>
     </div>
   </div>
 
-  <h4 style='color:#f39c12;margin-top:15px;'>📋 Event & Error Log</h4>
-  <div class='event-log' id='eventLog'><span class='ev-info'>Loading...</span></div>
+  <div class='hud hud-gen'>
+    <span id='hud_mep' class='chip off'>MEP --</span>
+    <span id='hud_kub' class='chip off'>KUB --</span>
+  </div>
+
+  <div class='hud hud-br'>
+    <span class='lab' style='font-size:.7rem;color:var(--dim2)'>Sun</span>
+    <input type='range' id='sunTime' min='0' max='23.75' step='0.25' value='12'
+      oninput='onSunTime(this.value)' style='width:150px'>
+    <span class='lab' id='sunLabel' style='font-size:.7rem;color:var(--dim2);
+      white-space:nowrap;font-variant-numeric:tabular-nums'>--</span>
+    <button class='btn s sm' onclick='sunNow()' style='padding:5px 10px'>Now</button>
+    <button class='btn s sm' id='shadowBtn' onclick='toggleShadows()' style='padding:5px 10px'>Shadows</button>
+    <button class='btn s sm' onclick='resetView()' style='padding:5px 10px'>Reset</button>
+    <button class='btn s sm' id='toggle3d' onclick='toggle3D()' style='padding:5px 10px'>3D off</button>
+  </div>
+
+  <div class='scrollhint'>Detail below &darr;</div>
+</section>
+
+<div class='banner' id='errorBanner'></div>
+
+<!-- HERO -->
+<h2 class='sec'>Overview</h2>
+<div class='hero'>
+  <div class='card hero-main rise' style='--accent:var(--solar);animation-delay:.02s'>
+    <div>
+      <div class='lbl'>&#9728;&#65039; Total Solar Production</div>
+      <div class='val num'><span id='totalPV_value'>0</span><span class='u'>W</span></div>
+      <div class='sub'>Peak <span id='capKw_value'>--</span> kW &middot; <span id='pvPct_value'>0</span>% of array</div>
+    </div>
+    <div>
+      <div class='track'><div class='fill' id='totalPV_bar' style='--c1:#ff8a00;--c2:#ffd54a'></div></div>
+      <div class='spark' id='spark'></div>
+    </div>
+  </div>
+
+  <div class='card rise' style='--accent:var(--batt);animation-delay:.08s'>
+    <div class='lbl'>&#128267; Battery</div>
+    <div class='ring-wrap'>
+      <svg class='ring' viewBox='0 0 108 108'>
+        <circle class='bg' cx='54' cy='54' r='47'/>
+        <circle class='fg' id='socRing' cx='54' cy='54' r='47'/>
+      </svg>
+      <div>
+        <div class='ring-txt num'><span id='batterySOC_value'>0</span>%</div>
+        <div class='sub' style='margin-top:4px'><span class='num' id='batteryVoltage_value'>0</span> V</div>
+      </div>
+    </div>
+  </div>
+
+  <div class='card rise' style='--accent:var(--ac);animation-delay:.14s'>
+    <div class='lbl'>&#9889; AC Load</div>
+    <div class='val num'><span id='totalAC_value'>0</span><span class='u'>W</span></div>
+    <div class='sub'>Charging <span class='num' id='totalCharge_value'>0</span> W</div>
+    <div class='track'><div class='fill' id='totalAC_bar' style='--c1:#4cc9f0;--c2:#7ee0ff'></div></div>
+  </div>
 </div>
 
-<div class='footer'>
-  <span id='status_indicator' class='status-indicator status-ok'></span>
-  Last Update: <span id='lastUpdate_value'>--:--:--</span> |
-  Errors: <span id='pollErrors_value'>0</span> |
-  <a href='/registers' style='color:#82e0aa;'>Register Tool</a> |
-  Pi 5 V2.4
+<h2 class='sec'>Inverters</h2>
+<div class='grid2'>
+  <div class='card rise' style='--accent:var(--ac);animation-delay:.18s'>
+    <div class='lbl'>&#128268; XW Pro Master &middot; ID 10</div>
+    <div class='val num'><span id='acPower1_value'>0</span><span class='u'>W</span></div>
+    <div class='sub'><span class='num' id='acCurrent1_value'>0</span> A &middot; charge <span class='num' id='chargePower1_value'>0</span> W</div>
+  </div>
+  <div class='card rise' style='--accent:var(--ac);animation-delay:.22s'>
+    <div class='lbl'>&#128268; XW Pro Slave &middot; ID 12</div>
+    <div class='val num'><span id='acPower2_value'>0</span><span class='u'>W</span></div>
+    <div class='sub'><span class='num' id='acCurrent2_value'>0</span> A &middot; charge <span class='num' id='chargePower2_value'>0</span> W</div>
+  </div>
 </div>
+
+<h2 class='sec'>Solar Arrays</h2>
+<div class='grid3'>
+  <div class='card rise' style='--accent:var(--solar);animation-delay:.26s'>
+    <div class='lbl'>&#9728;&#65039; MPPT 80 &middot; Ground + terrace</div>
+    <div class='val num'><span id='mppt80PVPower_value'>0</span><span class='u'>W</span></div>
+    <div class='sub'><span id='mppt80ChargeStatus_value'>--</span> &middot; <span class='num' id='mppt80PVVoltage_value'>0</span> V</div>
+    <div class='track'><div class='fill' id='mppt80_bar' style='--c1:#ff8a00;--c2:#ffd54a'></div></div>
+  </div>
+  <div class='card rise' style='--accent:var(--solar);animation-delay:.3s'>
+    <div class='lbl'>&#9728;&#65039; MPPT 150 &middot; Gen building</div>
+    <div class='val num'><span id='southArrayPVPower_value'>0</span><span class='u'>W</span></div>
+    <div class='sub'><span id='southArrayChargeStatus_value'>--</span> &middot; <span class='num' id='southArrayPVVoltage_value'>0</span> V</div>
+    <div class='track'><div class='fill' id='south_bar' style='--c1:#ff8a00;--c2:#ffd54a'></div></div>
+  </div>
+  <div class='card rise' style='--accent:var(--solar);animation-delay:.34s'>
+    <div class='lbl'>&#9728;&#65039; MPPT 150 &middot; House (west)</div>
+    <div class='val num'><span id='westArrayPVPower_value'>0</span><span class='u'>W</span></div>
+    <div class='sub'><span id='westArrayChargeStatus_value'>--</span> &middot; <span class='num' id='westArrayPVVoltage_value'>0</span> V</div>
+    <div class='track'><div class='fill' id='west_bar' style='--c1:#ff8a00;--c2:#ffd54a'></div></div>
+  </div>
 </div>
+
+<h2 class='sec'>Generators</h2>
+<div class='grid2'>
+  <div class='card gen-card rise' style='--accent:var(--gen);animation-delay:.38s'>
+    <div class='lbl'>&#128295; MEP-803A <span id='mep_chip' class='chip off'>--</span></div>
+    <div class='val' style='font-size:1.5rem'><span id='mep803aMode_value'>--</span></div>
+    <div class='sub'><span id='mep_action'>--</span> &middot; rate <strong class='num' id='mepChargeRateLive_value' style='color:var(--solar)'>0</strong>% &middot; <span id='mep_ags_status'>AGS --</span></div>
+    <div class='track'><div class='fill' id='mepRate_bar' style='--c1:#c084fc;--c2:#e9d5ff'></div></div>
+    <div class='row'>
+      <select id='mep803a_select'><option value='0'>OFF</option><option value='1'>ON</option><option value='2'>AUTO</option></select>
+      <button class='btn v' onclick='setGeneratorMode(51,document.getElementById("mep803a_select").value)'>Set</button>
+    </div>
+  </div>
+  <div class='card gen-card rise' style='--accent:var(--gen);animation-delay:.42s'>
+    <div class='lbl'>&#128295; Kubota <span id='kub_chip' class='chip off'>--</span></div>
+    <div class='val' style='font-size:1.5rem'><span id='kubotaMode_value'>--</span></div>
+    <div class='sub'><span id='kub_action'>--</span> &middot; rate <strong class='num' id='kubotaChargeRateLive_value' style='color:var(--solar)'>0</strong>% &middot; <span id='kubota_ags_status'>AGS --</span></div>
+    <div class='track'><div class='fill' id='kubRate_bar' style='--c1:#c084fc;--c2:#e9d5ff'></div></div>
+    <div class='row'>
+      <select id='kubota_select'><option value='0'>OFF</option><option value='1'>ON</option><option value='2'>AUTO</option></select>
+      <button class='btn v' onclick='setGeneratorMode(50,document.getElementById("kubota_select").value)'>Set</button>
+    </div>
+  </div>
+</div>
+
+<h2 class='sec'>AC Diagnostic &mdash; Inverter Sync</h2>
+<div class='card' style='--accent:var(--gen)'>
+  <div class='mgrid'>
+    <div class='metric'><div class='k'>Master ID10 &middot; L1</div><div class='v' id='diag_m_v1'>--</div><div class='s'>L2 <span id='diag_m_v2'>--</span></div></div>
+    <div class='metric'><div class='k'>Slave ID12 &middot; L1</div><div class='v' id='diag_s_v1'>--</div><div class='s'>L2 <span id='diag_s_v2'>--</span></div></div>
+    <div class='metric'><div class='k'>&Delta; Voltage (M&minus;S)</div><div class='v' id='diag_dv'>--</div><div class='s'>target &plusmn;0.0&ndash;0.6 V</div></div>
+    <div class='metric'><div class='k'>Master frequency</div><div class='v' id='diag_m_hz'>--</div><div class='s'>Hz</div></div>
+    <div class='metric'><div class='k'>Slave frequency</div><div class='v' id='diag_s_hz'>--</div><div class='s'>Hz</div></div>
+    <div class='metric'><div class='k'>&Delta; Frequency (M&minus;S)</div><div class='v' id='diag_dhz'>--</div><div class='s'>target 0.00 Hz</div></div>
+    <div class='metric'><div class='k'>Master power</div><div class='v' id='diag_m_pw'>--</div><div class='s'>W</div></div>
+    <div class='metric'><div class='k'>Slave power</div><div class='v' id='diag_s_pw'>--</div><div class='s'>W</div></div>
+    <div class='metric'><div class='k'>Last reading</div><div class='v' id='diag_ts' style='font-size:1.05rem'>--</div><div class='s' id='diag_log_count'>Log: 0 entries</div></div>
+  </div>
+  <div class='dbar'>
+    <button class='btn g sm' onclick='diagSnapshot()'>Snapshot</button>
+    <button class='btn v sm' onclick='diagStream()'>Capture 20s</button>
+    <button class='btn s sm' onclick='diagLoadLog()'>Refresh log</button>
+    <button class='btn s sm' onclick='diagClearLog()' style='margin-left:auto'>Clear log</button>
+  </div>
+  <div class='dstat' id='diag_status'>Ready &mdash; Snapshot for one reading, Capture 20s to record a stream.</div>
+  <div class='dwrap'>
+    <table class='dtable'>
+      <thead><tr><th>Time</th><th>M&nbsp;V1</th><th>S&nbsp;V1</th><th>&Delta;V</th><th>M&nbsp;Hz</th><th>S&nbsp;Hz</th><th>&Delta;Hz</th><th>M&nbsp;W</th><th>S&nbsp;W</th></tr></thead>
+      <tbody id='diag_log_body'><tr><td colspan='9'>No log data &mdash; click Snapshot or Capture</td></tr></tbody>
+    </table>
+  </div>
+</div>
+
+<h2 class='sec'>Control &amp; Settings</h2>
+
+<details class='acc' open>
+  <summary>&#9889; Automatic Generator Control <span class='caret'>&#10095;</span></summary>
+  <div class='acc-body'>
+    <div class='togrow'>
+      <span class='t'>Auto control: <strong id='autoGenStatus' style='color:var(--bad)'>DISABLED</strong></span>
+      <button id='autoGenToggle' class='btn d' onclick='toggleAutoGen()'>ENABLE</button>
+    </div>
+    <div class='grid2' style='margin-bottom:0'>
+      <div class='fieldset'>
+        <h4>MEP-803A Thresholds</h4>
+        <div class='frow'><label>Start voltage (V)</label><input type='number' id='mepStartV' step='0.1'></div>
+        <div class='frow'><label>Stop voltage (V)</label><input type='number' id='mepStopV' step='0.1'></div>
+        <div class='frow'><label>Charge rate (%)</label><input type='number' id='mepChargeRate' min='10' max='100'></div>
+        <div class='frow'><label>Max runtime (min)</label><input type='number' id='mepMaxRuntime' min='10' max='480'></div>
+        <div class='frow'><label>Cooldown (min)</label><input type='number' id='mepCooldown' min='1' max='60'></div>
+        <button class='btn p sm' onclick='saveMepSettings()'>Save MEP</button>
+      </div>
+      <div class='fieldset'>
+        <h4>Kubota Thresholds</h4>
+        <div class='frow'><label>Start voltage (V)</label><input type='number' id='kubStartV' step='0.1'></div>
+        <div class='frow'><label>Stop voltage (V)</label><input type='number' id='kubStopV' step='0.1'></div>
+        <div class='frow'><label>Charge rate (%)</label><input type='number' id='kubChargeRate' min='10' max='100'></div>
+        <div class='frow'><label>Max runtime (min)</label><input type='number' id='kubMaxRuntime' min='10' max='480'></div>
+        <div class='frow'><label>Cooldown (min)</label><input type='number' id='kubCooldown' min='1' max='60'></div>
+        <button class='btn p sm' onclick='saveKubSettings()'>Save Kubota</button>
+      </div>
+    </div>
+  </div>
+</details>
+
+<details class='acc'>
+  <summary>&#128295; System Settings <span class='caret'>&#10095;</span></summary>
+  <div class='acc-body'>
+    <div class='grid2' style='margin-bottom:0'>
+      <div class='fieldset'>
+        <h4>Ramp-Down</h4>
+        <div class='frow'><label>Step delay (sec)</label><input type='number' id='rampStepDelay' min='5' max='60'></div>
+        <div class='frow'><label>Zero hold (sec)</label><input type='number' id='rampZeroHold' min='30' max='300'></div>
+        <button class='btn p sm' onclick='saveRampSettings()'>Save Ramp</button>
+      </div>
+      <div class='fieldset'>
+        <h4>&#128241; Telegram Alerts</h4>
+        <div class='togrow' style='margin-bottom:12px;padding:10px 13px'>
+          <span class='t' style='font-size:.83rem'>Alerts: <strong id='telegramStatus' style='color:var(--bad)'>OFF</strong></span>
+          <button id='telegramToggle' class='btn d sm' onclick='toggleTelegram()'>ENABLE</button>
+        </div>
+        <div class='frow'><label>Bot token</label><input type='text' id='tgToken' placeholder='123456:ABC...'></div>
+        <div class='frow'><label>Chat ID</label><input type='text' id='tgChatId' placeholder='123456789'></div>
+        <button class='btn p sm' onclick='saveTelegramSettings()'>Save</button>
+        <button class='btn s sm' onclick='testTelegram()'>Test</button>
+      </div>
+    </div>
+  </div>
+</details>
+
+<details class='acc' open>
+  <summary>&#128203; Event &amp; Error Log <span class='caret'>&#10095;</span></summary>
+  <div class='acc-body'>
+    <div class='log' id='eventLog'><div class='e-info'>Loading...</div></div>
+  </div>
+</details>
+
+<div class='foot'>Pi 5 &middot; Dashboard V3.0 &middot; uptime <span class='num' id='uptime_value'>--:--:--</span></div>
+</div>
+
+<div id='toasts'></div>
 
 <script>
+var FT=0.3048;
+/* 25 x 25 ft footprint -> square plan, so the hip roof is a true pyramid */
+var HOUSE={ w:25*FT, d:25*FT, wall:20*FT, oh:2*FT, pitch:12 };
+HOUSE.dx=HOUSE.w/2+HOUSE.oh;
+HOUSE.dz=HOUSE.d/2+HOUSE.oh;
+HOUSE.rise=HOUSE.dz*Math.tan(HOUSE.pitch*Math.PI/180);
+HOUSE.ridge=2*(HOUSE.dx-HOUSE.dz);          /* 0 -> pyramid */
+
+var TERRACE={ w:5.5, d:4.0, cx:0, deck:10*FT };
+TERRACE.cz=HOUSE.d/2+TERRACE.d/2;
+
+var GEN={ w:7.3, d:5.2, cx:1.0, cz:14.5, wallS:2.9, pitch:12 };
+GEN.wallN=GEN.wallS+GEN.d*Math.tan(GEN.pitch*Math.PI/180);
+GEN.wall=(GEN.wallN+GEN.wallS)/2;
+
+var SITE={
+  lat:32.2910479, lon:-117.0015129, bearing:15, wattsPerPanel:225,
+  /* MPPT 80    = north ground array + terrace roof
+     MPPT 150-W = house west hip + house south hip  (3/2/1 pyramids)
+     MPPT 150-S = generator building                                    */
+  clusters:[
+    {key:'ground',  channel:'mppt80', cols:5, rows:3, tilt:25, azimuth:180,
+     pos:[-1,1.6,-11], mount:'ground'},
+    {key:'houseW',  channel:'west',   pyramid:[3,2,1], tilt:0, azimuth:270,
+     pos:[0,0,0], mount:'flush'},
+    {key:'houseS',  channel:'west',   pyramid:[3,2,1], tilt:0, azimuth:180,
+     pos:[0,0,0], mount:'flush'},
+    {key:'terrace', channel:'mppt80', cols:3, rows:3, tilt:0, azimuth:180,
+     pos:[0,0,0], mount:'flush'},
+    {key:'genbld',  channel:'south',  cols:4, rows:4, tilt:0, azimuth:180,
+     pos:[0,0,0], mount:'flush'}
+  ]
+};
+function clusterCount(c){
+  if(c.pyramid){var n=0;for(var i=0;i<c.pyramid.length;i++)n+=c.pyramid[i];return n;}
+  return c.cols*c.rows;
+}
+function southPlaneY(z){
+  return HOUSE.wall+HOUSE.rise*(1-Math.abs(z)/HOUSE.dz);
+}
+function westPlaneY(x){
+  return HOUSE.wall+HOUSE.rise*((x+HOUSE.dx)/(HOUSE.dx-HOUSE.ridge/2));
+}
+function placeClusters(){
+  var lift=0.14, pr=HOUSE.pitch*Math.PI/180, vlift=lift/Math.cos(pr);
+  for(var i=0;i<SITE.clusters.length;i++){
+    var c=SITE.clusters[i];
+    if(c.key==='houseS'){
+      var z=HOUSE.dz*0.55; c.tilt=HOUSE.pitch; c.pos=[0,southPlaneY(z)+vlift,z];
+    }else if(c.key==='houseW'){
+      var x=-HOUSE.dx*0.62; c.tilt=HOUSE.pitch; c.pos=[x,westPlaneY(x)+vlift,0];
+    }else if(c.key==='terrace'){
+      c.tilt=HOUSE.pitch;
+      c.pos=[TERRACE.cx,
+             HOUSE.wall-(TERRACE.cz-HOUSE.dz)*Math.tan(pr)+vlift,TERRACE.cz];
+    }else if(c.key==='genbld'){
+      var gp=GEN.pitch*Math.PI/180;
+      c.tilt=GEN.pitch;
+      c.pos=[GEN.cx,GEN.wall+0.07/Math.cos(gp)+0.07+lift/Math.cos(gp),GEN.cz];
+    }
+  }
+}
+/* per-channel ceilings from real panel counts */
+const CAPS=(function(){
+  var c={mppt80:0,south:0,west:0};
+  for(var i=0;i<SITE.clusters.length;i++){
+    var cl=SITE.clusters[i];
+    c[cl.channel]+=clusterCount(cl)*SITE.wattsPerPanel;
+  }
+  c.total=c.mppt80+c.south+c.west;
+  return c;
+})();
+
 const chargeStatusMap={0:'Not Charging',768:'Not Charging',769:'Bulk',770:'Absorption',773:'Float',774:'No Float',776:'Disabled',1025:'AC Pass-Thru'};
 const genModeMap={0:'OFF',1:'ON',2:'AUTO',3:'Force On'};
+/* AGS spec section 2.3 - Auto Generator Action */
+const genActionMap={0:'Preheating',1:'Start delay',2:'Cranking',3:'Starter cooling',
+  4:'Warming up',5:'Cooling down',6:'Spinning down',7:'Shutdown bypass',8:'Stopping',
+  9:'Running',10:'Stopped',11:'Crank delay',255:'Unknown'};
+const ACT_STARTING=[0,1,2,3,4,11], ACT_STOPPING=[5,6,7,8];
+const PV_MAX=CAPS.total, AC_MAX=12000;
 let currentConfig=null;
+const shown={};
+const history=new Array(28).fill(0);
+
+/* ---- animated counters ---- */
+function setNum(id,target,dec){
+  const el=document.getElementById(id); if(!el)return;
+  target=Number(target)||0; dec=dec||0;
+  const from=shown[id]===undefined?target:shown[id];
+  if(Math.abs(target-from)<Math.pow(10,-dec-1)){el.textContent=target.toFixed(dec);shown[id]=target;return;}
+  const t0=performance.now(), dur=650;
+  function step(now){
+    const p=Math.min(1,(now-t0)/dur), e=1-Math.pow(1-p,3);
+    const v=from+(target-from)*e;
+    el.textContent=v.toFixed(dec);
+    if(p<1)requestAnimationFrame(step); else shown[id]=target;
+  }
+  shown[id]=target; requestAnimationFrame(step);
+}
+function setBar(id,pct,live){
+  const el=document.getElementById(id); if(!el)return;
+  el.style.width=Math.max(0,Math.min(100,pct))+'%';
+  el.classList.toggle('live',!!live && pct>1);
+  el.style.opacity=live?1:0.32;
+}
+function toast(msg,kind){
+  const box=document.getElementById('toasts');
+  const t=document.createElement('div');
+  t.className='toast '+(kind||'');
+  t.textContent=msg; box.appendChild(t);
+  setTimeout(()=>{t.classList.add('out');setTimeout(()=>t.remove(),320);},3400);
+}
+
+/* ---- sparkline ---- */
+(function buildSpark(){
+  const s=document.getElementById('spark');
+  for(let i=0;i<history.length;i++)s.appendChild(document.createElement('i'));
+})();
+function pushSpark(v){
+  history.push(v); history.shift();
+  const peak=Math.max(PV_MAX*0.15,...history);
+  const bars=document.getElementById('spark').children;
+  for(let i=0;i<bars.length;i++)bars[i].style.height=Math.max(3,(history[i]/peak)*100)+'%';
+}
 
 function updateUI(data){
-  document.getElementById('acPower1_value').textContent=data.acPower1||0;
-  document.getElementById('acCurrent1_value').textContent=data.acCurrent1||0;
-  document.getElementById('acPower2_value').textContent=data.acPower2||0;
-  document.getElementById('acCurrent2_value').textContent=data.acCurrent2||0;
-  document.getElementById('batteryVoltage_value').textContent=data.batteryVoltage||0;
-  document.getElementById('batterySOC_value').textContent=data.batterySOC||0;
-  document.getElementById('batterySOC_bar').style.width=(data.batterySOC||0)+'%';
-  document.getElementById('mppt80PVPower_value').textContent=data.mppt80PVPower||0;
+  const soc0=+data.batterySOC||0;
+  const p1=+data.acPower1||0, p2=+data.acPower2||0;
+  const mp=+data.mppt80PVPower||0, sp=+data.southArrayPVPower||0, wp=+data.westArrayPVPower||0;
+  const totalPV=mp+sp+wp, totalAC=p1+p2;
+  const totalCharge=(+data.chargePower1||0)+(+data.chargePower2||0)+(+data.chargePower3||0);
+
+  setNum('totalPV_value',totalPV);
+  setNum('pvPct_value',(totalPV/PV_MAX)*100,0);
+  setNum('hudPv',totalPV);
+  setNum('hudPvPct',(totalPV/PV_MAX)*100,0);
+  setNum('hudLoad',totalAC);
+  setNum('hudCharge',totalCharge);
+  setNum('hudSoc',soc0);
+  setNum('hudVolts',+data.batteryVoltage||0,1);
+  const hr=document.getElementById('hudRing');
+  if(hr)hr.style.strokeDashoffset=(2*Math.PI*47)*(1-Math.min(100,soc0)/100);
+  setBar('totalPV_bar',(totalPV/PV_MAX)*100,totalPV>50);
+  pushSpark(totalPV);
+  document.getElementById('sunmark').classList.toggle('spin',totalPV>50);
+
+  setNum('totalAC_value',totalAC);
+  setNum('totalCharge_value',totalCharge);
+  setBar('totalAC_bar',(totalAC/AC_MAX)*100,totalAC>50);
+
+  setNum('acPower1_value',p1); setNum('acCurrent1_value',+data.acCurrent1||0,1);
+  setNum('acPower2_value',p2); setNum('acCurrent2_value',+data.acCurrent2||0,1);
+  setNum('chargePower1_value',+data.chargePower1||0);
+  setNum('chargePower2_value',+data.chargePower2||0);
+
+  const soc=+data.batterySOC||0;
+  setNum('batterySOC_value',soc);
+  setNum('batteryVoltage_value',+data.batteryVoltage||0,1);
+  const C=2*Math.PI*47;
+  document.getElementById('socRing').style.strokeDashoffset=C*(1-Math.min(100,soc)/100);
+
+  setNum('mppt80PVPower_value',mp); setNum('mppt80PVVoltage_value',+data.mppt80PVVoltage||0,1);
+  setNum('southArrayPVPower_value',sp); setNum('southArrayPVVoltage_value',+data.southArrayPVVoltage||0,1);
+  setNum('westArrayPVPower_value',wp); setNum('westArrayPVVoltage_value',+data.westArrayPVVoltage||0,1);
+  setBar('mppt80_bar',(mp/CAPS.mppt80)*100,mp>20);
+  setBar('south_bar',(sp/CAPS.south)*100,sp>20);
+  setBar('west_bar',(wp/CAPS.west)*100,wp>20);
   document.getElementById('mppt80ChargeStatus_value').textContent=chargeStatusMap[data.mppt80ChargeStatus]||'Unknown';
-  document.getElementById('southArrayPVPower_value').textContent=data.southArrayPVPower||0;
   document.getElementById('southArrayChargeStatus_value').textContent=chargeStatusMap[data.southArrayChargeStatus]||'Unknown';
-  document.getElementById('westArrayPVPower_value').textContent=data.westArrayPVPower||0;
   document.getElementById('westArrayChargeStatus_value').textContent=chargeStatusMap[data.westArrayChargeStatus]||'Unknown';
-  document.getElementById('mep803aMode_value').textContent=genModeMap[data.mep803aMode]||'Unknown';
-  document.getElementById('kubotaMode_value').textContent=genModeMap[data.kubotaMode]||'Unknown';
-  document.getElementById('mepChargeRateLive_value').textContent=data.mepChargeRateLive||0;
-  document.getElementById('kubotaChargeRateLive_value').textContent=data.kubotaChargeRateLive||0;
-  document.getElementById('lastUpdate_value').textContent=data.lastUpdate||'--:--:--';
-  const errors=data.pollErrors||0;
+
+  /* generators */
+  const mepMode=+data.mep803aMode||0, kubMode=+data.kubotaMode||0;
+  const mepAct=(data.mep803aAction===undefined)?255:+data.mep803aAction;
+  const kubAct=(data.kubotaAction===undefined)?255:+data.kubotaAction;
+  const mepRate=+data.mepChargeRateLive||0, kubRate=+data.kubotaChargeRateLive||0;
+  document.getElementById('mep803aMode_value').textContent=genModeMap[mepMode]||'Unknown';
+  document.getElementById('kubotaMode_value').textContent=genModeMap[kubMode]||'Unknown';
+  setNum('mepChargeRateLive_value',mepRate);
+  setNum('kubotaChargeRateLive_value',kubRate);
+  /* fill shows the configured rate; shimmer and full opacity only when the
+     AGS reports the generator actually turning */
+  setBar('mepRate_bar',mepRate,mepAct===9);
+  setBar('kubRate_bar',kubRate,kubAct===9);
+  chipFor('mep_chip',mepMode,mepAct);
+  chipFor('kub_chip',kubMode,kubAct);
+  hudChip('hud_mep','MEP',mepMode,mepAct);
+  hudChip('hud_kub','KUB',kubMode,kubAct);
+  document.getElementById('mep_action').textContent=genActionMap[mepAct]||'Unknown';
+  document.getElementById('kub_action').textContent=genActionMap[kubAct]||'Unknown';
+
+  agsFor('mep_ags_status',data.mepAgsOnline);
+  agsFor('kubota_ags_status',data.kubotaAgsOnline);
+
+  /* status */
+  const errors=+data.pollErrors||0;
   document.getElementById('pollErrors_value').textContent=errors;
-  document.getElementById('status_indicator').className=errors>0?'status-indicator status-error':'status-indicator status-ok';
-  const mepAgs=document.getElementById('mep_ags_status');
-  const kubAgs=document.getElementById('kubota_ags_status');
-  if(data.mepAgsOnline){mepAgs.textContent='AGS: Online';mepAgs.className='ags-status ags-online';}
-  else{mepAgs.textContent='AGS: OFFLINE ⚠️';mepAgs.className='ags-status ags-offline';}
-  if(data.kubotaAgsOnline){kubAgs.textContent='AGS: Online';kubAgs.className='ags-status ags-online';}
-  else{kubAgs.textContent='AGS: OFFLINE ⚠️';kubAgs.className='ags-status ags-offline';}
+  document.getElementById('lastUpdate_value').textContent=data.clockTime||data.lastUpdate||'--:--:--';
+  const up=document.getElementById('uptime_value');
+  if(up)up.textContent=data.lastUpdate||'--:--:--';
+  const dot=document.getElementById('liveDot');
+  if(errors>0){dot.className='dot err';}
+  else{dot.className='dot';void dot.offsetWidth;dot.classList.add('beat');}
   const banner=document.getElementById('errorBanner');
-  if(errors>0){banner.style.display='block';banner.textContent='⚠️ '+errors+' Modbus poll error(s) detected';}
+  if(errors>0){banner.style.display='flex';banner.textContent='\\u26a0\\ufe0f '+errors+' Modbus read error(s) in last poll cycle';}
   else{banner.style.display='none';}
+  if(window.Site3D&&Site3D.isReady())Site3D.update(data);
+}
+
+/* Driven by the AGS Auto Generator Action register, not by charge rate:
+   charge rate rests at its configured maximum (100% MEP / 70% Kubota) at all
+   times, so it says nothing about whether the generator is turning. */
+function hudChip(id,tag,mode,action){
+  const el=document.getElementById(id);
+  if(!el)return;
+  let cls='off', txt=tag+' idle';
+  if(action===9){cls='run';txt=tag+' running';}
+  else if(ACT_STARTING.indexOf(action)>=0){cls='run';txt=tag+' '+genActionMap[action];}
+  else if(ACT_STOPPING.indexOf(action)>=0){cls='warn';txt=tag+' '+genActionMap[action];}
+  else if(mode===2){cls='ok';txt=tag+' auto';}
+  else if(mode===0){txt=tag+' off';}
+  el.className='chip '+cls;
+  el.textContent=txt;
+}
+function chipFor(id,mode,action){
+  const el=document.getElementById(id);
+  if(action===9){el.className='chip run';el.innerHTML="<span class='dot'></span>Running";}
+  else if(ACT_STARTING.indexOf(action)>=0){
+    el.className='chip run';el.innerHTML="<span class='dot'></span>"+genActionMap[action];}
+  else if(ACT_STOPPING.indexOf(action)>=0){
+    el.className='chip warn';el.innerHTML="<span class='dot'></span>"+genActionMap[action];}
+  else if(mode===2){el.className='chip ok';el.textContent='Auto \u00b7 stopped';}
+  else if(mode===0){el.className='chip off';el.textContent='Off';}
+  else{el.className='chip off';el.textContent=genModeMap[mode]||'Idle';}
+}
+function agsFor(id,online){
+  const el=document.getElementById(id);
+  if(online){el.textContent='AGS online';el.style.color='var(--good)';}
+  else{el.textContent='AGS OFFLINE';el.style.color='var(--bad)';el.style.fontWeight='700';}
 }
 
 function updateConfigUI(cfg){
   if(!cfg)return;
   currentConfig=cfg;
   const enabled=cfg.autoGenEnabled===true;
-  document.getElementById('autoGenStatus').textContent=enabled?'ENABLED':'DISABLED';
-  document.getElementById('autoGenStatus').style.color=enabled?'#27ae60':'#c0392b';
+  const st=document.getElementById('autoGenStatus');
+  st.textContent=enabled?'ENABLED':'DISABLED';
+  st.style.color=enabled?'var(--good)':'var(--bad)';
   const btn=document.getElementById('autoGenToggle');
   btn.textContent=enabled?'DISABLE':'ENABLE';
-  btn.className=enabled?'toggle-btn enabled':'toggle-btn disabled';
+  btn.className=enabled?'btn g':'btn d';
   if(cfg.mep803a){
-    document.getElementById('mepStartV').value=cfg.mep803a.startVoltage||51.5;
-    document.getElementById('mepStopV').value=cfg.mep803a.stopVoltage||55.0;
-    document.getElementById('mepChargeRate').value=cfg.mep803a.chargeRate||100;
-    document.getElementById('mepMaxRuntime').value=cfg.mep803a.maxRuntime||120;
-    document.getElementById('mepCooldown').value=cfg.mep803a.cooldown||5;
+    setIf('mepStartV',cfg.mep803a.startVoltage,51.5);
+    setIf('mepStopV',cfg.mep803a.stopVoltage,55.0);
+    setIf('mepChargeRate',cfg.mep803a.chargeRate,100);
+    setIf('mepMaxRuntime',cfg.mep803a.maxRuntime,120);
+    setIf('mepCooldown',cfg.mep803a.cooldown,5);
   }
   if(cfg.kubota){
-    document.getElementById('kubStartV').value=cfg.kubota.startVoltage||52.3;
-    document.getElementById('kubStopV').value=cfg.kubota.stopVoltage||55.0;
-    document.getElementById('kubChargeRate').value=cfg.kubota.chargeRate||70;
-    document.getElementById('kubMaxRuntime').value=cfg.kubota.maxRuntime||120;
-    document.getElementById('kubCooldown').value=cfg.kubota.cooldown||5;
+    setIf('kubStartV',cfg.kubota.startVoltage,52.3);
+    setIf('kubStopV',cfg.kubota.stopVoltage,55.0);
+    setIf('kubChargeRate',cfg.kubota.chargeRate,70);
+    setIf('kubMaxRuntime',cfg.kubota.maxRuntime,120);
+    setIf('kubCooldown',cfg.kubota.cooldown,5);
   }
   if(cfg.rampDown){
-    document.getElementById('rampStepDelay').value=cfg.rampDown.stepDelay||15;
-    document.getElementById('rampZeroHold').value=cfg.rampDown.zeroHoldTime||120;
+    setIf('rampStepDelay',cfg.rampDown.stepDelay,15);
+    setIf('rampZeroHold',cfg.rampDown.zeroHoldTime,120);
   }
   if(cfg.telegram){
     const tgOn=cfg.telegram.enabled===true;
-    document.getElementById('telegramStatus').textContent=tgOn?'ON':'OFF';
-    document.getElementById('telegramStatus').style.color=tgOn?'#27ae60':'#c0392b';
-    const tgBtn=document.getElementById('telegramToggle');
-    tgBtn.textContent=tgOn?'DISABLE':'ENABLE';
-    tgBtn.className=tgOn?'toggle-btn enabled':'toggle-btn disabled';
-    document.getElementById('tgToken').value=cfg.telegram.token||'';
-    document.getElementById('tgChatId').value=cfg.telegram.chatId||'';
+    const ts=document.getElementById('telegramStatus');
+    ts.textContent=tgOn?'ON':'OFF';
+    ts.style.color=tgOn?'var(--good)':'var(--bad)';
+    const tb=document.getElementById('telegramToggle');
+    tb.textContent=tgOn?'DISABLE':'ENABLE';
+    tb.className=tgOn?'btn g sm':'btn d sm';
+    setIf('tgToken',cfg.telegram.token,'');
+    setIf('tgChatId',cfg.telegram.chatId,'');
   }
+}
+/* don't clobber a field the user is typing in */
+function setIf(id,val,dflt){
+  const el=document.getElementById(id);
+  if(!el||el===document.activeElement)return;
+  el.value=(val===undefined||val===null)?dflt:val;
 }
 
 function updateEventLog(events){
   const log=document.getElementById('eventLog');
-  if(!events||events.length===0){log.innerHTML='<span class="ev-info">No events yet...</span>';return;}
+  if(!events||events.length===0){log.innerHTML="<div class='e-info'>No events yet...</div>";return;}
   log.innerHTML=events.slice().reverse().map(e=>{
-    let cls='ev-info';
-    if(e.includes('⚠️')||e.includes('FAILED')||e.includes('OFFLINE')||e.toLowerCase().includes('error'))cls='ev-error';
-    else if(e.includes('✅')||e.includes('started')||e.includes('ONLINE')||e.includes('restored'))cls='ev-ok';
-    return '<div class="'+cls+'">'+e+'</div>';
+    let cls='e-info';
+    const low=e.toLowerCase();
+    if(e.indexOf('\\u26a0')>=0||low.indexOf('failed')>=0||low.indexOf('offline')>=0||low.indexOf('error')>=0)cls='e-err';
+    else if(e.indexOf('\\u2705')>=0||low.indexOf('started')>=0||low.indexOf('online')>=0||low.indexOf('restored')>=0)cls='e-ok';
+    else if(low.indexOf('warn')>=0||low.indexOf('ramp')>=0)cls='e-warn';
+    const div=document.createElement('div');
+    div.className=cls; div.textContent=e;
+    return div.outerHTML;
   }).join('');
 }
 
-/* ── V2.4 AC Diagnostic JS ────────────────────────────── */
+/* ---- AC diagnostic (ported from V2.4) ---- */
 function fmtV(v){return v!=null?v.toFixed(3)+'V':'--';}
 function fmtHz(v){return v!=null?v.toFixed(2)+'Hz':'--';}
 function fmtW(v){return v!=null?v+'W':'--';}
@@ -1269,7 +1776,7 @@ function diagAddRows(readings){
 
 async function diagSnapshot(){
   const st=document.getElementById('diag_status');
-  st.textContent='Reading...';st.className='diag-status running';
+  st.textContent='Reading...';st.className='dstat running';
   try{
     const r=await fetch('/acdiag');
     if(!r.ok)throw new Error('HTTP '+r.status);
@@ -1277,15 +1784,15 @@ async function diagSnapshot(){
     diagUpdateCards(d);
     diagAddRows([d]);
     st.textContent='Snapshot complete at '+d.timestamp.substring(11,19);
-    st.className='diag-status done';
+    st.className='dstat done';
   }catch(e){
-    st.textContent='Error: '+e;st.className='diag-status error';
+    st.textContent='Error: '+e;st.className='dstat error';
   }
 }
 
 async function diagStream(){
   const st=document.getElementById('diag_status');
-  st.textContent='Capturing 20 readings over 10 seconds...';st.className='diag-status running';
+  st.textContent='Capturing 20 readings over 10 seconds...';st.className='dstat running';
   try{
     const r=await fetch('/acdiag/stream?n=20&interval=500');
     if(!r.ok)throw new Error('HTTP '+r.status);
@@ -1295,15 +1802,15 @@ async function diagStream(){
       diagAddRows(readings);
     }
     st.textContent='Stream capture complete — '+readings.length+' readings saved to log.';
-    st.className='diag-status done';
+    st.className='dstat done';
   }catch(e){
-    st.textContent='Error: '+e;st.className='diag-status error';
+    st.textContent='Error: '+e;st.className='dstat error';
   }
 }
 
 async function diagLoadLog(){
   const st=document.getElementById('diag_status');
-  st.textContent='Loading log...';st.className='diag-status running';
+  st.textContent='Loading log...';st.className='dstat running';
   try{
     const r=await fetch('/acdiag/log?n=50');
     if(!r.ok)throw new Error('HTTP '+r.status);
@@ -1311,15 +1818,15 @@ async function diagLoadLog(){
     const tbody=document.getElementById('diag_log_body');
     tbody.innerHTML='';
     if(entries.length===0){
-      tbody.innerHTML='<tr><td colspan="9" style="text-align:center;color:#7f8c8d;">No log entries</td></tr>';
+      tbody.innerHTML='<tr><td colspan="9" style="text-align:center;color:#5f6f83;">No log entries</td></tr>';
     }else{
       diagAddRows(entries);
       document.getElementById('diag_log_count').textContent='Log: '+entries.length+' entries shown';
     }
     st.textContent='Log loaded — '+entries.length+' entries.';
-    st.className='diag-status done';
+    st.className='dstat done';
   }catch(e){
-    st.textContent='Error: '+e;st.className='diag-status error';
+    st.textContent='Error: '+e;st.className='dstat error';
   }
 }
 
@@ -1329,14 +1836,13 @@ async function diagClearLog(){
   try{
     await fetch('/acdiag/log/clear');
     document.getElementById('diag_log_body').innerHTML=
-      '<tr><td colspan="9" style="text-align:center;color:#7f8c8d;">Log cleared</td></tr>';
+      '<tr><td colspan="9" style="text-align:center;color:#5f6f83;">Log cleared</td></tr>';
     document.getElementById('diag_log_count').textContent='Log: 0 entries';
-    st.textContent='Log cleared.';st.className='diag-status done';
+    st.textContent='Log cleared.';st.className='dstat done';
   }catch(e){
-    st.textContent='Error: '+e;st.className='diag-status error';
+    st.textContent='Error: '+e;st.className='dstat error';
   }
 }
-/* ── End V2.4 AC Diagnostic JS ───────────────────────── */
 
 async function fetchData(){
   try{const r=await fetch('/data');if(r.ok)updateUI(await r.json());}
@@ -1349,46 +1855,796 @@ async function fetchConfig(){
   }catch(e){console.error('fetchConfig:',e);}
 }
 async function toggleAutoGen(){
-  if(!currentConfig){alert('Config not loaded');return;}
+  if(!currentConfig){toast('Config not loaded yet','bad');return;}
   const r=await fetch('/config?autoGenEnabled='+(currentConfig.autoGenEnabled?'0':'1'));
-  if(r.ok)fetchConfig();
+  if(r.ok){toast('Auto control '+(currentConfig.autoGenEnabled?'disabled':'enabled'),'ok');fetchConfig();}
+  else toast('Toggle failed','bad');
 }
 async function toggleTelegram(){
-  if(!currentConfig){alert('Config not loaded');return;}
+  if(!currentConfig){toast('Config not loaded yet','bad');return;}
   const r=await fetch('/config?tg.enabled='+(currentConfig.telegram.enabled?'0':'1'));
-  if(r.ok)fetchConfig();
+  if(r.ok){toast('Telegram alerts updated','ok');fetchConfig();}
+  else toast('Toggle failed','bad');
 }
-async function saveMepSettings(){
-  const p=new URLSearchParams({'mep.startVoltage':document.getElementById('mepStartV').value,'mep.stopVoltage':document.getElementById('mepStopV').value,'mep.chargeRate':document.getElementById('mepChargeRate').value,'mep.maxRuntime':document.getElementById('mepMaxRuntime').value,'mep.cooldown':document.getElementById('mepCooldown').value});
-  const r=await fetch('/config?'+p);if(r.ok){alert('MEP settings saved!');fetchConfig();}else alert('Failed');
+async function saveGroup(params,label){
+  const r=await fetch('/config?'+new URLSearchParams(params));
+  if(r.ok){toast(label+' saved','ok');fetchConfig();}else toast(label+' save failed','bad');
 }
-async function saveKubSettings(){
-  const p=new URLSearchParams({'kub.startVoltage':document.getElementById('kubStartV').value,'kub.stopVoltage':document.getElementById('kubStopV').value,'kub.chargeRate':document.getElementById('kubChargeRate').value,'kub.maxRuntime':document.getElementById('kubMaxRuntime').value,'kub.cooldown':document.getElementById('kubCooldown').value});
-  const r=await fetch('/config?'+p);if(r.ok){alert('Kubota settings saved!');fetchConfig();}else alert('Failed');
-}
-async function saveRampSettings(){
-  const p=new URLSearchParams({'ramp.stepDelay':document.getElementById('rampStepDelay').value,'ramp.zeroHoldTime':document.getElementById('rampZeroHold').value});
-  const r=await fetch('/config?'+p);if(r.ok){alert('Ramp settings saved!');fetchConfig();}else alert('Failed');
-}
-async function saveTelegramSettings(){
-  const p=new URLSearchParams({'tg.token':document.getElementById('tgToken').value,'tg.chatId':document.getElementById('tgChatId').value});
-  const r=await fetch('/config?'+p);if(r.ok){alert('Telegram settings saved!');fetchConfig();}else alert('Failed');
-}
+function gv(id){return document.getElementById(id).value;}
+function saveMepSettings(){saveGroup({'mep.startVoltage':gv('mepStartV'),'mep.stopVoltage':gv('mepStopV'),'mep.chargeRate':gv('mepChargeRate'),'mep.maxRuntime':gv('mepMaxRuntime'),'mep.cooldown':gv('mepCooldown')},'MEP settings');}
+function saveKubSettings(){saveGroup({'kub.startVoltage':gv('kubStartV'),'kub.stopVoltage':gv('kubStopV'),'kub.chargeRate':gv('kubChargeRate'),'kub.maxRuntime':gv('kubMaxRuntime'),'kub.cooldown':gv('kubCooldown')},'Kubota settings');}
+function saveRampSettings(){saveGroup({'ramp.stepDelay':gv('rampStepDelay'),'ramp.zeroHoldTime':gv('rampZeroHold')},'Ramp settings');}
+function saveTelegramSettings(){saveGroup({'tg.token':gv('tgToken'),'tg.chatId':gv('tgChatId')},'Telegram settings');}
 async function testTelegram(){
-  const r=await fetch('/testtelegram');const d=await r.json();
-  alert(d.success?'✅ '+d.message:'❌ '+d.message);
+  toast('Sending test message...');
+  try{const r=await fetch('/testtelegram');const d=await r.json();toast(d.message,d.success?'ok':'bad');}
+  catch(e){toast('Test failed: '+e,'bad');}
 }
 function setGeneratorMode(slaveId,mode){
   const modeText={0:'OFF',1:'ON',2:'AUTO'}[mode]||'Unknown';
   if(!confirm('Set generator to '+modeText+'?'))return;
   const endpoint=(mode==0)?'/stopgen?id='+slaveId:'/setgen?id='+slaveId+'&state='+mode;
-  fetch(endpoint).then(r=>{if(!r.ok)alert('Command failed');setTimeout(fetchData,1000);}).catch(e=>alert('Error: '+e));
+  fetch(endpoint).then(r=>{
+    toast(r.ok?'Command sent: '+modeText:'Command failed',r.ok?'ok':'bad');
+    setTimeout(fetchData,1000);
+  }).catch(e=>toast('Error: '+e,'bad'));
 }
-document.addEventListener('DOMContentLoaded',()=>{
-  fetchData();fetchConfig();
-  setInterval(fetchData,5000);
-  setInterval(fetchConfig,15000);
+
+/* pause polling when tab hidden, resume immediately on return */
+let dataTimer,cfgTimer;
+function startPolling(){
+  clearInterval(dataTimer);clearInterval(cfgTimer);
+  dataTimer=setInterval(fetchData,5000);
+  cfgTimer=setInterval(fetchConfig,15000);
+}
+document.addEventListener('visibilitychange',()=>{
+  if(document.hidden){clearInterval(dataTimer);clearInterval(cfgTimer);}
+  if(document.hidden&&window.Site3D)Site3D.stop();
+  else if(s3dOn&&window.Site3D&&Site3D.isReady())Site3D.start();
+  else{fetchData();fetchConfig();startPolling();}
 });
+document.addEventListener('DOMContentLoaded',()=>{
+  document.getElementById('capKw_value').textContent=(CAPS.total/1000).toFixed(1);
+  fetchData();fetchConfig();startPolling();
+});
+/* ---- sun position scrubber ---- */
+let sunTimer=null;
+function fmtSun(){
+  if(!window.Site3D||!Site3D.isReady())return;
+  const s=Site3D.sunInfo();
+  const el=document.getElementById('sunLabel');
+  const pad=n=>String(n).padStart(2,'0');
+  let t;
+  if(s.override===null){
+    const d=new Date();
+    t=pad(d.getHours())+':'+pad(d.getMinutes())+' live';
+  }else{
+    t=pad(Math.floor(s.override))+':'+pad(Math.round((s.override%1)*60));
+  }
+  el.textContent=t+'  \u00b7  '+s.elevation.toFixed(0)+'\u00b0 el  '
+    +s.azimuth.toFixed(0)+'\u00b0 az'+(s.night?'  (night)':'');
+}
+function onSunTime(v){
+  if(!window.Site3D)return;
+  Site3D.setTime(parseFloat(v));
+  fmtSun();
+}
+function sunNow(){
+  if(!window.Site3D)return;
+  Site3D.setTime(null);
+  const d=new Date();
+  document.getElementById('sunTime').value=(d.getHours()+d.getMinutes()/60).toFixed(2);
+  fmtSun();
+}
+
+function toggleShadows(){
+  if(!window.Site3D||!Site3D.isReady())return;
+  const on=!Site3D.shadowsOn();
+  Site3D.setShadows(on);
+  document.getElementById('shadowBtn').textContent=on?'Shadows':'Shadows off';
+}
+function resetView(){ if(window.Site3D&&Site3D.isReady())Site3D.resetView(); }
+
+/* ---- 3D lazy loader + lifecycle ---- */
+let s3dLoaded=false,s3dOn=false,s3dObs=null;
+function libSrc(list,done,fail){
+  if(!list.length){fail();return;}
+  const s=document.createElement('script');
+  s.src=list[0];
+  s.onload=done;
+  s.onerror=()=>libSrc(list.slice(1),done,fail);
+  document.head.appendChild(s);
+}
+function toggle3D(){
+  const card=document.getElementById('stage3dCard');
+  const btn=document.getElementById('toggle3d');
+  s3dOn=!s3dOn;
+  try{localStorage.setItem('solar3d',s3dOn?'1':'0');}catch(e){}
+  const canvasHost=document.getElementById('stage3d');
+  if(!s3dOn){
+    if(canvasHost)canvasHost.style.display='none';
+    btn.textContent='3D on';
+    if(sunTimer){clearInterval(sunTimer);sunTimer=null;}
+    if(window.Site3D)Site3D.stop();
+    return;
+  }
+  if(canvasHost)canvasHost.style.display='block';
+  btn.textContent='3D off';
+  if(s3dLoaded){boot3D();return;}
+  libSrc(['/vendor/three.min.js',
+          'https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js'],
+    ()=>{s3dLoaded=true;boot3D();},
+    ()=>{document.getElementById('stage3dMsg').textContent=
+      'Renderer unavailable - no local copy and no internet route.';});
+}
+function boot3D(){
+  const msg=document.getElementById('stage3dMsg');
+  msg.style.display='block';
+  if(typeof Site3D==='undefined'){
+    msg.textContent=['Scene module failed to initialise.',
+      'Check the console for an error thrown while the page loaded.'].join(NL);
+    return;
+  }
+  if(typeof THREE==='undefined'){
+    msg.textContent='three.js did not load (THREE is undefined).';return;
+  }
+  const rev=parseInt(THREE.REVISION,10);
+  if(!(rev>=125)){
+    msg.textContent=['three.js r'+THREE.REVISION+' is too old.',
+      'This scene needs r125 or newer (Matrix4.invert, Float32BufferAttribute).',
+      'Re-vendor with: curl -o vendor/three.min.js '
+        +'https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js'].join(NL);
+    return;
+  }
+  let gl=null;
+  try{ gl=document.createElement('canvas').getContext('webgl2')
+          ||document.createElement('canvas').getContext('webgl'); }catch(e){}
+  if(!gl){ msg.textContent='No WebGL context available in this browser.'; return; }
+  try{
+    if(!Site3D.isReady())Site3D.init(document.getElementById('stage3d'));
+    msg.style.display='none';
+    sunNow();
+    if(!sunTimer)sunTimer=setInterval(fmtSun,20000);
+    Site3D.start();
+    if(!s3dObs&&'IntersectionObserver' in window){
+      s3dObs=new IntersectionObserver(es=>{
+        if(!s3dOn)return;
+        es[0].isIntersecting?Site3D.start():Site3D.stop();
+      },{threshold:0.05});
+      s3dObs.observe(document.getElementById('stage3dCard'));
+    }
+  }catch(e){
+    const frames=(e.stack||'').split(NL).slice(1,3).join(NL).trim();
+    msg.style.display='block';
+    msg.textContent=['Renderer failed','',
+      (e.name||'Error')+': '+e.message,'',
+      'three.js r'+THREE.REVISION,
+      frames||'(no stack)','',
+      'Full stack is in the browser console.'].join(NL);
+    console.error('[Site3D] init failed',e);
+  }
+}
+
+/* restore last choice */
+document.addEventListener('DOMContentLoaded',()=>{
+  let want='1'; try{want=localStorage.getItem('solar3d')||'1';}catch(e){}
+  if(want==='1')toggle3D();
+});
+</script>
+
+<script>
+/* ===== 3D SITE MODEL =======================================================
+   Geometry derives from HOUSE / TERRACE / GEN / SITE. Correct a number there
+   and the model, the power ceilings and the flow paths all follow.
+
+   north = -Z, east = +X, up = +Y, metres.
+   azimuth = degrees clockwise from north (180 south, 270 west)
+
+   NOTE: nothing in this module may construct a THREE object at parse time.
+   three.js is loaded on demand, long after these scripts run.
+========================================================================== */
+var Site3D=(function(){
+  var R,S,CAM,W,H,host,root,raf=null,running=false,ready=false;
+  var M={},panelMats={mppt80:[],south:[],west:[]},caps3={mppt80:0,south:0,west:0};
+  var sun,sunMesh,hemi,battModules=[],invM,invS,genMep,genKub;
+  var ctrl={},flows=[],pts,ptGeo,ptPos,ptCol;
+  var last=0,tPrev=0,FRAME=1000/30,timeOverride=null,shadowsOn=true;
+  var live={mppt80:0,south:0,west:0,soc:0,acM:0,acS:0,gMep:0,gKub:0};
+  var yaw=-0.7,pitch=0.44,dist=52,target=null,fitR=26,drag=false,lx=0,ly=0;
+  var D=Math.PI/180;
+  var C={solar:0xffb020,batt:0x3ddc97,ac:0x4cc9f0,gen:0xc084fc,
+         panel:0x0e1a30,panelHot:0x2b4266,frame:0xb9c2cc,
+         wall:0x9a9ea4,trim:0xe9e6df,roof:0xc9d1d8,post:0x6b3f2a,
+         steel:0x5a3a2b,deck:0x9c8a6f,ground:0x8a7355,scrub:0x4a5535,
+         box:0xe6e9ec,dark:0x2b3644,red:0x8e4130};
+
+  /* ---------- textures, failing soft ---------- */
+  function cv(w,h){var c=document.createElement('canvas');c.width=w;c.height=h;return c;}
+  function tex(fn,rx,ry){
+    try{
+      var c=fn(); if(!c)return null;
+      var t=new THREE.CanvasTexture(c);
+      t.wrapS=t.wrapT=THREE.RepeatWrapping;
+      t.repeat.set(rx||1,ry||1);
+      return t;
+    }catch(e){return null;}
+  }
+  function corrugated(){
+    var c=cv(64,8),g=c.getContext('2d'); if(!g)return null;
+    for(var x=0;x<64;x++){
+      var v=0.62+0.38*Math.abs(Math.sin(x/64*Math.PI*8));
+      g.fillStyle='rgb('+(v*196|0)+','+(v*205|0)+','+(v*212|0)+')';
+      g.fillRect(x,0,1,8);
+    }
+    return c;
+  }
+  function panelFace(){
+    var c=cv(96,144),g=c.getContext('2d'); if(!g)return null;
+    g.fillStyle='#0e1a30'; g.fillRect(0,0,96,144);
+    for(var i=0;i<6;i++)for(var j=0;j<9;j++){
+      g.fillStyle='rgba(26,52,96,1)';
+      g.fillRect(i*16+2,j*16+2,13,13);
+      g.strokeStyle='rgba(150,180,220,.18)'; g.lineWidth=1;
+      g.beginPath(); g.moveTo(i*16+8,j*16+2); g.lineTo(i*16+8,j*16+15); g.stroke();
+    }
+    g.strokeStyle='rgba(180,200,225,.3)'; g.lineWidth=2; g.strokeRect(1,1,94,142);
+    return c;
+  }
+  function stucco(){
+    var c=cv(96,96),g=c.getContext('2d'); if(!g)return null;
+    g.fillStyle='#9a9ea4'; g.fillRect(0,0,96,96);
+    for(var i=0;i<1400;i++){
+      g.fillStyle='rgba(0,0,0,'+(Math.random()*0.09).toFixed(3)+')';
+      g.fillRect(Math.random()*96|0,Math.random()*96|0,2,2);
+    }
+    return c;
+  }
+  function dirtTex(){
+    var c=cv(128,128),g=c.getContext('2d'); if(!g)return null;
+    g.fillStyle='#8a7355'; g.fillRect(0,0,128,128);
+    for(var i=0;i<2200;i++){
+      var t=Math.random();
+      g.fillStyle='rgba('+(120+t*50|0)+','+(100+t*42|0)+','+(74+t*30|0)+',.5)';
+      g.fillRect(Math.random()*128|0,Math.random()*128|0,3,3);
+    }
+    return c;
+  }
+
+  /* ---------- shared materials: ~12 total, not one per mesh ---------- */
+  function buildMaterials(){
+    var TXc=tex(corrugated,1,18), TXs=tex(stucco,2,2),
+        TXd=tex(dirtTex,18,18), TXp=tex(panelFace,1,1);
+    function sm(o){return new THREE.MeshStandardMaterial(o);}
+    M.wall =sm({color:C.wall,map:TXs,roughness:.92});
+    M.wallD=sm({color:C.wall,map:TXs,roughness:.92,side:THREE.DoubleSide});
+    M.roof =sm({color:C.roof,map:TXc,roughness:.55,metalness:.35});
+    M.roofD=sm({color:C.roof,map:TXc,roughness:.55,metalness:.35,
+                side:THREE.DoubleSide});
+    M.trim =sm({color:C.trim,roughness:.78});
+    M.post =sm({color:C.post,roughness:.7,metalness:.15});
+    M.steel=sm({color:C.steel,roughness:.55,metalness:.45});
+    M.deck =sm({color:C.deck,roughness:.9});
+    M.glass=sm({color:0x1a2733,roughness:.08,metalness:.9});
+    M.frame=sm({color:C.frame,roughness:.4,metalness:.75});
+    M.case =sm({color:C.box,roughness:.42,metalness:.12});
+    M.dark =sm({color:C.dark,roughness:.6,metalness:.3});
+    M.red  =sm({color:C.red,roughness:.88});
+    M.cap  =sm({color:0xc4cbd2,roughness:.7,metalness:.2});
+    M.ground=sm({color:C.ground,map:TXd,roughness:.98});
+    M.scrub=sm({color:C.scrub,roughness:.96});
+    /* one panel material per channel, shared by every panel on it */
+    M.pv={};
+    M.pv.mppt80=sm({color:0xffffff,map:TXp,roughness:.22,metalness:.35});
+    M.pv.south =sm({color:0xffffff,map:TXp,roughness:.22,metalness:.35});
+    M.pv.west  =sm({color:0xffffff,map:TXp,roughness:.22,metalness:.35});
+  }
+
+  /* ---------- primitives ---------- */
+  function box(w,h,d,x,y,z,m,cast,recv){
+    var o=new THREE.Mesh(new THREE.BoxGeometry(w,h,d),m);
+    o.position.set(x,y,z);
+    o.castShadow=cast!==false; o.receiveShadow=recv!==false;
+    root.add(o); return o;
+  }
+  function pyramidRoof(w,d,rise,ridge,x,y){
+    var hw=w/2,hd=d/2,hr=ridge/2,v,f;
+    if(Math.abs(ridge)<0.02){
+      v=[-hw,0,-hd, hw,0,-hd, hw,0,hd, -hw,0,hd, 0,rise,0];
+      f=[0,1,4, 1,2,4, 2,3,4, 3,0,4];
+    }else{
+      v=[-hw,0,-hd, hw,0,-hd, hw,0,hd, -hw,0,hd, -hr,rise,0, hr,rise,0];
+      f=[0,1,5, 0,5,4, 1,2,5, 2,3,4, 2,4,5, 3,0,4];
+    }
+    var pos=[],uv=[];
+    for(var i=0;i<f.length;i++){
+      pos.push(v[f[i]*3],v[f[i]*3+1],v[f[i]*3+2]);
+      uv.push((v[f[i]*3]+hw)/w,(v[f[i]*3+2]+hd)/d);
+    }
+    var g=new THREE.BufferGeometry();
+    g.setAttribute('position',new THREE.Float32BufferAttribute(pos,3));
+    g.setAttribute('uv',new THREE.Float32BufferAttribute(uv,2));
+    g.computeVertexNormals();
+    var o=new THREE.Mesh(g,M.roofD);
+    o.position.set(x,y,0); o.castShadow=true; o.receiveShadow=true;
+    root.add(o);
+    box(w,0.2,d,x,y-0.1,0,M.trim,true,true);
+    return o;
+  }
+  function skirtRing(wi,di,wo,dou,yi,yo){
+    var IN=[[-wi,yi,-di],[wi,yi,-di],[wi,yi,di],[-wi,yi,di]];
+    var OUT=[[-wo,yo,-dou],[wo,yo,-dou],[wo,yo,dou],[-wo,yo,dou]];
+    var pos=[],uv=[];
+    function p(v,u,w2){pos.push(v[0],v[1],v[2]); uv.push(u,w2);}
+    for(var i=0;i<4;i++){
+      var j=(i+1)%4;
+      p(IN[i],0,0); p(IN[j],1,0); p(OUT[j],1,1);
+      p(IN[i],0,0); p(OUT[j],1,1); p(OUT[i],0,1);
+    }
+    var g=new THREE.BufferGeometry();
+    g.setAttribute('position',new THREE.Float32BufferAttribute(pos,3));
+    g.setAttribute('uv',new THREE.Float32BufferAttribute(uv,2));
+    g.computeVertexNormals();
+    var o=new THREE.Mesh(g,M.roofD);
+    o.castShadow=true; o.receiveShadow=true; root.add(o);
+    return o;
+  }
+  function shedBox(w,d,hN,hS,x,z){
+    var hw=w/2,hd=d/2;
+    var v=[[-hw,0,-hd],[hw,0,-hd],[hw,0,hd],[-hw,0,hd],
+           [-hw,hN,-hd],[hw,hN,-hd],[hw,hS,hd],[-hw,hS,hd]];
+    var f=[[0,4,5],[0,5,1],[3,2,6],[3,6,7],[0,3,7],[0,7,4],
+           [1,5,6],[1,6,2],[4,7,6],[4,6,5]];
+    var pos=[],uv=[];
+    for(var i=0;i<f.length;i++)for(var k=0;k<3;k++){
+      var p=v[f[i][k]];
+      pos.push(p[0],p[1],p[2]); uv.push((p[0]+hw)/w,p[1]/Math.max(hN,hS));
+    }
+    var g=new THREE.BufferGeometry();
+    g.setAttribute('position',new THREE.Float32BufferAttribute(pos,3));
+    g.setAttribute('uv',new THREE.Float32BufferAttribute(uv,2));
+    g.computeVertexNormals();
+    var o=new THREE.Mesh(g,M.wallD);
+    o.position.set(x,0,z); o.castShadow=true; o.receiveShadow=true;
+    root.add(o); return o;
+  }
+  function pane(w,h,x,y,z,rotY){
+    var f=box(w+0.14,h+0.14,0.08,x,y,z,M.trim,false,true);
+    f.rotation.y=rotY||0;
+    var p=new THREE.Mesh(new THREE.PlaneGeometry(w,h),M.glass);
+    p.position.set(x,y,z); p.rotation.y=rotY||0; p.translateZ(0.05);
+    root.add(p);
+  }
+
+  /* ---------- panels ---------- */
+  function panelCluster(cfg){
+    var outer=new THREE.Group();
+    outer.rotation.y=-cfg.azimuth*D;
+    var inner=new THREE.Group();
+    inner.rotation.x=-cfg.tilt*D;
+    outer.add(inner);
+    var pw=1.65,ph=0.99,gap=0.045;
+    var faceGeo=new THREE.PlaneGeometry(pw-0.07,ph-0.07);
+    var frGeo=new THREE.BoxGeometry(pw,0.055,ph);
+    var pm=M.pv[cfg.channel];
+    var n=0,spanW=0,spanD=0;
+    function put(px,pz){
+      var fr=new THREE.Mesh(frGeo,M.frame);
+      fr.position.set(px,0,pz); fr.castShadow=true; fr.receiveShadow=true;
+      inner.add(fr);
+      var fc=new THREE.Mesh(faceGeo,pm);
+      fc.rotation.x=-Math.PI/2; fc.position.set(px,0.032,pz);
+      inner.add(fc); n++;
+    }
+    if(cfg.pyramid){
+      var rows=cfg.pyramid,nr=rows.length;
+      for(var r=0;r<nr;r++){
+        var nc=rows[r], pz=(r-(nr-1)/2)*(ph+gap);
+        for(var i=0;i<nc;i++) put((i-(nc-1)/2)*(pw+gap),pz);
+        spanW=Math.max(spanW,nc*(pw+gap));
+      }
+      spanD=nr*(ph+gap);
+    }else{
+      for(var ci=0;ci<cfg.cols;ci++)for(var rj=0;rj<cfg.rows;rj++)
+        put((ci-(cfg.cols-1)/2)*(pw+gap),(rj-(cfg.rows-1)/2)*(ph+gap));
+      spanW=cfg.cols*(pw+gap); spanD=cfg.rows*(ph+gap);
+    }
+    if(cfg.mount==='ground'){
+      for(var s=-1;s<=1;s+=2){
+        var rail=new THREE.Mesh(new THREE.BoxGeometry(spanW,0.08,0.08),M.frame);
+        rail.position.set(0,-0.09,s*spanD*0.3); rail.castShadow=true;
+        inner.add(rail);
+        var leg=new THREE.Mesh(new THREE.BoxGeometry(0.13,cfg.pos[1]*2,0.13),M.frame);
+        leg.position.set(s*spanW*0.42,-cfg.pos[1],0.2); leg.castShadow=true;
+        inner.add(leg);
+      }
+    }
+    outer.position.set(cfg.pos[0],cfg.pos[1],cfg.pos[2]);
+    root.add(outer);
+    cfg.count=n;
+    caps3[cfg.channel]+=n*SITE.wattsPerPanel;
+  }
+
+  /* ---------- energy flows ---------- */
+  function flow(pts2,color,chan){
+    flows.push({curve:new THREE.CatmullRomCurve3(pts2.map(function(p){
+      return new THREE.Vector3(p[0],p[1],p[2]);})),
+      color:new THREE.Color(color),chan:chan,n:10});
+  }
+  function buildFlows(){
+    var bus=[-1.15,2.4,-4.71];
+    for(var i=0;i<SITE.clusters.length;i++){
+      var cl=SITE.clusters[i], cp=ctrl[cl.channel];
+      flow([[cl.pos[0],cl.pos[1]+1.0,cl.pos[2]],
+            [(cl.pos[0]+cp[0])/2,Math.max(cl.pos[1],cp[1])+1.4,(cl.pos[2]+cp[2])/2],
+            cp],C.solar,cl.channel);
+    }
+    flow([ctrl.mppt80,[-2.4,3.2,-1.0],bus],C.batt,'mppt80');
+    flow([ctrl.west,  [-1.8,3.1,-1.0],bus],C.batt,'west');
+    flow([ctrl.south, [-1.2,3.1,-1.0],bus],C.batt,'south');
+    flow([bus,[0.0,3.0,0.5],[0.5,2.6,3.83]],C.batt,'dcM');
+    flow([bus,[0.8,3.0,0.5],[1.3,2.6,3.83]],C.batt,'dcS');
+    flow([[GEN.cx-1.6,1.7,GEN.cz-0.6],[0.5,3.2,8.0],[0.5,2.6,3.9]],C.gen,'gMep');
+    flow([[GEN.cx+2.0,1.5,GEN.cz-0.6],[1.6,3.0,8.0],[1.3,2.6,3.9]],C.gen,'gKub');
+    var total=0,i2;
+    for(i2=0;i2<flows.length;i2++)total+=flows[i2].n;
+    ptPos=new Float32Array(total*3); ptCol=new Float32Array(total*3);
+    ptGeo=new THREE.BufferGeometry();
+    ptGeo.setAttribute('position',new THREE.BufferAttribute(ptPos,3));
+    ptGeo.setAttribute('color',new THREE.BufferAttribute(ptCol,3));
+    pts=new THREE.Points(ptGeo,new THREE.PointsMaterial({size:0.42,
+      vertexColors:true,transparent:true,opacity:.95}));
+    root.add(pts);
+    var o=0;
+    for(i2=0;i2<flows.length;i2++){
+      flows[i2].off=o; flows[i2].t=[];
+      for(var j=0;j<flows[i2].n;j++)flows[i2].t.push(j/flows[i2].n);
+      o+=flows[i2].n;
+    }
+  }
+
+  /* ---------- solar position, corrected ---------- */
+  function clockDate(){
+    if(timeOverride===null)return new Date();
+    var d=new Date();
+    d.setHours(Math.floor(timeOverride),Math.round((timeOverride%1)*60),0,0);
+    return d;
+  }
+  function sunPos(date){
+    var start=new Date(date.getFullYear(),0,0);
+    var doy=Math.floor((date-start)/86400000);
+    var utcH=date.getUTCHours()+date.getUTCMinutes()/60+date.getUTCSeconds()/3600;
+    var B=2*Math.PI*(doy-81)/364;
+    var eot=9.87*Math.sin(2*B)-7.53*Math.cos(B)-1.5*Math.sin(B);
+    var solar=utcH+SITE.lon/15+eot/60;
+    var dec=23.45*D*Math.sin(2*Math.PI*(284+doy)/365);
+    var Ha=(solar-12)*15*D, la=SITE.lat*D;
+    var el=Math.asin(Math.sin(la)*Math.sin(dec)+
+           Math.cos(la)*Math.cos(dec)*Math.cos(Ha));
+    var az=Math.atan2(-Math.sin(Ha)*Math.cos(dec),
+           Math.cos(la)*Math.sin(dec)-Math.sin(la)*Math.cos(dec)*Math.cos(Ha));
+    return {el:el,az:(az+2*Math.PI)%(2*Math.PI),eot:eot,
+            solar:((solar%24)+24)%24};
+  }
+
+  /* ---------- build ---------- */
+  function build(){
+    S=new THREE.Scene();
+    S.background=new THREE.Color(0x7ba0c4);
+    S.fog=new THREE.Fog(0x9fb2c4,90,220);
+    buildMaterials();
+    root=new THREE.Group(); root.rotation.y=SITE.bearing*D; S.add(root);
+
+    hemi=new THREE.HemisphereLight(0xbcd6f0,0x6b5a41,0.55); S.add(hemi);
+    sun=new THREE.DirectionalLight(0xfff2d8,2.2);
+    sun.castShadow=true;
+    sun.shadow.mapSize.set(1024,1024);      /* half the standalone's 2048 */
+    var sc=sun.shadow.camera;
+    sc.left=-28; sc.right=28; sc.top=28; sc.bottom=-28; sc.near=1; sc.far=140;
+    sun.shadow.bias=-0.0007; sun.shadow.normalBias=0.02;
+    S.add(sun);
+    sunMesh=new THREE.Mesh(new THREE.SphereGeometry(1.4,14,10),
+      new THREE.MeshBasicMaterial({color:0xfff0c0}));
+    S.add(sunMesh);
+
+    /* terrain */
+    var g=new THREE.PlaneGeometry(180,180,40,40), p=g.attributes.position;
+    for(var i=0;i<p.count;i++){
+      var x=p.getX(i),y=p.getY(i),r=Math.sqrt(x*x+y*y);
+      var h=1.4*Math.sin(x/26)*Math.cos(y/22)+0.7*Math.sin(x/11+1.3);
+      p.setZ(i,h*Math.min(1,Math.max(0,(r-16)/16)));
+    }
+    g.computeVertexNormals();
+    var gm=new THREE.Mesh(g,M.ground);
+    gm.rotation.x=-Math.PI/2; gm.position.y=-0.05; gm.receiveShadow=true; S.add(gm);
+    var sb=new THREE.Mesh(new THREE.PlaneGeometry(70,180),M.scrub);
+    sb.rotation.x=-Math.PI/2; sb.position.set(56,0.01,0); sb.receiveShadow=true;
+    S.add(sb);
+
+    /* perimeter wall */
+    var WX=11,WZ=21;
+    box(WX*2,1.25,0.4,0,0.62,-WZ,M.wall);
+    box(WX*2,1.25,0.4,0,0.62, WZ,M.wall);
+    box(0.4,1.25,WZ*2,-WX,0.62,0,M.wall);
+    box(0.4,1.25,WZ*2, WX,0.62,0,M.wall);
+    for(var z=-WZ;z<=WZ;z+=5.25){
+      box(0.5,1.5,0.5,-WX,0.75,z,M.wall);
+      box(0.5,1.5,0.5, WX,0.75,z,M.wall);
+    }
+
+    buildHouse(); buildTerrace(); buildGen(); buildEquipment();
+    placeClusters();
+    for(var c=0;c<SITE.clusters.length;c++)panelCluster(SITE.clusters[c]);
+    buildFlows();
+
+    CAM=new THREE.PerspectiveCamera(42,W/H,0.5,400);
+    target=new THREE.Vector3(0,3,3);
+    fitView(); place();
+  }
+
+  function buildHouse(){
+    var W2=HOUSE.w,D2=HOUSE.d,WALL=HOUSE.wall;
+    box(W2,WALL,D2,0,WALL/2,0,M.wall);
+    /* second roof, all the way round, as a mitred ring */
+    var sy=3.55,sd=1.2,sp=10*D;
+    skirtRing(W2/2,D2/2,W2/2+sd,D2/2+sd,sy,sy-Math.tan(sp)*sd);
+    box(W2+2*sd+0.2,0.18,0.14,0,sy-Math.tan(sp)*sd-0.1, D2/2+sd,M.trim,false,true);
+    box(W2+2*sd+0.2,0.18,0.14,0,sy-Math.tan(sp)*sd-0.1,-(D2/2+sd),M.trim,false,true);
+    box(0.14,0.18,D2+2*sd+0.2, W2/2+sd,sy-Math.tan(sp)*sd-0.1,0,M.trim,false,true);
+    box(0.14,0.18,D2+2*sd+0.2,-(W2/2+sd),sy-Math.tan(sp)*sd-0.1,0,M.trim,false,true);
+    var pe=W2/2+sd-0.15;
+    for(var k=-1;k<=1;k+=2)for(var m2=-1;m2<=1;m2+=2)
+      box(0.2,3.2,0.2,k*pe,1.6,m2*pe,M.post);
+    for(var k2=-1;k2<=1;k2+=2){
+      box(0.2,3.2,0.2,k2*pe,1.6,0,M.post);
+      box(0.2,3.2,0.2,0,1.6,k2*pe,M.post);
+    }
+    /* main pyramid roof */
+    pyramidRoof(HOUSE.dx*2,HOUSE.dz*2,HOUSE.rise,HOUSE.ridge,0,WALL);
+    box(2.4,0.7,2.4,0,WALL+HOUSE.rise+0.35,0,M.roof);
+    box(2.7,0.12,2.7,0,WALL+HOUSE.rise+0.76,0,M.roof);
+    var wx=W2/2+0.02,wz=D2/2+0.02;
+    pane(1.15,1.35,-wx,4.65,-1.9,Math.PI/2);
+    pane(1.15,1.35,-wx,4.65, 1.9,Math.PI/2);
+    pane(1.15,1.35, wx,4.65,-1.9,Math.PI/2);
+    pane(1.15,1.35, wx,4.65, 1.9,Math.PI/2);
+    pane(1.25,1.35,-1.9,4.65,wz,0);
+    pane(1.25,1.35, 1.9,4.65,wz,0);
+    pane(1.25,1.35, 0,4.65,-wz,0);
+    pane(1.05,1.05,-wx,1.75,-1.4,Math.PI/2);
+    pane(1.05,1.05,-wx,1.75, 1.4,Math.PI/2);
+    box(1.0,2.1,0.12,0,1.05,wz+0.04,M.post,false,true);
+  }
+
+  function buildTerrace(){
+    var TW=TERRACE.w,TD=TERRACE.d,cx=TERRACE.cx,cz=TERRACE.cz;
+    var pr=HOUSE.pitch*D;
+    box(TW,0.3,TD,cx,TERRACE.deck,cz,M.deck,false,true);
+    var yMid=HOUSE.wall-(cz-HOUSE.dz)*Math.tan(pr);
+    var tr=box(TW+0.5,0.13,TD+0.6,cx,yMid,cz,M.roof);
+    tr.rotation.x=pr;
+    var yOut=HOUSE.wall-(cz+TD/2-HOUSE.dz)*Math.tan(pr);
+    box(TW+0.6,0.2,0.16,cx,yOut-0.12,cz+TD/2+0.3,M.trim,false,true);
+    for(var h=0;h<2;h++){
+      var y=TERRACE.deck+0.55+h*0.62;
+      box(TW,0.07,0.07,cx,y,cz+TD/2,M.steel);
+      box(0.07,0.07,TD,cx-TW/2,y,cz,M.steel);
+      box(0.07,0.07,TD,cx+TW/2,y,cz,M.steel);
+    }
+    for(var x=cx-TW/2;x<=cx+TW/2+0.01;x+=1.4)
+      box(0.07,1.25,0.07,x,TERRACE.deck+0.77,cz+TD/2,M.steel);
+    for(var q=-1;q<=1;q+=2){
+      box(0.18,TERRACE.deck,0.18,cx+q*TW/2,TERRACE.deck/2,cz+TD/2,M.steel);
+      box(0.18,yOut-TERRACE.deck-0.3,0.18,cx+q*TW/2,
+          (yOut+TERRACE.deck)/2,cz+TD/2,M.steel);
+    }
+  }
+
+  function buildGen(){
+    var pr=GEN.pitch*D, oh=0.35, dpt=GEN.d+2*oh;
+    shedBox(GEN.w,GEN.d,GEN.wallN,GEN.wallS,GEN.cx,GEN.cz);
+    var r=box(GEN.w+2*oh,0.14,dpt,GEN.cx,GEN.wall+0.07/Math.cos(pr),GEN.cz,M.roof);
+    r.rotation.x=pr;
+    var yOut=GEN.wall-Math.tan(pr)*dpt/2;
+    box(GEN.w+2*oh+0.2,0.2,0.16,GEN.cx,yOut-0.11,GEN.cz+dpt/2,M.trim,false,true);
+    box(2.8,2.3,0.1,GEN.cx-0.9,1.15,GEN.cz-GEN.d/2-0.05,M.steel,false,true);
+    pane(0.8,0.7,GEN.cx+2.6,2.5,GEN.cz-GEN.d/2-0.05,0);
+    box(3.6,2.4,3.0,7.6,1.2,9.5,M.red);
+    box(4.0,0.16,3.4,7.6,2.48,9.5,M.cap);
+    box(0.12,4.8,0.12,8.6,2.4,4.5,M.frame);
+    box(0.8,0.6,0.6,8.6,5.0,4.5,M.cap);
+  }
+
+  function buildEquipment(){
+    var z=HOUSE.d/2+0.04;
+    ctrl.mppt80=[-3.3,2.4,z]; ctrl.west=[-2.4,2.3,z]; ctrl.south=[-1.7,2.3,z];
+    box(0.7,1.2,0.34,-3.3,1.7,z,M.case);
+    box(0.6,1.05,0.3,-2.4,1.62,z,M.case);
+    box(0.6,1.05,0.3,-1.7,1.62,z,M.case);
+    box(1.15,1.45,0.4,-0.7,1.78,z,M.case);
+    invM=box(0.7,1.3,0.36,0.5,1.7,z,M.case);
+    invS=box(0.7,1.3,0.36,1.3,1.7,z,M.case);
+    box(0.65,1.15,0.34,2.2,1.62,z,M.case);
+    for(var b=0;b<3;b++)for(var s=0;s<4;s++)
+      battModules.push(box(1.1,0.34,1.0,-2.4+b*1.25,0.3+s*0.37,
+                           -HOUSE.d/2-0.9,M.dark));
+    genMep=box(2.4,1.4,1.15,GEN.cx-1.6,0.7,GEN.cz-0.6,M.dark);
+    genKub=box(1.7,1.1,0.95,GEN.cx+2.0,0.55,GEN.cz-0.6,M.dark);
+  }
+
+  /* ---------- camera ---------- */
+  function fitView(){
+    root.updateMatrixWorld(true);
+    var bb=new THREE.Box3().setFromObject(root);
+    var sph=bb.getBoundingSphere(new THREE.Sphere());
+    target.copy(sph.center); fitR=sph.radius;
+    var vF=CAM.fov*D, hF=2*Math.atan(Math.tan(vF/2)*CAM.aspect);
+    dist=Math.max(18,Math.min(160,fitR/Math.sin(Math.min(vF,hF)/2)*1.02));
+  }
+  function place(){
+    CAM.position.set(target.x+dist*Math.cos(pitch)*Math.sin(yaw),
+                     target.y+dist*Math.sin(pitch),
+                     target.z+dist*Math.cos(pitch)*Math.cos(yaw));
+    CAM.lookAt(target);
+  }
+
+  /* ---------- live state ---------- */
+  function apply(){
+    var ch=['mppt80','south','west'];
+    for(var i=0;i<ch.length;i++){
+      var k=ch[i], f=Math.max(0,Math.min(1,(live[k]||0)/(caps3[k]||1)));
+      var m=M.pv[k];
+      m.color.copy(new THREE.Color(0xffffff)
+        .lerp(new THREE.Color(C.panelHot),f*0.55));
+      m.emissive.copy(new THREE.Color(C.solar).multiplyScalar(0.42*f));
+    }
+    var lit=Math.round(battModules.length*Math.min(100,live.soc)/100);
+    var hue=live.soc<25?0xff5d5d:(live.soc<50?0xffb020:C.batt);
+    for(var b=0;b<battModules.length;b++){
+      var on=b<lit;
+      if(battModules[b].material===M.dark){
+        battModules[b].material=M.dark.clone();     /* first touch only */
+      }
+      battModules[b].material.color.setHex(on?hue:C.dark);
+      battModules[b].material.emissive.setHex(on?hue:0x000000)
+        .multiplyScalar(on?0.3:0);
+    }
+    function tint(o,val,base,ref){
+      if(o.material===M.case||o.material===M.dark)o.material=o.material.clone();
+      var f=Math.min(1,val/ref);
+      o.material.color.copy(new THREE.Color(C.box).lerp(new THREE.Color(base),f*0.7));
+      o.material.emissive.copy(new THREE.Color(base).multiplyScalar(0.38*f));
+    }
+    tint(invM,live.acM,C.ac,6000); tint(invS,live.acS,C.ac,6000);
+    tint(genMep,live.gMep,C.gen,100); tint(genKub,live.gKub,C.gen,100);
+  }
+  function rate(chan){
+    if(chan==='dcM')return live.acM/6000;
+    if(chan==='dcS')return live.acS/6000;
+    if(chan==='gMep')return live.gMep/100;
+    if(chan==='gKub')return live.gKub/100;
+    return (live[chan]||0)/(caps3[chan]||1);
+  }
+  function actLevel(a){
+    a=(a===undefined||a===null)?255:+a;
+    if(a===9)return 1;
+    if([0,1,2,3,4,11].indexOf(a)>=0)return 0.4;
+    if([5,6,7,8].indexOf(a)>=0)return 0.55;
+    return 0;
+  }
+
+  /* ---------- loop ---------- */
+  function frame(now){
+    if(!running)return;
+    raf=requestAnimationFrame(frame);
+    if(now-last<FRAME)return;
+    var dt=Math.min(0.2,(now-(tPrev||now))/1000); tPrev=now; last=now;
+
+    var sp=sunPos(clockDate()), night=sp.el<0, elc=Math.max(sp.el,0.02);
+    var r=72;
+    var vx=r*Math.cos(elc)*Math.sin(sp.az),
+        vy=r*Math.sin(elc),
+        vz=-r*Math.cos(elc)*Math.cos(sp.az);
+    sun.position.set(vx,vy,vz);
+    sunMesh.position.set(vx,vy,vz); sunMesh.visible=!night;
+    var f=Math.sin(elc);
+    sun.intensity=night?0.10:(0.45+2.0*f);
+    hemi.intensity=night?0.26:(0.3+0.4*f);
+    S.fog.color.setHSL(0.58-0.12*f,0.2+0.1*f,night?0.10:(0.3+0.4*f));
+    S.background.copy(S.fog.color);
+
+    var v=new THREE.Vector3();
+    for(var i=0;i<flows.length;i++){
+      var fl=flows[i], rr=Math.max(0,Math.min(1,rate(fl.chan)));
+      var spd=0.05+rr*0.45, a=rr<0.012?0:1;
+      for(var j=0;j<fl.n;j++){
+        fl.t[j]+=spd*dt; if(fl.t[j]>1)fl.t[j]-=1;
+        fl.curve.getPoint(fl.t[j],v);
+        var o=(fl.off+j)*3;
+        ptPos[o]=v.x; ptPos[o+1]=v.y; ptPos[o+2]=v.z;
+        ptCol[o]=fl.color.r*a; ptCol[o+1]=fl.color.g*a; ptCol[o+2]=fl.color.b*a;
+      }
+    }
+    ptGeo.attributes.position.needsUpdate=true;
+    ptGeo.attributes.color.needsUpdate=true;
+    R.render(S,CAM);
+  }
+
+  /* ---------- input ---------- */
+  function bind(cv2){
+    function dn(e){drag=true;lx=e.touches?e.touches[0].clientX:e.clientX;
+      ly=e.touches?e.touches[0].clientY:e.clientY;}
+    function mv(e){
+      if(!drag)return;
+      var cx=e.touches?e.touches[0].clientX:e.clientX;
+      var cy=e.touches?e.touches[0].clientY:e.clientY;
+      yaw-=(cx-lx)*0.006; pitch+=(cy-ly)*0.005;
+      pitch=Math.max(0.08,Math.min(1.42,pitch)); lx=cx; ly=cy; place();
+      if(e.touches)e.preventDefault();
+    }
+    function up(){drag=false;}
+    cv2.addEventListener('mousedown',dn); cv2.addEventListener('touchstart',dn,{passive:true});
+    window.addEventListener('mousemove',mv); cv2.addEventListener('touchmove',mv,{passive:false});
+    window.addEventListener('mouseup',up); window.addEventListener('touchend',up);
+    cv2.addEventListener('wheel',function(e){
+      dist=Math.max(fitR*0.4,Math.min(fitR*4,dist+e.deltaY*0.05));
+      place(); e.preventDefault();
+    },{passive:false});
+  }
+
+  /* ---------- public ---------- */
+  function init(el){
+    host=el; W=host.clientWidth||640; H=host.clientHeight||430;
+    R=new THREE.WebGLRenderer({antialias:false,alpha:false,
+      powerPreference:'low-power'});
+    R.setPixelRatio(Math.min(1.5,window.devicePixelRatio||1));
+    R.setSize(W,H);
+    R.shadowMap.enabled=shadowsOn;
+    R.shadowMap.type=THREE.PCFSoftShadowMap;
+    R.outputEncoding=THREE.sRGBEncoding;
+    R.toneMapping=THREE.ACESFilmicToneMapping;
+    R.toneMappingExposure=1.05;
+    host.appendChild(R.domElement);
+    build(); bind(R.domElement); apply(); ready=true;
+    window.addEventListener('resize',function(){
+      if(!ready||!host.clientWidth)return;
+      W=host.clientWidth; H=host.clientHeight;
+      CAM.aspect=W/H; CAM.updateProjectionMatrix(); R.setSize(W,H);
+      fitView(); place();
+    });
+  }
+  function start(){if(!ready||running)return;running=true;tPrev=0;last=0;
+    raf=requestAnimationFrame(frame);}
+  function stop(){running=false;if(raf)cancelAnimationFrame(raf);raf=null;}
+  function update(d){
+    live.mppt80=+d.mppt80PVPower||0;
+    live.south=+d.southArrayPVPower||0;
+    live.west=+d.westArrayPVPower||0;
+    live.soc=+d.batterySOC||0;
+    live.acM=+d.acPower1||0; live.acS=+d.acPower2||0;
+    live.gMep=actLevel(d.mep803aAction)*(+d.mepChargeRateLive||0);
+    live.gKub=actLevel(d.kubotaAction)*(+d.kubotaChargeRateLive||0);
+    if(ready)apply();
+  }
+  return {
+    init:init,start:start,stop:stop,update:update,
+    caps:function(){return caps3;},
+    setTime:function(h){timeOverride=(h===null||h===undefined)?null:h;},
+    sunInfo:function(){
+      var sp=sunPos(clockDate());
+      return {elevation:sp.el/D,azimuth:sp.az/D,night:sp.el<0,
+              eot:sp.eot,solar:sp.solar,override:timeOverride};
+    },
+    setShadows:function(on){
+      shadowsOn=!!on;
+      if(R){R.shadowMap.enabled=shadowsOn; sun.castShadow=shadowsOn;
+        S.traverse(function(o){if(o.material)o.material.needsUpdate=true;});}
+    },
+    shadowsOn:function(){return shadowsOn;},
+    resetView:function(){yaw=-0.7;pitch=0.44;fitView();place();},
+    isReady:function(){return ready;},
+    isRunning:function(){return running;}
+  };
+})();
 </script>
 </body>
 </html>"""
@@ -1487,7 +2743,19 @@ async function readAGSRegs(){
 
 @app.route('/')
 def index():
-    return render_template_string(DASHBOARD_HTML)
+    # Static HTML - bypass Jinja so CSS/JS braces are never interpreted
+    return DASHBOARD_HTML
+
+@app.route('/vendor/<path:name>')
+def vendor_file(name):
+    """Serve locally vendored JS so the 3D view works without an internet route."""
+    if name not in ('three.min.js',):
+        return jsonify({'error': 'not found'}), 404
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'vendor', name)
+    if not os.path.isfile(path):
+        return jsonify({'error': 'not vendored'}), 404
+    return send_file(path, mimetype='application/javascript', max_age=604800)
+
 
 @app.route('/data')
 def data_endpoint():
@@ -1779,7 +3047,7 @@ def acdiag_stream_endpoint():
 
 # --- Initialize ---
 logger.info("=" * 50)
-logger.info("Solar Dashboard V2.4 Starting...")
+logger.info("Solar Dashboard V2.5 Starting...")
 load_config()
 
 poll_thread = threading.Thread(target=poll_modbus, daemon=True)
