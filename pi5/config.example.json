@@ -1,0 +1,27 @@
+{
+  "autoGenEnabled": true,
+  "mep803a": {
+    "startVoltage": 51.5,
+    "stopVoltage": 55.0,
+    "chargeRate": 100,
+    "maxRuntime": 120,
+    "cooldown": 5
+  },
+  "kubota": {
+    "startVoltage": 52.3,
+    "stopVoltage": 55.0,
+    "chargeRate": 70,
+    "maxRuntime": 120,
+    "cooldown": 5
+  },
+  "rampDown": {
+    "stepDelay": 15,
+    "zeroHoldTime": 120
+  },
+  "autoRebootHours": 2,
+  "telegram": {
+    "token": "",
+    "chatId": "",
+    "enabled": false
+  }
+}

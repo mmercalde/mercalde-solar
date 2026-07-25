@@ -23,3 +23,7 @@ Thumbs.db
 # Secrets
 *.env
 secrets.py
+
+# Runtime data and vendored libraries
+pi5/ac_diag_log.json
+pi5/vendor/
