@@ -89,6 +89,15 @@ REG_PV_POWER = 0x0050
 REG_CHARGER_STATUS = 0x0049
 REG_GENERATOR_MODE = 0x004D
 REG_GENERATOR_ACTION = 0x0043   # AGS spec 2.3: 9=Running, 10=Stopped
+
+# Conext Battery Monitor (slave 191, port 503) - shunt measurement.
+# Positive current = charging, verified against InsightLocal 2026-07-25.
+BATTERY_MONITOR_ID = 191
+REG_BM_VOLTAGE   = 0x0046   # uint32, V  x0.001
+REG_BM_CURRENT   = 0x0048   # sint32, A  x0.001
+REG_BM_SOC       = 0x004C   # uint32, %
+REG_BM_AH_REMAIN = 0x0058   # uint32, Ah
+REG_BM_TIME_DISCH= 0x0060   # uint32, minutes
 REG_CHARGE_MODE_FORCE = 0x00AA
 REG_CHARGER_ENABLE = 0x0164
 REG_MAX_CHARGE_RATE = 0x016F
@@ -156,6 +165,8 @@ system_data = {
     "westArrayPVPower": 0, "westArrayPVVoltage": 0.0, "westArrayPVCurrent": 0.0, "westArrayChargeStatus": 0,
     "mep803aMode": 0, "kubotaMode": 0,
     "mep803aAction": 10, "kubotaAction": 10,
+    "battPower": None, "battCurrent": None, "battSocBM": None,
+    "battAhRemaining": None, "battMinToDischarge": None, "battMonitorOnline": False,
     "lastUpdate": "00:00:00", "clockTime": "--:--:--", "pollErrors": 0,
     "mepChargeRateLive": 0, "kubotaChargeRateLive": 0,
     "chargePower1": 0, "chargePower2": 0, "chargePower3": 0,
@@ -826,6 +837,33 @@ def poll_modbus():
             val = modbus.read_holding_register_32(MODBUS_HOST, MODBUS_PORT, INVERTER_3_ID, REG_CHARGE_DC_POWER)
             new_data["chargePower3"] = val if val is not None else 0
 
+            # --- Conext Battery Monitor: true net battery power from the shunt.
+            # Deliberately excluded from `errors`; if the monitor is absent the
+            # dashboard simply falls back to the inverter-derived figures.
+            try:
+                bm_i = modbus.read_holding_register_32s(
+                    MODBUS_HOST, MODBUS_PORT, BATTERY_MONITOR_ID, REG_BM_CURRENT)
+                bm_v = modbus.read_holding_register_32(
+                    MODBUS_HOST, MODBUS_PORT, BATTERY_MONITOR_ID, REG_BM_VOLTAGE)
+                if bm_i is not None and bm_v is not None:
+                    amps = bm_i / 1000.0
+                    volts = bm_v / 1000.0
+                    new_data["battCurrent"] = round(amps, 1)
+                    new_data["battPower"] = int(round(amps * volts))
+                    new_data["battMonitorOnline"] = True
+                    for key, reg in (("battSocBM", REG_BM_SOC),
+                                     ("battAhRemaining", REG_BM_AH_REMAIN),
+                                     ("battMinToDischarge", REG_BM_TIME_DISCH)):
+                        val = modbus.read_holding_register_32(
+                            MODBUS_HOST, MODBUS_PORT, BATTERY_MONITOR_ID, reg)
+                        if val is not None:
+                            new_data[key] = val
+                else:
+                    new_data["battMonitorOnline"] = False
+            except Exception as bm_err:
+                logger.debug(f"Battery monitor read failed: {bm_err}")
+                new_data["battMonitorOnline"] = False
+
             elapsed = int(time.time() - start_time)
             # lastUpdate is really uptime; kept as-is for the ESP32 display and
             # Alexa webhook. clockTime is the actual wall clock of this poll.
@@ -1193,13 +1231,13 @@ input[type=range]::-moz-range-thumb{width:14px;height:14px;border-radius:50%;bac
       <div>
         <div class='k'>Battery</div>
         <div class='v num'><span id='hudSoc'>0</span><span class='u'>%</span></div>
-        <div class='s'><span class='num' id='hudVolts'>0</span> V</div>
+        <div class='s'><span class='num' id='hudVolts'>0</span> V &middot; <span id='hudRunway'>--</span></div>
       </div>
     </div>
     <div>
       <div class='k'>Load</div>
       <div class='v num'><span id='hudLoad'>0</span><span class='u'>W</span></div>
-      <div class='s'>charging <span class='num' id='hudCharge'>0</span> W</div>
+      <div class='s' id='hudBatt'>--</div>
     </div>
   </div>
 
@@ -1249,7 +1287,7 @@ input[type=range]::-moz-range-thumb{width:14px;height:14px;border-radius:50%;bac
       </svg>
       <div>
         <div class='ring-txt num'><span id='batterySOC_value'>0</span>%</div>
-        <div class='sub' style='margin-top:4px'><span class='num' id='batteryVoltage_value'>0</span> V</div>
+        <div class='sub' style='margin-top:4px'><span class='num' id='batteryVoltage_value'>0</span> V &middot; <span id='battFlow_value'>--</span></div>
       </div>
     </div>
   </div>
@@ -1257,7 +1295,7 @@ input[type=range]::-moz-range-thumb{width:14px;height:14px;border-radius:50%;bac
   <div class='card rise' style='--accent:var(--ac);animation-delay:.14s'>
     <div class='lbl'>&#9889; AC Load</div>
     <div class='val num'><span id='totalAC_value'>0</span><span class='u'>W</span></div>
-    <div class='sub'>Charging <span class='num' id='totalCharge_value'>0</span> W</div>
+    <div class='sub'>AC charge <span class='num' id='totalCharge_value'>0</span> W</div>
     <div class='track'><div class='fill' id='totalAC_bar' style='--c1:#4cc9f0;--c2:#7ee0ff'></div></div>
   </div>
 </div>
@@ -1558,7 +1596,21 @@ function updateUI(data){
   setNum('hudPv',totalPV);
   setNum('hudPvPct',(totalPV/PV_MAX)*100,0);
   setNum('hudLoad',totalAC);
-  setNum('hudCharge',totalCharge);
+  const bp=(data.battPower===undefined||data.battPower===null)?null:+data.battPower;
+  const hb=document.getElementById('hudBatt');
+  if(hb){
+    hb.textContent=battText(bp);
+    hb.style.color=(bp===null)?'':(bp>15?'var(--good)':(bp<-15?'var(--warn)':''));
+  }
+  const bf=document.getElementById('battFlow_value');
+  if(bf)bf.textContent=battText(bp);
+  const run=document.getElementById('hudRunway');
+  if(run){
+    const m=data.battMinToDischarge;
+    if(bp!==null&&bp>15)run.textContent='charging';
+    else if(m===undefined||m===null||m===0)run.textContent='--';
+    else run.textContent=Math.floor(m/60)+'h '+(m%60)+'m left';
+  }
   setNum('hudSoc',soc0);
   setNum('hudVolts',+data.batteryVoltage||0,1);
   const hr=document.getElementById('hudRing');
@@ -1633,6 +1685,12 @@ function updateUI(data){
 /* Driven by the AGS Auto Generator Action register, not by charge rate:
    charge rate rests at its configured maximum (100% MEP / 70% Kubota) at all
    times, so it says nothing about whether the generator is turning. */
+function battText(w){
+  if(w===null||w===undefined)return '--';
+  const a=Math.abs(w);
+  if(a<15)return 'idle';
+  return (w>0?'+':'-')+a+' W '+(w>0?'charging':'discharging');
+}
 function hudChip(id,tag,mode,action){
   const el=document.getElementById(id);
   if(!el)return;
@@ -2049,7 +2107,7 @@ var Site3D=(function(){
   var sun,sunMesh,hemi,battModules=[],invM,invS,genMep,genKub;
   var ctrl={},flows=[],pts,ptGeo,ptPos,ptCol;
   var last=0,tPrev=0,FRAME=1000/30,timeOverride=null,shadowsOn=true;
-  var live={mppt80:0,south:0,west:0,soc:0,acM:0,acS:0,gMep:0,gKub:0};
+  var live={mppt80:0,south:0,west:0,soc:0,acM:0,acS:0,gMep:0,gKub:0,batt:null};
   var yaw=-0.7,pitch=0.44,dist=52,target=null,fitR=26,drag=false,lx=0,ly=0;
   var D=Math.PI/180;
   var C={solar:0xffb020,batt:0x3ddc97,ac:0x4cc9f0,gen:0xc084fc,
@@ -2621,6 +2679,7 @@ var Site3D=(function(){
     live.west=+d.westArrayPVPower||0;
     live.soc=+d.batterySOC||0;
     live.acM=+d.acPower1||0; live.acS=+d.acPower2||0;
+    live.batt=(d.battPower===undefined||d.battPower===null)?null:+d.battPower;
     live.gMep=actLevel(d.mep803aAction)*(+d.mepChargeRateLive||0);
     live.gKub=actLevel(d.kubotaAction)*(+d.kubotaChargeRateLive||0);
     if(ready)apply();
