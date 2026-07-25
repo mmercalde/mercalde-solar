@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Solar Dashboard - Pi 5 Flask Application V2.5
+Solar Dashboard - Pi 5 Flask Application V2.8
 Full autonomous control with persistent settings
 
 FIXES in V2.4:
@@ -1452,7 +1452,7 @@ input[type=range]::-moz-range-thumb{width:14px;height:14px;border-radius:50%;bac
   </div>
 </details>
 
-<div class='foot'>Pi 5 &middot; Dashboard V3.0 &middot; uptime <span class='num' id='uptime_value'>--:--:--</span></div>
+<div class='foot'>Pi 5 &middot; Dashboard V2.8 &middot; uptime <span class='num' id='uptime_value'>--:--:--</span></div>
 </div>
 
 <div id='toasts'></div>
@@ -3106,7 +3106,7 @@ def acdiag_stream_endpoint():
 
 # --- Initialize ---
 logger.info("=" * 50)
-logger.info("Solar Dashboard V2.5 Starting...")
+logger.info("Solar Dashboard V2.8 Starting...")
 load_config()
 
 poll_thread = threading.Thread(target=poll_modbus, daemon=True)
