@@ -26,7 +26,10 @@ class SchneiderModbusTCP:
     Direct port of the Arduino SchneiderModbusTCP library.
     """
     
-    TIMEOUT = 1.0  # 1 second timeout
+    TIMEOUT = 1.0  # 1 second response timeout
+    CONNECT_TIMEOUT = 3.0  # Allow kernel SYN retransmit to recover a dropped packet
+    CONNECT_RETRIES = 1  # One extra attempt on connect failure (safe: nothing sent yet)
+    CONNECT_RETRY_DELAY = 0.1  # 100ms backoff before retry
     POST_WRITE_DELAY = 0.2  # 200ms after writes
     
     def __init__(self):
@@ -64,10 +67,22 @@ class SchneiderModbusTCP:
         """
         sock = None
         try:
-            # Connect
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            # Connect (with retry — a lost SYN on a busy switch is recoverable)
+            for attempt in range(1 + self.CONNECT_RETRIES):
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(self.CONNECT_TIMEOUT)
+                try:
+                    sock.connect((host, port))
+                    break
+                except (socket.timeout, OSError) as ce:
+                    sock.close()
+                    sock = None
+                    if attempt < self.CONNECT_RETRIES:
+                        logger.debug(f"Connect to {host}:{port} failed ({ce}), retrying")
+                        time.sleep(self.CONNECT_RETRY_DELAY)
+                    else:
+                        raise
             sock.settimeout(self.TIMEOUT)
-            sock.connect((host, port))
             
             transaction_id = self._get_transaction_id()
             protocol_id = 0  # Modbus TCP always 0
