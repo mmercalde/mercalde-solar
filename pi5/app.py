@@ -1141,6 +1141,7 @@ input[type=range]::-moz-range-thumb{width:14px;height:14px;border-radius:50%;bac
   backdrop-filter:blur(11px);-webkit-backdrop-filter:blur(11px);
   padding:13px 16px;pointer-events:auto}
 .hud-tl{top:16px;left:18px;display:flex;align-items:center;gap:11px}
+.hudstack{display:contents}
 .hud-tr{top:16px;right:18px;display:flex;align-items:center;gap:14px;font-size:.76rem;
   color:var(--dim2)}
 .hud-tr a{color:var(--batt);text-decoration:none}
@@ -1166,10 +1167,25 @@ input[type=range]::-moz-range-thumb{width:14px;height:14px;border-radius:50%;bac
   50%{transform:translateX(-50%) translateY(4px)}}
 @media(max-width:820px){
   .stage{height:58vh}
-  .hud-bl{gap:16px;padding:10px 12px}
-  .hud .v{font-size:1.35rem}
   .hud-gen{display:none}
   .hud-tr{display:none}
+  .hud-tl{display:none}
+  .scrollhint{display:none}
+  /* both cards stack in flow at the top - they cannot overlap */
+  .hudstack{display:flex;flex-direction:column;gap:8px;
+    position:absolute;top:10px;left:10px;right:10px;z-index:4}
+  .hud-bl,.hud-br{position:static;top:auto;left:auto;right:auto;bottom:auto}
+  .hud-bl{gap:10px;padding:8px 12px;justify-content:space-between;align-items:center}
+  .hud .v{font-size:1.12rem}
+  .hud .k{font-size:.56rem;margin-bottom:2px}
+  .hud .s{font-size:.62rem;margin-top:2px}
+  .hudring{width:38px;height:38px;flex:0 0 38px}
+  .hud-br{align-self:flex-end;padding:6px 9px;gap:6px;max-width:none}
+  .hud-br .lab:first-child{display:none}
+  #sunTime{width:78px}
+  #sunLabel{display:none}
+  .hud-br .btn{padding:4px 8px;font-size:.66rem}
+}  .hud-br .btn{padding:4px 8px;font-size:.66rem}
 }
 
 @media(prefers-reduced-motion:reduce){
@@ -1217,7 +1233,8 @@ input[type=range]::-moz-range-thumb{width:14px;height:14px;border-radius:50%;bac
     <a href='/registers'>Registers &rarr;</a>
   </div>
 
-  <div class='hud hud-bl'>
+  <div class='hudstack'>
+<div class='hud hud-bl'>
     <div>
       <div class='k'>Solar</div>
       <div class='v num'><span id='hudPv'>0</span><span class='u'>W</span></div>
@@ -1240,13 +1257,7 @@ input[type=range]::-moz-range-thumb{width:14px;height:14px;border-radius:50%;bac
       <div class='s' id='hudBatt'>--</div>
     </div>
   </div>
-
-  <div class='hud hud-gen'>
-    <span id='hud_mep' class='chip off'>MEP --</span>
-    <span id='hud_kub' class='chip off'>KUB --</span>
-  </div>
-
-  <div class='hud hud-br'>
+<div class='hud hud-br'>
     <span class='lab' style='font-size:.7rem;color:var(--dim2)'>Sun</span>
     <input type='range' id='sunTime' min='0' max='23.75' step='0.25' value='12'
       oninput='onSunTime(this.value)' style='width:150px'>
@@ -1256,6 +1267,12 @@ input[type=range]::-moz-range-thumb{width:14px;height:14px;border-radius:50%;bac
     <button class='btn s sm' id='shadowBtn' onclick='toggleShadows()' style='padding:5px 10px'>Shadows</button>
     <button class='btn s sm' onclick='resetView()' style='padding:5px 10px'>Reset</button>
     <button class='btn s sm' id='toggle3d' onclick='toggle3D()' style='padding:5px 10px'>3D off</button>
+  </div>
+</div>
+
+  <div class='hud hud-gen'>
+    <span id='hud_mep' class='chip off'>MEP --</span>
+    <span id='hud_kub' class='chip off'>KUB --</span>
   </div>
 
   <div class='scrollhint'>Detail below &darr;</div>
