@@ -1,7 +1,16 @@
 #!/usr/bin/env python3
 """
-Solar Dashboard - Pi 5 Flask Application V2.3
+Solar Dashboard - Pi 5 Flask Application V2.4
 Full autonomous control with persistent settings
+
+FIXES in V2.4:
+  - AC Diagnostic tool integrated into dashboard
+  - /acdiag         - single snapshot (JSON)
+  - /acdiag/stream  - N readings over time window (JSON)
+  - /acdiag/log     - last N saved readings (JSON)
+  - /acdiag/log/clear - clear log
+  - Dashboard UI: AC Diag section with snapshot button,
+    stream capture button, and log viewer table
 
 FIXES in V2.3:
   - Telegram alerts for: auto-start, auto-stop, AUTO mode failed,
@@ -34,6 +43,10 @@ Endpoints:
   /writereg     - Write single register
   /readtransfer - Batch read transfer/ramp registers
   /readags      - Batch read AGS registers
+  /acdiag       - AC diagnostic snapshot (V2.4)
+  /acdiag/stream - AC diagnostic stream capture (V2.4)
+  /acdiag/log   - AC diagnostic log viewer (V2.4)
+  /acdiag/log/clear - Clear AC diagnostic log (V2.4)
 """
 
 import os
@@ -81,6 +94,17 @@ REG_MAX_CHARGE_RATE = 0x016F
 REG_OPERATING_MODE = 0x0166
 REG_FORCE_CHARGER_STATE = 0x0165
 REG_CHARGE_DC_POWER = 0x005E
+
+# V2.4: AC Diagnostic registers (503 spec)
+REG_AC_LOAD_L1_VOLTAGE  = 0x008E  # uint32, scale 0.001 V
+REG_AC_LOAD_L2_VOLTAGE  = 0x0090  # uint32, scale 0.001 V
+REG_AC_LOAD_FREQUENCY   = 0x0098  # uint16, scale 0.01 Hz
+# (REG_AC_POWER and REG_AC_CURRENT already defined above)
+
+# V2.4: AC Diagnostic log
+AC_DIAG_LOG_FILE = "/home/michael/solar_dashboard/ac_diag_log.json"
+AC_DIAG_MAX_ENTRIES = 5000
+ac_diag_lock = threading.Lock()
 
 # --- Logging ---
 logging.basicConfig(
@@ -513,7 +537,6 @@ def check_auto_generator():
 
     current_time = time.time()
 
-    # Battery low alert
     with alert_lock:
         if voltage <= min(mep_cfg["startVoltage"], kub_cfg["startVoltage"]) and mep_mode == 0 and kubota_mode == 0:
             if not alert_state["battery_low_alerted"]:
@@ -614,6 +637,75 @@ def check_ags_status(mep_ok, kubota_ok):
             log_event("✅ Kubota AGS back ONLINE")
             send_telegram("✅ <b>Kubota AGS back ONLINE</b>")
 
+# --- V2.4: AC Diagnostic Functions ---
+def read_inverter_ac_diag(slave_id):
+    """Read AC diagnostic registers for one inverter."""
+    result = {"id": slave_id}
+
+    # L1 Voltage - uint32, 0.001 V
+    v = modbus.read_holding_register_32(MODBUS_HOST, MODBUS_PORT, slave_id, REG_AC_LOAD_L1_VOLTAGE)
+    result["voltage_l1"] = round(v * 0.001, 3) if v is not None else None
+
+    # L2 Voltage - uint32, 0.001 V
+    v = modbus.read_holding_register_32(MODBUS_HOST, MODBUS_PORT, slave_id, REG_AC_LOAD_L2_VOLTAGE)
+    result["voltage_l2"] = round(v * 0.001, 3) if v is not None else None
+
+    # Frequency - uint16, 0.01 Hz
+    v = modbus.read_holding_register_16(MODBUS_HOST, MODBUS_PORT, slave_id, REG_AC_LOAD_FREQUENCY)
+    result["frequency"] = round(v * 0.01, 2) if v is not None else None
+
+    # AC Load Power - sint32, 1.0 W (already defined as REG_AC_POWER)
+    v = modbus.read_holding_register_32s(MODBUS_HOST, MODBUS_PORT, slave_id, REG_AC_POWER)
+    result["power_w"] = v
+
+    # AC Load Current - sint32, 0.001 A (already defined as REG_AC_CURRENT)
+    v = modbus.read_holding_register_32s(MODBUS_HOST, MODBUS_PORT, slave_id, REG_AC_CURRENT)
+    result["current_a"] = round(v * 0.001, 3) if v is not None else None
+
+    return result
+
+def ac_diag_snapshot():
+    """Read both XW Pro 6848 inverters and return timestamped diagnostic snapshot."""
+    ts = datetime.now().isoformat()
+    master = read_inverter_ac_diag(INVERTER_1_ID)
+    slave  = read_inverter_ac_diag(INVERTER_2_ID)
+
+    def delta(a, b):
+        if a is not None and b is not None:
+            return round(a - b, 4)
+        return None
+
+    return {
+        "timestamp": ts,
+        "master": master,
+        "slave": slave,
+        "delta": {
+            "voltage_l1": delta(master.get("voltage_l1"), slave.get("voltage_l1")),
+            "voltage_l2": delta(master.get("voltage_l2"), slave.get("voltage_l2")),
+            "frequency":  delta(master.get("frequency"),  slave.get("frequency")),
+            "power_w":    delta(master.get("power_w"),    slave.get("power_w")),
+        }
+    }
+
+def ac_diag_save(reading):
+    """Append a reading to the AC diagnostic log file (non-blocking, called in thread)."""
+    with ac_diag_lock:
+        entries = []
+        if os.path.exists(AC_DIAG_LOG_FILE):
+            try:
+                with open(AC_DIAG_LOG_FILE, 'r') as f:
+                    entries = json.load(f)
+            except Exception:
+                entries = []
+        entries.append(reading)
+        if len(entries) > AC_DIAG_MAX_ENTRIES:
+            entries = entries[-AC_DIAG_MAX_ENTRIES:]
+        try:
+            with open(AC_DIAG_LOG_FILE, 'w') as f:
+                json.dump(entries, f)
+        except Exception as e:
+            logger.warning(f"AC diag log write error: {e}")
+
 # --- Polling Thread ---
 def poll_modbus():
     global system_data, start_time
@@ -695,7 +787,6 @@ def poll_modbus():
             new_data["westArrayChargeStatus"] = val if val is not None else 0
             errors += 0 if val is not None else 1
 
-            # AGS Units — tracked separately for offline detection
             val = modbus.read_holding_register_16(MODBUS_HOST, MODBUS_PORT, AGS_MEP803A_ID, REG_GENERATOR_MODE)
             new_data["mep803aMode"] = val if val is not None else 0
             new_data["mepAgsOnline"] = val is not None
@@ -732,10 +823,8 @@ def poll_modbus():
             with data_lock:
                 system_data.update(new_data)
 
-            # V2.3: AGS offline detection
             check_ags_status(mep_ok, kubota_ok)
 
-            # V2.3: Non-AGS poll error alert
             non_ags_errors = errors - (0 if mep_ok else 1) - (0 if kubota_ok else 1)
             with alert_lock:
                 if non_ags_errors > 0 and not alert_state["poll_error_alerted"]:
@@ -815,6 +904,34 @@ h2{color:#82e0aa;margin-bottom:25px;font-size:1.8em;}
 .ags-online{color:#2ecc71;}
 .ags-offline{color:#e74c3c;font-weight:bold;}
 .error-banner{background:#c0392b;color:white;padding:10px 15px;border-radius:8px;margin-bottom:15px;font-weight:bold;display:none;}
+/* V2.4 AC Diag styles */
+.diag-panel{background:#2c3e50;border-radius:10px;padding:15px;margin-top:10px;}
+.diag-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:10px;}
+@media(max-width:600px){.diag-grid{grid-template-columns:1fr;}}
+.diag-card{background:#3d566e;border-radius:8px;padding:12px;text-align:center;}
+.diag-card .label{font-size:0.75em;color:#82e0aa;margin-bottom:4px;}
+.diag-card .val{font-size:1.3em;font-weight:bold;color:#ecf0f1;}
+.diag-card .val.warn{color:#f39c12;}
+.diag-card .val.ok{color:#2ecc71;}
+.diag-card .sub{font-size:0.7em;color:#b0c4de;margin-top:2px;}
+.diag-btn{padding:8px 14px;border-radius:5px;border:none;font-weight:bold;cursor:pointer;margin-right:6px;margin-top:8px;}
+.diag-btn-snap{background:#16a085;color:white;}
+.diag-btn-snap:hover{background:#1abc9c;}
+.diag-btn-stream{background:#8e44ad;color:white;}
+.diag-btn-stream:hover{background:#9b59b6;}
+.diag-btn-clear{background:#7f8c8d;color:white;font-size:0.8em;padding:6px 10px;}
+.diag-btn-clear:hover{background:#95a5a6;}
+.diag-status{font-size:0.8em;color:#b0c4de;margin-top:6px;min-height:1.2em;}
+.diag-status.running{color:#f39c12;}
+.diag-status.done{color:#2ecc71;}
+.diag-status.error{color:#e74c3c;}
+.diag-log-table{width:100%;border-collapse:collapse;font-size:0.72em;font-family:monospace;margin-top:10px;}
+.diag-log-table th{background:#1a252f;color:#82e0aa;padding:4px 8px;text-align:left;position:sticky;top:0;}
+.diag-log-table td{padding:3px 8px;border-bottom:1px solid #2c3e50;color:#ecf0f1;}
+.diag-log-table tr:nth-child(even) td{background:#2c3e50;}
+.diag-log-wrap{max-height:250px;overflow-y:auto;border-radius:5px;background:#1a252f;}
+.delta-warn{color:#f39c12;font-weight:bold;}
+.delta-ok{color:#2ecc71;}
 </style>
 </head>
 <body>
@@ -860,6 +977,96 @@ h2{color:#82e0aa;margin-bottom:25px;font-size:1.8em;}
     </div>
   </div>
 </div>
+
+<!-- V2.4: AC DIAGNOSTIC SECTION -->
+<h3 class='section-title'>🔬 AC Diagnostic — Inverter Sync Monitor</h3>
+<div class='diag-panel'>
+  <!-- Live snapshot cards: 3 columns (Master | Slave | Delta) -->
+  <div class='diag-grid'>
+    <div class='diag-card'>
+      <div class='label'>Master ID10 — L1 Voltage</div>
+      <div class='val' id='diag_m_v1'>--</div>
+      <div class='sub'>L2: <span id='diag_m_v2'>--</span></div>
+    </div>
+    <div class='diag-card'>
+      <div class='label'>Slave ID12 — L1 Voltage</div>
+      <div class='val' id='diag_s_v1'>--</div>
+      <div class='sub'>L2: <span id='diag_s_v2'>--</span></div>
+    </div>
+    <div class='diag-card'>
+      <div class='label'>ΔVoltage (M−S)</div>
+      <div class='val' id='diag_dv'>--</div>
+      <div class='sub'>Target: ±0.0–0.6V</div>
+    </div>
+    <div class='diag-card'>
+      <div class='label'>Master — Frequency</div>
+      <div class='val' id='diag_m_hz'>--</div>
+      <div class='sub'>Hz</div>
+    </div>
+    <div class='diag-card'>
+      <div class='label'>Slave — Frequency</div>
+      <div class='val' id='diag_s_hz'>--</div>
+      <div class='sub'>Hz</div>
+    </div>
+    <div class='diag-card'>
+      <div class='label'>ΔFrequency (M−S)</div>
+      <div class='val' id='diag_dhz'>--</div>
+      <div class='sub'>Target: 0.00 Hz</div>
+    </div>
+    <div class='diag-card'>
+      <div class='label'>Master — Power</div>
+      <div class='val' id='diag_m_pw'>--</div>
+      <div class='sub'>W</div>
+    </div>
+    <div class='diag-card'>
+      <div class='label'>Slave — Power</div>
+      <div class='val' id='diag_s_pw'>--</div>
+      <div class='sub'>W</div>
+    </div>
+    <div class='diag-card'>
+      <div class='label'>Last Reading</div>
+      <div class='val' style='font-size:0.9em;' id='diag_ts'>--</div>
+      <div class='sub' id='diag_log_count'>Log: 0 entries</div>
+    </div>
+  </div>
+
+  <!-- Controls -->
+  <div style='margin-top:8px;'>
+    <button class='diag-btn diag-btn-snap' onclick='diagSnapshot()'>📷 Snapshot</button>
+    <button class='diag-btn diag-btn-stream' onclick='diagStream()'>▶ Capture 20s</button>
+    <button class='diag-btn diag-btn-clear' onclick='diagClearLog()'>🗑 Clear Log</button>
+    <div class='diag-status' id='diag_status'>Ready — click Snapshot for a single reading, or Capture 20s to record a stream.</div>
+  </div>
+
+  <!-- Log table -->
+  <div style='margin-top:12px;'>
+    <div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;'>
+      <span style='font-size:0.8em;color:#82e0aa;'>📋 Recent Log Entries</span>
+      <button class='diag-btn diag-btn-clear' onclick='diagLoadLog()'>↻ Refresh Log</button>
+    </div>
+    <div class='diag-log-wrap'>
+      <table class='diag-log-table'>
+        <thead>
+          <tr>
+            <th>Time</th>
+            <th>M-V1</th>
+            <th>S-V1</th>
+            <th>ΔV</th>
+            <th>M-Hz</th>
+            <th>S-Hz</th>
+            <th>ΔHz</th>
+            <th>M-W</th>
+            <th>S-W</th>
+          </tr>
+        </thead>
+        <tbody id='diag_log_body'>
+          <tr><td colspan='9' style='text-align:center;color:#7f8c8d;'>No log data — click Snapshot or Capture</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+<!-- END AC DIAGNOSTIC SECTION -->
 
 <div class='settings-panel'>
   <h3>⚡ Automatic Generator Control</h3>
@@ -918,7 +1125,7 @@ h2{color:#82e0aa;margin-bottom:25px;font-size:1.8em;}
   Last Update: <span id='lastUpdate_value'>--:--:--</span> |
   Errors: <span id='pollErrors_value'>0</span> |
   <a href='/registers' style='color:#82e0aa;'>Register Tool</a> |
-  Pi 5 V2.3
+  Pi 5 V2.4
 </div>
 </div>
 
@@ -949,14 +1156,12 @@ function updateUI(data){
   const errors=data.pollErrors||0;
   document.getElementById('pollErrors_value').textContent=errors;
   document.getElementById('status_indicator').className=errors>0?'status-indicator status-error':'status-indicator status-ok';
-  // AGS status
   const mepAgs=document.getElementById('mep_ags_status');
   const kubAgs=document.getElementById('kubota_ags_status');
   if(data.mepAgsOnline){mepAgs.textContent='AGS: Online';mepAgs.className='ags-status ags-online';}
   else{mepAgs.textContent='AGS: OFFLINE ⚠️';mepAgs.className='ags-status ags-offline';}
   if(data.kubotaAgsOnline){kubAgs.textContent='AGS: Online';kubAgs.className='ags-status ags-online';}
   else{kubAgs.textContent='AGS: OFFLINE ⚠️';kubAgs.className='ags-status ags-offline';}
-  // Error banner
   const banner=document.getElementById('errorBanner');
   if(errors>0){banner.style.display='block';banner.textContent='⚠️ '+errors+' Modbus poll error(s) detected';}
   else{banner.style.display='none';}
@@ -1011,6 +1216,127 @@ function updateEventLog(events){
     return '<div class="'+cls+'">'+e+'</div>';
   }).join('');
 }
+
+/* ── V2.4 AC Diagnostic JS ────────────────────────────── */
+function fmtV(v){return v!=null?v.toFixed(3)+'V':'--';}
+function fmtHz(v){return v!=null?v.toFixed(2)+'Hz':'--';}
+function fmtW(v){return v!=null?v+'W':'--';}
+function fmtDelta(v,warn){
+  if(v==null)return'--';
+  const s=(v>=0?'+':'')+v.toFixed(4);
+  return'<span class="'+(Math.abs(v)>warn?'delta-warn':'delta-ok')+'">'+s+'</span>';
+}
+
+function diagUpdateCards(d){
+  const m=d.master, s=d.slave, dt=d.delta;
+  document.getElementById('diag_m_v1').textContent=fmtV(m.voltage_l1);
+  document.getElementById('diag_m_v2').textContent=fmtV(m.voltage_l2);
+  document.getElementById('diag_s_v1').textContent=fmtV(s.voltage_l1);
+  document.getElementById('diag_s_v2').textContent=fmtV(s.voltage_l2);
+  document.getElementById('diag_dv').innerHTML=fmtDelta(dt.voltage_l1, 0.1);
+  document.getElementById('diag_m_hz').textContent=fmtHz(m.frequency);
+  document.getElementById('diag_s_hz').textContent=fmtHz(s.frequency);
+  document.getElementById('diag_dhz').innerHTML=fmtDelta(dt.frequency, 0.05);
+  document.getElementById('diag_m_pw').textContent=fmtW(m.power_w);
+  document.getElementById('diag_s_pw').textContent=fmtW(s.power_w);
+  // Show short timestamp HH:MM:SS
+  const ts=d.timestamp?d.timestamp.substring(11,19):'--';
+  document.getElementById('diag_ts').textContent=ts;
+}
+
+function diagAddRows(readings){
+  const tbody=document.getElementById('diag_log_body');
+  // Prepend rows (newest first)
+  const rows=[...readings].reverse().map(d=>{
+    const m=d.master, s=d.slave, dt=d.delta;
+    const ts=d.timestamp?d.timestamp.substring(11,19):'?';
+    return '<tr>'+
+      '<td>'+ts+'</td>'+
+      '<td>'+(m.voltage_l1!=null?m.voltage_l1.toFixed(3):'--')+'</td>'+
+      '<td>'+(s.voltage_l1!=null?s.voltage_l1.toFixed(3):'--')+'</td>'+
+      '<td>'+fmtDelta(dt.voltage_l1,0.1)+'</td>'+
+      '<td>'+(m.frequency!=null?m.frequency.toFixed(2):'--')+'</td>'+
+      '<td>'+(s.frequency!=null?s.frequency.toFixed(2):'--')+'</td>'+
+      '<td>'+fmtDelta(dt.frequency,0.05)+'</td>'+
+      '<td>'+(m.power_w!=null?m.power_w:'--')+'</td>'+
+      '<td>'+(s.power_w!=null?s.power_w:'--')+'</td>'+
+      '</tr>';
+  }).join('');
+  // If placeholder row exists, clear it
+  if(tbody.querySelector('td[colspan]'))tbody.innerHTML='';
+  tbody.insertAdjacentHTML('afterbegin',rows);
+}
+
+async function diagSnapshot(){
+  const st=document.getElementById('diag_status');
+  st.textContent='Reading...';st.className='diag-status running';
+  try{
+    const r=await fetch('/acdiag');
+    if(!r.ok)throw new Error('HTTP '+r.status);
+    const d=await r.json();
+    diagUpdateCards(d);
+    diagAddRows([d]);
+    st.textContent='Snapshot complete at '+d.timestamp.substring(11,19);
+    st.className='diag-status done';
+  }catch(e){
+    st.textContent='Error: '+e;st.className='diag-status error';
+  }
+}
+
+async function diagStream(){
+  const st=document.getElementById('diag_status');
+  st.textContent='Capturing 20 readings over 10 seconds...';st.className='diag-status running';
+  try{
+    const r=await fetch('/acdiag/stream?n=20&interval=500');
+    if(!r.ok)throw new Error('HTTP '+r.status);
+    const readings=await r.json();
+    if(readings.length>0){
+      diagUpdateCards(readings[readings.length-1]);
+      diagAddRows(readings);
+    }
+    st.textContent='Stream capture complete — '+readings.length+' readings saved to log.';
+    st.className='diag-status done';
+  }catch(e){
+    st.textContent='Error: '+e;st.className='diag-status error';
+  }
+}
+
+async function diagLoadLog(){
+  const st=document.getElementById('diag_status');
+  st.textContent='Loading log...';st.className='diag-status running';
+  try{
+    const r=await fetch('/acdiag/log?n=50');
+    if(!r.ok)throw new Error('HTTP '+r.status);
+    const entries=await r.json();
+    const tbody=document.getElementById('diag_log_body');
+    tbody.innerHTML='';
+    if(entries.length===0){
+      tbody.innerHTML='<tr><td colspan="9" style="text-align:center;color:#7f8c8d;">No log entries</td></tr>';
+    }else{
+      diagAddRows(entries);
+      document.getElementById('diag_log_count').textContent='Log: '+entries.length+' entries shown';
+    }
+    st.textContent='Log loaded — '+entries.length+' entries.';
+    st.className='diag-status done';
+  }catch(e){
+    st.textContent='Error: '+e;st.className='diag-status error';
+  }
+}
+
+async function diagClearLog(){
+  if(!confirm('Clear all AC diagnostic log entries?'))return;
+  const st=document.getElementById('diag_status');
+  try{
+    await fetch('/acdiag/log/clear');
+    document.getElementById('diag_log_body').innerHTML=
+      '<tr><td colspan="9" style="text-align:center;color:#7f8c8d;">Log cleared</td></tr>';
+    document.getElementById('diag_log_count').textContent='Log: 0 entries';
+    st.textContent='Log cleared.';st.className='diag-status done';
+  }catch(e){
+    st.textContent='Error: '+e;st.className='diag-status error';
+  }
+}
+/* ── End V2.4 AC Diagnostic JS ───────────────────────── */
 
 async function fetchData(){
   try{const r=await fetch('/data');if(r.ok)updateUI(await r.json());}
@@ -1394,9 +1720,66 @@ def set_mppt_endpoint():
     success = modbus.write_single_register_16(MODBUS_HOST, MODBUS_PORT, slave_id, REG_CHARGE_MODE_FORCE, mode)
     return ("OK", 200) if success else ("Failed", 500)
 
+# --- V2.4: AC Diagnostic Endpoints ---
+@app.route('/acdiag')
+def acdiag_endpoint():
+    """Single AC diagnostic snapshot. Readable anytime via browser or curl."""
+    reading = ac_diag_snapshot()
+    threading.Thread(target=ac_diag_save, args=(reading,), daemon=True).start()
+    return jsonify(reading)
+
+@app.route('/acdiag/log')
+def acdiag_log_endpoint():
+    """Return last N log entries. Usage: /acdiag/log?n=100"""
+    try:
+        n = min(int(request.args.get('n', 100)), 2000)
+    except Exception:
+        n = 100
+    with ac_diag_lock:
+        if os.path.exists(AC_DIAG_LOG_FILE):
+            try:
+                with open(AC_DIAG_LOG_FILE, 'r') as f:
+                    entries = json.load(f)
+                return jsonify(entries[-n:])
+            except Exception as e:
+                return jsonify({"error": str(e)}), 500
+    return jsonify([])
+
+@app.route('/acdiag/log/clear')
+def acdiag_log_clear_endpoint():
+    """Clear the AC diagnostic log file."""
+    with ac_diag_lock:
+        with open(AC_DIAG_LOG_FILE, 'w') as f:
+            json.dump([], f)
+    return jsonify({"status": "cleared"})
+
+@app.route('/acdiag/stream')
+def acdiag_stream_endpoint():
+    """
+    Take N readings at interval_ms apart and return all at once.
+    Usage: /acdiag/stream?n=20&interval=500
+    Run BEFORE a generator stop to capture the transition.
+    All readings saved to log file automatically.
+    """
+    try:
+        n = min(int(request.args.get('n', 20)), 60)
+        interval = max(int(request.args.get('interval', 500)), 200) / 1000.0
+    except Exception:
+        n = 20
+        interval = 0.5
+
+    readings = []
+    for _ in range(n):
+        r = ac_diag_snapshot()
+        readings.append(r)
+        threading.Thread(target=ac_diag_save, args=(r,), daemon=True).start()
+        time.sleep(interval)
+
+    return jsonify(readings)
+
 # --- Initialize ---
 logger.info("=" * 50)
-logger.info("Solar Dashboard V2.3 Starting...")
+logger.info("Solar Dashboard V2.4 Starting...")
 load_config()
 
 poll_thread = threading.Thread(target=poll_modbus, daemon=True)
@@ -1405,6 +1788,7 @@ logger.info("Modbus polling started")
 with config_lock:
     logger.info(f"Auto-gen: {'ENABLED' if config['autoGenEnabled'] else 'DISABLED'}")
     logger.info(f"Telegram: {'ENABLED' if config['telegram']['enabled'] else 'DISABLED'}")
+logger.info("AC Diagnostic endpoints ready: /acdiag /acdiag/stream /acdiag/log")
 logger.info("=" * 50)
 
 if __name__ == '__main__':
