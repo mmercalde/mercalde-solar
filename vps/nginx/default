@@ -1,3 +1,4 @@
+map_hash_bucket_size 128;
 # Access gate: one-time /unlock?key=... sets a 1-year cookie.
 # $solar_locked is 1 (blocked) unless the cookie matches.
 map $cookie_solarkey $solar_locked {
