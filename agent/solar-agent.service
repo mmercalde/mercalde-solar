@@ -1,0 +1,27 @@
+[Unit]
+Description=Solar Agent - generator planning for the off-grid system
+After=network-online.target llama-server.service
+Wants=network-online.target
+# Not Requires=: if llama-server is down the agent still samples, keeps
+# history and serves /plan; only the model calls fail.
+
+[Service]
+Type=simple
+User=michael
+Group=michael
+WorkingDirectory=/home/michael/mercalde-solar/agent
+ExecStart=/home/michael/mercalde-solar/agent/venv/bin/python /home/michael/mercalde-solar/agent/agent.py
+Restart=always
+RestartSec=15
+StandardOutput=journal
+StandardError=journal
+
+# Hardening. The agent writes only to agent/data/.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/michael/mercalde-solar/agent/data
+
+[Install]
+WantedBy=multi-user.target

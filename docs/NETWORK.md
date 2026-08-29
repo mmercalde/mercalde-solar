@@ -324,7 +324,9 @@ Interface `10.8.0.1/24`, ListenPort `51820`, MTU `1320`.
 
 ### VPS nginx (mercalde-solar.org)
 HTTP:80 → redirect to HTTPS:443. HTTPS:443 → SSL termination (Let's Encrypt).
-- `/alexa` → proxy to `192.168.3.152:5001` (KAMRUI — Alexa skill)
+- `/alexa` → proxy to `http://127.0.0.1:5000/alexa` — the Alexa skill backend
+  runs **on the VPS itself**, `/var/www/alexa_solar.py` under
+  `alexa-solar.service`. It is not on the KAMRUI.
 - `/` → proxy to `https://10.8.0.2:443` (House Pi5 — solar dashboard),
   `proxy_ssl_verify off` (internal self-signed cert).
 
