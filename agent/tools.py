@@ -249,8 +249,7 @@ class Tools:
                        for g, t in totals.items()},
             "charge_rates": self.model.charge_rates(),
             "runs": [{"gen": r["gen"],
-                      "start": history.local(r["start_ts"], self.cfg)
-                                      .strftime("%Y-%m-%d %H:%M"),
+                      "start": history.stamp(r["start_ts"], self.cfg),
                       "minutes": r["duration_min"],
                       "start_v": r["start_v"], "stop_v": r["stop_v"],
                       "v_per_h": (round(r["rate_v_per_h"], 2)

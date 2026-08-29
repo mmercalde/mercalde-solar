@@ -468,8 +468,7 @@ class LoadModel:
             return "now"
         if reached - now <= PROJECTION_SOON_SECONDS:
             return f"≤ {PROJECTION_SOON_SECONDS // 60} min"
-        return (datetime.fromtimestamp(reached, history.tzinfo(self.cfg))
-                        .strftime("%H:%M"))
+        return history.clock(reached, self.cfg)
 
     def projection_label(self, projection, now=None):
         """The display string for a projection, whatever shape it arrived in."""

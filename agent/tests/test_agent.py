@@ -1,6 +1,7 @@
 """Agent logic that runs without a model or a network: the plan record,
 the recommendation contract, answer grounding, and the anomaly triggers."""
 
+import re
 import sqlite3
 from datetime import datetime, timedelta
 
@@ -36,7 +37,7 @@ def base_facts(cfg, gate_open=False):
         "weather": {}, "sunrise_ts": int(datetime(
             2026, 8, 29, 6, 31, tzinfo=history.tzinfo(cfg)).timestamp()),
         "forecast": {"learned": True, "hours": 12, "total_wh": 10800},
-        "projection": {"reached": now + 43800, "at": "04:10", "hours": 12.2},
+        "projection": {"reached": now + 43800, "at": "4:10 am", "hours": 12.2},
         "drawdown": {"wh": 10800, "month": 8, "nights": 12},
         "gate": {"open": gate_open},
         "soc_curve": {"points": 12, "soc_at_start_threshold": 41.0,
@@ -63,20 +64,20 @@ def test_plan_record_matches_the_spec_shape(a, cfg):
                         "no (learning phase)")
     lines = rec.splitlines()
     assert len(lines) == 10
-    assert lines[0] == "2026-08-28 16:00  V 55.8  SOC 84%  load 1.1 kW"
+    assert lines[0] == "2026-08-28 4:00 pm  V 55.8  SOC 84%  load 1.1 kW"
     assert lines[1] == "peak today: 55.8 V  (threshold 57.0 -> solar shortfall)"
     assert lines[2] == "overnight Wh (profile, Aug weekday): 10,800"
-    assert lines[3] == "projected 52.0 V at: 04:10   sunrise 06:31"
+    assert lines[3] == "projected 52.0 V at: 4:10 am   sunrise 6:31 am"
     assert lines[4] == ("forecast tomorrow: 20% cloud, est. solar 61.0 kWh "
                         "(Aug clear-day 68.0)")
     assert lines[5] == ("POLICY 3 storm stop 57.0: no (tomorrow 20% daylight "
                         "cloud < 70%)")
-    assert lines[6] == ("POLICY 3 pre-dawn stop 54.5: no (52 V projected 04:10, "
-                        "2.4 h before sunrise 06:31 (window 2.0 h))")
+    assert lines[6] == ("POLICY 3 pre-dawn stop 54.5: no (52 V projected 4:10 am, "
+                        "2.4 h before sunrise 6:31 am (window 2.0 h))")
     assert lines[7] == ("POLICY 4 solo top-up: FIRES (peak 55.8 < 57.0; 52 V "
-                        "projected 04:10 before sunrise 06:31; V 55.8 > 55.0 → "
-                        "Kubota; 57.0 reachable in 1.2 h at 1.0 V/h; the run "
-                        "begins when the pack falls to 55.0)")
+                        "projected 4:10 am before sunrise 6:31 am; V 55.8 > "
+                        "55.0 → Kubota; 57.0 reachable in 1.2 h at 1.0 V/h; the "
+                        "run begins when the pack falls to 55.0)")
     assert lines[8].startswith("recommend: Kubota solo")
     assert lines[9] == "applied: no (learning phase)"
 
@@ -112,7 +113,7 @@ def test_a_projection_already_at_the_target_reads_now_not_a_question_mark(a, cfg
     f["projection"] = {"reached": f["now"], "at": "now", "hours": 0.0,
                        "reason": "already at or below target"}
     line = a.plan_record(f, "x", "y").splitlines()[3]
-    assert line == "projected 52.0 V at: now   sunrise 06:31"
+    assert line == "projected 52.0 V at: now   sunrise 6:31 am"
     assert "?" not in line
 
 
@@ -294,7 +295,7 @@ def test_the_report_names_the_plan_it_scored(a, cfg, morning, monkeypatch, capsy
     f["now"] = morning
     monkeypatch.setattr(a, "gather", lambda *x, **k: f)
     text = a.digest(evening=False)
-    assert "predicted 52.0 V at 03:08  (from the 19:00 plan)" in text
+    assert "predicted 52.0 V at 3:08 am  (from the 7:00 pm plan)" in text
 
 
 # --- what the Pi5 watchdog is told to reset to ------------------------------
@@ -549,3 +550,33 @@ def test_the_tick_prompt_omits_the_line_when_the_curve_is_unlearned(a, cfg):
                           "gen_minutes": {"mep": 0, "kubota": 0}},
              weather={"tomorrow": {"max_temp_c": 26.0}})
     assert "SOC" not in a.tick_prompt(f).split("learned:")[0].split("FORECAST")[1]
+
+
+# --- the owner reads a 12-hour clock ----------------------------------------
+
+def test_every_time_in_a_plan_record_is_twelve_hour(a, cfg):
+    """No 24-hour time may reach the owner. Logs and the database keep theirs."""
+    f = base_facts(cfg)
+    rec = a.plan_record(f, "no change", "no (dry run)")
+    assert "4:00 pm" in rec and "4:10 am" in rec and "6:31 am" in rec
+    assert not re.search(r"\b(1[3-9]|2[0-3]):[0-5]\d\b", rec), rec
+    for t in re.findall(r"\b\d{1,2}:[0-5]\d\b", rec):
+        assert 1 <= int(t.split(":")[0]) <= 12, t
+
+
+def test_every_time_in_the_tick_prompt_is_twelve_hour(a, cfg):
+    """The model quotes these back, so it must never have to convert one."""
+    prompt = a.tick_prompt(prompt_facts(cfg))
+    assert not re.search(r"\b(1[3-9]|2[0-3]):[0-5]\d\b", prompt), prompt
+
+
+def test_the_overnight_report_is_twelve_hour(a, cfg, morning, monkeypatch):
+    plan_at(a, cfg, "2026-08-27", 19, 0, 3, 8)
+    history.record_sample(a.conn, {"batteryVoltage": 52.1, "battSocBM": 40},
+                          ts=morning - 3600)
+    f = base_facts(cfg)
+    f["now"] = morning
+    monkeypatch.setattr(a, "gather", lambda *x, **k: f)
+    text = a.digest(evening=False)
+    assert "3:08 am" in text and "6:00 am" in text
+    assert not re.search(r"\b(1[3-9]|2[0-3]):[0-5]\d\b", text), text

@@ -331,7 +331,7 @@ def test_a_projection_inside_the_quarter_hour_is_a_window_not_a_clock(conn, cfg,
     """A minute-precise time ten minutes out is spurious precision."""
     base = ts_at(cfg, "2026-08-20", 22)
     assert lm.projection_label({"reached": base + 600}, base) == "≤ 15 min"
-    assert lm.projection_label({"reached": base + 1200}, base) == "22:20"
+    assert lm.projection_label({"reached": base + 1200}, base) == "10:20 pm"
 
 
 def test_a_projection_that_was_never_reached_has_no_label(lm):
@@ -342,7 +342,7 @@ def test_a_projection_that_was_never_reached_has_no_label(lm):
 def test_a_projection_missing_its_label_is_derived_not_dashed(conn, cfg, lm):
     """Nothing may put "?" back: an old record without `at` still reads."""
     base = ts_at(cfg, "2026-08-20", 22)
-    assert lm.projection_label({"reached": base + 7200}, base) == "00:00"
+    assert lm.projection_label({"reached": base + 7200}, base) == "12:00 am"
 
 
 # --- solar ------------------------------------------------------------------

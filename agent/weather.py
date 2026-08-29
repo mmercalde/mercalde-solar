@@ -117,11 +117,11 @@ def summary(cfg, hours=48, now=None):
     out = {"hours": hours, "today": window(today), "tomorrow": window(tomorrow)}
     sun = sun_times(cfg, today, data=data)
     if sun:
-        out["sunrise"] = datetime.fromtimestamp(sun[0], history.tzinfo(cfg)).strftime("%H:%M")
-        out["sunset"] = datetime.fromtimestamp(sun[1], history.tzinfo(cfg)).strftime("%H:%M")
+        out["sunrise"] = history.clock(sun[0], cfg)
+        out["sunset"] = history.clock(sun[1], cfg)
     nxt = next_sunrise(cfg, now, data=data)
     if nxt:
-        out["next_sunrise"] = datetime.fromtimestamp(nxt, history.tzinfo(cfg)).strftime("%H:%M")
+        out["next_sunrise"] = history.clock(nxt, cfg)
         out["next_sunrise_ts"] = nxt
     return out
 

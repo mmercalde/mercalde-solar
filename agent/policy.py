@@ -35,7 +35,7 @@ OVERRULE_RE = re.compile(r"overrul\w*\s*:?\s*policy\s*(\d+)", re.IGNORECASE)
 
 
 def _clock(ts, cfg):
-    return history.local(ts, cfg).strftime("%H:%M") if ts else "?"
+    return history.clock(ts, cfg) if ts else "?"
 
 
 def _hours(x):

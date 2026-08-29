@@ -48,8 +48,8 @@ def test_the_solo_top_up_fires_on_the_night_it_was_missed(cfg, night):
 def test_the_firing_line_shows_every_number(cfg, night):
     """The owner's example, to the digit."""
     assert policy.line(policy.solo_top_up(cfg, night)) == (
-        "POLICY 4 solo top-up: FIRES (peak 55.0 < 57.0; 52 V projected 03:08 "
-        "before sunrise 06:21; V 54.2 ≤ 55.0 → MEP; 57.0 reachable in 1.8 h "
+        "POLICY 4 solo top-up: FIRES (peak 55.0 < 57.0; 52 V projected 3:08 am "
+        "before sunrise 6:21 am; V 54.2 ≤ 55.0 → MEP; 57.0 reachable in 1.8 h "
         "at 1.6 V/h)")
 
 
@@ -62,7 +62,7 @@ def test_a_peak_that_reached_the_threshold_does_not_fire(cfg, night):
 def test_reaching_52_after_sunrise_does_not_fire(cfg, night):
     night["projection"] = {"reached": ts_at(cfg, "2026-08-28", 9, 0)}
     r = policy.solo_top_up(cfg, night)
-    assert not r["fires"] and "not before sunrise 06:21" in r["detail"]
+    assert not r["fires"] and "not before sunrise 6:21 am" in r["detail"]
 
 
 def test_no_projection_does_not_fire_and_says_why(cfg, night):
@@ -136,7 +136,7 @@ def test_an_unknown_forecast_does_not_fire(cfg, night):
 def test_a_run_landing_before_a_clear_sunrise_drops_the_stop(cfg, night):
     night["projection"] = {"reached": ts_at(cfg, "2026-08-28", 5, 0)}
     r = policy.predawn_stop(cfg, night)
-    assert r["fires"] and "1.4 h before sunrise 06:21 ≤ 2.0 h" in r["detail"]
+    assert r["fires"] and "1.4 h before sunrise 6:21 am ≤ 2.0 h" in r["detail"]
     assert r["proposal"]["mep_stop"] == 54.5 and r["proposal"]["kub_stop"] == 54.5
 
 

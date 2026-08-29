@@ -197,6 +197,28 @@ def local(ts, cfg):
     return datetime.fromtimestamp(ts, tzinfo(cfg))
 
 
+def clock(ts, cfg):
+    """A time as the owner reads it: 12-hour with am/pm, no leading zero.
+
+    Everything the owner sees goes through here - plan records, digests,
+    Telegram, /plan, the dashboard badge - and so does everything the model is
+    told, so it can quote a time back without converting one. Logs and the
+    database stay on 24-hour and epoch seconds respectively.
+    """
+    return fmt_clock(local(ts, cfg))
+
+
+def fmt_clock(t):
+    """The same, for a datetime that is already local."""
+    return t.strftime("%I:%M %p").lstrip("0").lower()
+
+
+def stamp(ts, cfg):
+    """Date and time together, for a plan record's first line."""
+    t = local(ts, cfg)
+    return f"{t.strftime('%Y-%m-%d')} {fmt_clock(t)}"
+
+
 def local_day(ts, cfg):
     return local(ts, cfg).strftime("%Y-%m-%d")
 

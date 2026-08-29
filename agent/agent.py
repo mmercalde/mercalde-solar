@@ -187,7 +187,7 @@ class Agent:
 
         load_kw = ("gen running" if facts["load_w"] is None
                    else f"{facts['load_w'] / 1000.0:.1f} kW")
-        lines.append(f"{t.strftime('%Y-%m-%d %H:%M')}  "
+        lines.append(f"{history.stamp(facts['now'], self.cfg)}  "
                      f"V {_fmt(facts['voltage'], 1)}  "
                      f"SOC {facts['soc'] if facts['soc'] is not None else '?'}%  "
                      f"load {load_kw}")
@@ -211,7 +211,7 @@ class Agent:
             lines.append(f"overnight Wh (profile, {month} {kind}): not learned yet")
 
         proj = facts["projection"]
-        sunrise = (datetime.fromtimestamp(facts["sunrise_ts"], tz).strftime("%H:%M")
+        sunrise = (history.clock(facts["sunrise_ts"], self.cfg)
                    if facts["sunrise_ts"] else "?")
         if proj and proj.get("reached"):
             lines.append(f"projected 52.0 V at: "
@@ -267,7 +267,8 @@ class Agent:
         proj = f["projection"] or {}
 
         parts = [
-            f"Time: {t.strftime('%Y-%m-%d %H:%M %Z')} ({'weekend' if t.weekday() >= 5 else 'weekday'})",
+            f"Time: {history.stamp(f['now'], self.cfg)} {t.strftime('%Z')} "
+            f"({'weekend' if t.weekday() >= 5 else 'weekday'})",
             "",
             "NOW",
             f"  battery {_fmt(f['voltage'], 2)} V, SOC {f['soc']}%, "
@@ -493,19 +494,19 @@ class Agent:
                 "SELECT MIN(battery_v) v, ts FROM samples WHERE ts >= ? "
                 "ORDER BY battery_v LIMIT 1", (since,)).fetchone()
             if predicted:
-                at = datetime.fromtimestamp(source_ts, tz).strftime("%H:%M")
+                at = history.clock(source_ts, self.cfg)
                 lines.append(f"predicted 52.0 V at "
                              f"{self.model.projection_label(predicted, source_ts)}"
                              f"  (from the {at} plan)")
             else:
                 lines.append("no 52.0 V projection was made last night")
             if low and low["v"] is not None:
-                at = datetime.fromtimestamp(low["ts"], tz).strftime("%H:%M")
+                at = history.clock(low["ts"], self.cfg)
                 lines.append(f"actual low {low['v']:.2f} V at {at}")
             runs = history.gen_runs(self.conn, 1, now=now)
             if runs:
                 for r in runs:
-                    start = datetime.fromtimestamp(r["start_ts"], tz).strftime("%H:%M")
+                    start = history.clock(r["start_ts"], self.cfg)
                     lines.append(f"{r['gen']} ran {start} for "
                                  f"{r['duration_min']:.0f} min "
                                  f"({_fmt(r['start_v'], 1)} -> {_fmt(r['stop_v'], 1)} V)")

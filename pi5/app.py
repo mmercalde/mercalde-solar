@@ -1991,7 +1991,10 @@ function renderAgent(d){
   if(!d.ts){dot.className='dot stale';txt.textContent='Agent \\u00b7 no plan yet';return;}
   const mins=Math.max(0,Math.floor((Date.now()/1000-d.ts)/60));
   dot.className='dot'+(mins>30?' stale':'');
-  let s='Agent \\u00b7 tick '+mins+' min ago';
+  /* 12-hour with am/pm, as everywhere else the owner reads a time. */
+  const at=new Date(d.ts*1000).toLocaleTimeString('en-US',
+    {hour:'numeric',minute:'2-digit'}).toLowerCase();
+  let s='Agent \\u00b7 tick '+at+' ('+mins+' min ago)';
   if(d.learning&&d.learning.open===false)s+=' \\u00b7 learning';
   txt.textContent=s;
   if(agentPlanShown)showAgentPlan();
