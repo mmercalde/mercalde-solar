@@ -2,7 +2,7 @@
 the recommendation contract, answer grounding, and the anomaly triggers."""
 
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -214,6 +214,87 @@ def test_plan_is_returned_verbatim_without_the_model(a, conn):
 
 def test_plan_before_any_tick_says_so(a):
     assert "No plan" in a.answer("plan")
+
+
+# --- the overnight report's reference prediction -----------------------------
+
+def plan_at(a, cfg, day, hour, minute, reached_hour, reached_minute=0):
+    """One recorded tick, projecting 52 V at the next such clock time."""
+    tz = history.tzinfo(cfg)
+    when = datetime.strptime(day, "%Y-%m-%d").replace(hour=hour, minute=minute,
+                                                      tzinfo=tz)
+    ts = int(when.timestamp())
+    reached = when.replace(hour=reached_hour, minute=reached_minute)
+    if reached <= when:
+        reached += timedelta(days=1)
+    reached = int(reached.timestamp())
+    history.record_plan(a.conn, f"plan at {hour:02d}:{minute:02d}",
+                        {"projection": {"reached": reached}}, ts=ts)
+    return ts
+
+
+@pytest.fixture
+def morning(cfg):
+    """07:00, the hour the overnight report goes out."""
+    return int(datetime(2026, 8, 28, 7, 0,
+                        tzinfo=history.tzinfo(cfg)).timestamp())
+
+
+def test_the_report_scores_the_evening_digests_projection(a, cfg, morning):
+    """The 21:25 tick had the MEP still cooling; the 19:00 plan is the one the
+    owner was shown."""
+    plan_at(a, cfg, "2026-08-27", 19, 0, 3, 8)
+    plan_at(a, cfg, "2026-08-27", 21, 25, 1, 34)
+    plan_at(a, cfg, "2026-08-27", 23, 45, 4, 30)
+    ts, p = a.reference_projection(morning)
+    assert history.local(ts, cfg).strftime("%H:%M") == "19:00"
+    assert history.local(p["reached"], cfg).strftime("%H:%M") == "03:08"
+
+
+def test_a_later_tick_in_the_digest_hour_does_not_displace_it(a, cfg, morning):
+    plan_at(a, cfg, "2026-08-27", 19, 0, 3, 8)
+    plan_at(a, cfg, "2026-08-27", 19, 45, 2, 0)
+    ts, _ = a.reference_projection(morning)
+    assert history.local(ts, cfg).strftime("%H:%M") == "19:00"
+
+
+def test_without_a_digest_tick_it_takes_the_last_before_midnight(a, cfg, morning):
+    plan_at(a, cfg, "2026-08-27", 20, 30, 1, 34)
+    plan_at(a, cfg, "2026-08-27", 23, 45, 4, 30)
+    plan_at(a, cfg, "2026-08-28", 2, 0, 5, 0)
+    ts, p = a.reference_projection(morning)
+    assert history.local(ts, cfg).strftime("%H:%M") == "23:45"
+    assert history.local(p["reached"], cfg).strftime("%H:%M") == "04:30"
+
+
+def test_plans_without_a_projection_are_not_candidates(a, cfg, morning):
+    ts = int(datetime(2026, 8, 27, 19, 0,
+                      tzinfo=history.tzinfo(cfg)).timestamp())
+    history.record_plan(a.conn, "no projection",
+                        {"projection": {"reached": None, "reason": "x"}}, ts=ts)
+    plan_at(a, cfg, "2026-08-27", 23, 45, 4, 30)
+    ts, _ = a.reference_projection(morning)
+    assert history.local(ts, cfg).strftime("%H:%M") == "23:45"
+
+
+def test_a_night_with_no_projection_at_all_says_so(a, cfg, morning):
+    assert a.reference_projection(morning) == (None, None)
+
+
+def test_only_after_midnight_projections_are_better_than_none(a, cfg, morning):
+    plan_at(a, cfg, "2026-08-28", 2, 0, 5, 0)
+    plan_at(a, cfg, "2026-08-28", 4, 0, 5, 30)
+    ts, _ = a.reference_projection(morning)
+    assert history.local(ts, cfg).strftime("%H:%M") == "04:00"
+
+
+def test_the_report_names_the_plan_it_scored(a, cfg, morning, monkeypatch, capsys):
+    plan_at(a, cfg, "2026-08-27", 19, 0, 3, 8)
+    f = base_facts(cfg)
+    f["now"] = morning
+    monkeypatch.setattr(a, "gather", lambda *x, **k: f)
+    text = a.digest(evening=False)
+    assert "predicted 52.0 V at 03:08  (from the 19:00 plan)" in text
 
 
 # --- anomaly triggers -------------------------------------------------------

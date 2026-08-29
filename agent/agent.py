@@ -473,22 +473,15 @@ class Agent:
                 lines += ["", plan["text"]]
         else:
             since = now - 16 * 3600
-            predicted = None
-            for row in self.conn.execute(
-                    "SELECT ts, data FROM plans WHERE ts >= ? ORDER BY ts", (since,)):
-                try:
-                    d = json.loads(row["data"] or "{}")
-                except json.JSONDecodeError:
-                    continue
-                p = (d.get("projection") or {})
-                if p.get("reached"):
-                    predicted = p
-                    break
+            source_ts, predicted = self.reference_projection(now)
             low = self.conn.execute(
                 "SELECT MIN(battery_v) v, ts FROM samples WHERE ts >= ? "
                 "ORDER BY battery_v LIMIT 1", (since,)).fetchone()
             if predicted:
-                lines.append(f"predicted 52.0 V at {predicted.get('at')}")
+                at = datetime.fromtimestamp(source_ts, tz).strftime("%H:%M")
+                lines.append(f"predicted 52.0 V at "
+                             f"{self.model.projection_label(predicted, source_ts)}"
+                             f"  (from the {at} plan)")
             else:
                 lines.append("no 52.0 V projection was made last night")
             if low and low["v"] is not None:
@@ -513,6 +506,43 @@ class Agent:
             return text
         telegram.send(self.cfg, text)
         return text
+
+    def reference_projection(self, now):
+        """(tick ts, projection) the overnight report is scored against.
+
+        Not the first projection of the night. That one is made around 21:00
+        with the MEP still cooling and the pack still settling, and on the
+        first live night it read 01:34 against an actual low of 04:55 - the
+        least informed number available. The evening digest's own tick is the
+        one the owner was shown at 19:00, so that is the one to score; failing
+        that, the last tick before midnight.
+        """
+        tz = history.tzinfo(self.cfg)
+        midnight = int(datetime.fromtimestamp(now, tz)
+                       .replace(hour=0, minute=0, second=0, microsecond=0)
+                       .timestamp())
+        evenings = [h for h in self.cfg["digest_hours"] if h >= 12]
+        made = []
+        for row in self.conn.execute(
+                "SELECT ts, data FROM plans WHERE ts >= ? AND ts <= ? ORDER BY ts",
+                (now - 16 * 3600, now)):
+            try:
+                d = json.loads(row["data"] or "{}")
+            except json.JSONDecodeError:
+                continue
+            p = d.get("projection") or {}
+            if p.get("reached"):
+                made.append((row["ts"], p))
+        if not made:
+            return None, None
+        if evenings:
+            # The first tick of the digest hour is the one the digest quoted.
+            digest_hour = [m for m in made
+                           if history.local(m[0], self.cfg).hour == evenings[-1]]
+            if digest_hour:
+                return digest_hour[0]
+        before_midnight = [m for m in made if m[0] < midnight]
+        return before_midnight[-1] if before_midnight else made[-1]
 
     # --- inbound questions --------------------------------------------------
 
