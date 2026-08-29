@@ -297,6 +297,35 @@ def test_the_report_names_the_plan_it_scored(a, cfg, morning, monkeypatch, capsy
     assert "predicted 52.0 V at 03:08  (from the 19:00 plan)" in text
 
 
+# --- what the Pi5 watchdog is told to reset to ------------------------------
+
+def test_plan_json_offers_the_config_defaults_by_default(a, cfg):
+    payload = a.latest_plan_json()
+    assert payload["defaults"] == {"start": cfg["default_start"],
+                                   "stop": cfg["default_stop"]}
+    assert payload["owner_baseline"] is None
+
+
+def test_plan_json_offers_the_owners_values_once_they_have_set_them(a, cfg):
+    a.guard.state["owner_baseline"] = {"mep_start": 52.0, "mep_stop": 55.0,
+                                       "kub_start": 52.0, "kub_stop": 55.0}
+    payload = a.latest_plan_json()
+    assert payload["defaults"] == {"start": 52.0, "stop": 55.0}
+    assert payload["baseline"]["mep_stop"] == 55.0
+
+
+def test_a_baseline_the_watchdog_cannot_express_is_not_forced_into_one_pair(a, cfg,
+                                                                            caplog):
+    """It applies one start/stop pair to both generators."""
+    a.guard.state["owner_baseline"] = {"mep_start": 52.0, "mep_stop": 55.0,
+                                       "kub_start": 53.0, "kub_stop": 56.0}
+    payload = a.latest_plan_json()
+    assert payload["defaults"] == {"start": cfg["default_start"],
+                                   "stop": cfg["default_stop"]}
+    assert payload["baseline"]["kub_start"] == 53.0, "still reported in full"
+    assert "differs per generator" in caplog.text
+
+
 # --- anomaly triggers -------------------------------------------------------
 
 def stub_data(**over):

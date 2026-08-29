@@ -632,11 +632,26 @@ class Agent:
         except sqlite3.Error as e:
             log.warning("could not read the learning gate: %s", e)
             gate = None
+        # The Pi5 watchdog resets to `defaults`; it must not carry its own copy
+        # of numbers that live in config.json. Once the owner has set the
+        # thresholds by hand, theirs are the values to return to, so those are
+        # what it is told - but it applies one start/stop pair to both
+        # generators, so it can only be told a baseline shaped that way.
+        baseline = self.guard.baseline()
+        symmetric = (baseline["mep_start"] == baseline["kub_start"]
+                     and baseline["mep_stop"] == baseline["kub_stop"])
+        defaults = ({"start": baseline["mep_start"], "stop": baseline["mep_stop"]}
+                    if symmetric else
+                    {"start": self.cfg["default_start"],
+                     "stop": self.cfg["default_stop"]})
+        if not symmetric:
+            log.warning("the owner's baseline %s differs per generator; the "
+                        "watchdog can only be told one pair, so it still has "
+                        "the config defaults", baseline)
         payload = {"ts": None, "text": None, "data": {}, "learning": gate,
-                   # The Pi5 watchdog resets to these; it must not carry its
-                   # own copy of numbers that live in config.json.
-                   "defaults": {"start": self.cfg["default_start"],
-                                "stop": self.cfg["default_stop"]},
+                   "defaults": defaults,
+                   "baseline": baseline,
+                   "owner_baseline": self.guard.owner_baseline(),
                    "intended": self.guard.intended()}
         plan = history.latest_plan(conn)
         if plan:
