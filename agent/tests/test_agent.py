@@ -8,6 +8,7 @@ import pytest
 
 import agent as agentmod
 import history
+import policy
 
 
 @pytest.fixture
@@ -27,7 +28,7 @@ def a(cfg, conn, monkeypatch, tmp_path):
 def base_facts(cfg, gate_open=False):
     now = int(datetime(2026, 8, 28, 16, 0,
                        tzinfo=history.tzinfo(cfg)).timestamp())
-    return {
+    f = {
         "now": now, "today": "2026-08-28",
         "data": {}, "config": {},
         "voltage": 55.8, "soc": 84, "load_w": 1100, "solar_w": 3000,
@@ -44,8 +45,14 @@ def base_facts(cfg, gate_open=False):
                       "scraped_observations": 9000},
         "tomorrow_cloud": 20,
         "est_solar": {"wh": 61000, "clear_day_wh": 68000},
-        "summary_24h": {}, "thresholds": {}, "intended": {},
+        "summary_24h": {}, "intended": {},
+        "thresholds": {"mep_start": 52.0, "mep_stop": 56.0,
+                       "kub_start": 52.0, "kub_stop": 56.0},
+        "charge_rates": {"mep": {"v_per_h": 1.6}, "kubota": {"v_per_h": 1.0}},
+        "run_window_h": {"mep": 2.0, "kubota": 2.0},
     }
+    f["policy"] = policy.evaluate(cfg, f)
+    return f
 
 
 # --- the plan record --------------------------------------------------------
@@ -55,15 +62,31 @@ def test_plan_record_matches_the_spec_shape(a, cfg):
                         "Kubota solo, start 56.0 / stop 57.0; MEP 52.0 / 54.5",
                         "no (learning phase)")
     lines = rec.splitlines()
-    assert len(lines) == 7
+    assert len(lines) == 10
     assert lines[0] == "2026-08-28 16:00  V 55.8  SOC 84%  load 1.1 kW"
     assert lines[1] == "peak today: 55.8 V  (threshold 57.0 -> solar shortfall)"
     assert lines[2] == "overnight Wh (profile, Aug weekday): 10,800"
     assert lines[3] == "projected 52.0 V at: 04:10   sunrise 06:31"
     assert lines[4] == ("forecast tomorrow: 20% cloud, est. solar 61.0 kWh "
                         "(Aug clear-day 68.0)")
-    assert lines[5].startswith("recommend: Kubota solo")
-    assert lines[6] == "applied: no (learning phase)"
+    assert lines[5] == ("POLICY 3 storm stop 57.0: no (tomorrow 20% daylight "
+                        "cloud < 70%)")
+    assert lines[6] == ("POLICY 3 pre-dawn stop 54.5: no (52 V projected 04:10, "
+                        "2.4 h before sunrise 06:31 (window 2.0 h))")
+    assert lines[7] == ("POLICY 4 solo top-up: FIRES (peak 55.8 < 57.0; 52 V "
+                        "projected 04:10 before sunrise 06:31; V 55.8 > 55.0 → "
+                        "Kubota; 57.0 reachable in 1.2 h at 1.0 V/h; the run "
+                        "begins when the pack falls to 55.0)")
+    assert lines[8].startswith("recommend: Kubota solo")
+    assert lines[9] == "applied: no (learning phase)"
+
+
+def test_the_plan_record_shows_a_rule_that_does_not_fire_and_why(a, cfg):
+    f = base_facts(cfg)
+    f["peak_today"] = 57.4
+    f["policy"] = policy.evaluate(cfg, f)
+    lines = a.plan_record(f, "no change", "no (dry run)").splitlines()
+    assert "POLICY 4 solo top-up: no (peak 57.4 ≥ 57.0)" in lines
 
 
 def test_peak_at_or_above_threshold_is_not_a_shortfall(a, cfg):
@@ -77,6 +100,7 @@ def test_plan_record_says_what_it_has_not_learned(a, cfg):
     f["drawdown"] = None
     f["projection"] = {"reached": None, "reason": "pack capacity not learned"}
     f["est_solar"] = None
+    f["policy"] = policy.evaluate(cfg, f)
     lines = a.plan_record(f, "no change", "no (learning phase)").splitlines()
     assert lines[2].endswith("not learned yet")
     assert "not projected (pack capacity not learned)" in lines[3]
@@ -258,6 +282,62 @@ def test_an_anomaly_refires_after_the_cooldown(quiet, monkeypatch):
     fire(quiet, monkeypatch, mepAgsOnline=False)
     quiet.anomaly_last["ags_mepAgsOnline"] -= agentmod.ANOMALY_COOLDOWN + 1
     assert "ags_mepAgsOnline" in fire(quiet, monkeypatch, mepAgsOnline=False)
+
+
+# --- the POLICY evaluation reaches the model and is scored ------------------
+
+def prompt_facts(cfg, **over):
+    f = base_facts(cfg)
+    f.update(data={}, config={"mep803a": {"maxRuntime": 120},
+                              "kubota": {"maxRuntime": 120}},
+             intended={"mep_start": 52.0, "mep_stop": 56.0,
+                       "kub_start": 52.0, "kub_stop": 56.0},
+             summary_24h={"min_v": 52.4, "max_v": 55.1, "avg_v": 53.8,
+                          "solar_wh": 31000, "load_wh": 32000,
+                          "gen_minutes": {"mep": 0, "kubota": 0}},
+             weather={"tomorrow": {"max_temp_c": 26.0}})
+    f.update(over)
+    f["policy"] = policy.evaluate(cfg, f)
+    return f
+
+
+def test_the_tick_prompt_carries_the_computed_rules(a, cfg):
+    prompt = a.tick_prompt(prompt_facts(cfg))
+    assert "POLICY EVALUATION" in prompt
+    assert "POLICY 4 solo top-up: FIRES" in prompt
+    assert "the arithmetic is already done, do not redo it" in prompt
+
+
+def test_the_tick_prompt_demands_an_answer_to_a_firing_rule(a, cfg):
+    prompt = a.tick_prompt(prompt_facts(cfg))
+    assert "POLICY 4 solo top-up FIRES" in prompt
+    assert 'overrule POLICY <n>: <reason>' in prompt
+    assert "policy miss" in prompt
+
+
+def test_the_tick_prompt_says_so_when_nothing_fires(a, cfg):
+    prompt = a.tick_prompt(prompt_facts(cfg, peak_today=57.4))
+    assert "No rule fires." in prompt
+    assert "FIRES" not in prompt
+
+
+def test_a_firing_rule_answered_with_no_change_is_audited_as_a_miss(a, cfg, conn):
+    f = prompt_facts(cfg)
+    missed = policy.misses(f["policy"], "recommend: no change - looks fine", None)
+    a.guard.record_policy_miss(missed, "no change - looks fine",
+                               f["voltage"], f["soc"], now=f["now"])
+    row = conn.execute("SELECT * FROM actions ORDER BY ts DESC LIMIT 1").fetchone()
+    assert row["tool"] == "policy_miss" and row["result"] == "missed"
+    assert row["allowed"] == 0 and row["voltage"] == 55.8
+    assert "POLICY 4 solo top-up fired" in row["reason"]
+    assert "the model said: no change - looks fine" in row["reason"]
+
+
+def test_an_overruled_rule_is_not_audited_as_a_miss(a, cfg, conn):
+    f = prompt_facts(cfg)
+    text = ("overrule POLICY 4: the Kubota is mid-cooldown.\n"
+            "recommend: no change - waiting out the cooldown")
+    assert policy.misses(f["policy"], text, None) == []
 
 
 # --- the learned voltage/SOC curve reaches the model ------------------------

@@ -30,6 +30,7 @@ import counters
 import guard as guardmod
 import history
 import loadmodel
+import policy as policymod
 import prompts
 import telegram
 import tools as toolsmod
@@ -126,7 +127,21 @@ class Agent:
                               else t.get("cloud_pct"))
             est_solar = self.model.estimate_solar_wh(tomorrow_cloud, now=now)
 
-        return {
+        # POLICY 4 and 5 are arithmetic over these two, so they are gathered
+        # here rather than left for the model to guess at.
+        charge_rates, run_window_h = {}, {}
+        for gen, cfg_key in (("mep", "mep803a"), ("kubota", "kubota")):
+            rate = self.model.charge_rate(gen, solo=True, now=now)
+            if rate is None:
+                rate = self.model.charge_rate(gen, solo=None, now=now)
+            charge_rates[gen] = rate
+            try:
+                run_window_h[gen] = min(live[cfg_key]["maxRuntime"] / 60.0,
+                                        self.cfg["ags_max_run_hours"][gen])
+            except (KeyError, TypeError):
+                run_window_h[gen] = self.cfg["ags_max_run_hours"][gen]
+
+        facts = {
             "now": now, "today": today, "data": data, "config": live,
             "voltage": data.get("batteryVoltage"), "soc": data.get("battSocBM"),
             "load_w": None if gen_running else (data.get("acPower1") or 0)
@@ -140,7 +155,10 @@ class Agent:
             "summary_24h": history.summary(self.conn, 24, now=now),
             "thresholds": toolsmod.thresholds_from_config(live),
             "intended": self.guard.intended(),
+            "charge_rates": charge_rates, "run_window_h": run_window_h,
         }
+        facts["policy"] = policymod.evaluate(self.cfg, facts)
+        return facts
 
     # --- the plan record ----------------------------------------------------
 
@@ -198,6 +216,10 @@ class Agent:
         else:
             lines.append(f"forecast tomorrow: {facts['tomorrow_cloud']}% cloud, "
                          f"est. solar not learned yet")
+
+        # Every numeric rule, with its arithmetic shown. The model may not
+        # claim "no change" past a rule that fires without overruling it.
+        lines += policymod.lines(facts.get("policy") or [])
 
         lines.append(f"recommend: {recommend}")
         lines.append(f"applied: {applied}")
@@ -281,6 +303,21 @@ class Agent:
                          f"(clear day {_kwh(f['est_solar']['clear_day_wh'])} kWh)")
         parts.append(f"  sunrise {wx.get('next_sunrise', '?')}, "
                      f"sunset {wx.get('sunset', '?')}")
+
+        rules = f.get("policy") or []
+        if rules:
+            parts += ["", "POLICY EVALUATION (computed in Python from the facts "
+                      "above; the arithmetic is already done, do not redo it)"]
+            parts += ["  " + ln for ln in policymod.lines(rules)]
+            fired = policymod.firing(rules)
+            if fired:
+                which = ", ".join(f"POLICY {r['rule']} {r['name']}" for r in fired)
+                parts.append(f"  {which} FIRES. Either set the thresholds it "
+                             f"calls for, or overrule it on its own line: "
+                             f'"overrule POLICY <n>: <reason>". Saying "no '
+                             f'change" without that line is a policy miss.')
+            else:
+                parts.append("  No rule fires.")
 
         gate = f["gate"]
         parts += ["", "STATUS"]
@@ -366,6 +403,13 @@ class Agent:
         applied = self.applied_line(facts, write_result)
         record = self.plan_record(facts, recommend, applied)
 
+        # A rule that fired and was neither set nor overruled is the failure
+        # mode of the first live night, so it is recorded as one.
+        missed = policymod.misses(facts["policy"], text, write_result)
+        if missed:
+            self.guard.record_policy_miss(missed, recommend, facts["voltage"],
+                                          facts["soc"], now=facts["now"])
+
         history.record_plan(self.conn, record, {
             "voltage": facts["voltage"], "soc": facts["soc"],
             "peak_today": facts["peak_today"],
@@ -373,6 +417,8 @@ class Agent:
             "gate_open": facts["gate"]["open"],
             "projection": facts["projection"],
             "soc_curve": facts["soc_curve"],
+            "policy": facts["policy"],
+            "policy_misses": [r["rule"] for r in missed],
             "write": write_result,
             "dry_run": self.dry_run,
         }, ts=facts["now"])

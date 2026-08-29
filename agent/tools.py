@@ -283,12 +283,16 @@ class Tools:
         if self.guard is None:
             return {"applied": False,
                     "reason": "no guard is attached, so no write is permitted"}
+        values = {k: v for k, v in args.items() if k != "reason"}
         allowed, why = self.guard.check(**args)
         if not allowed:
-            return {"applied": False, "refused_by": "guard", "reason": why}
+            # The values go back too: a refusal is the guard's decision, not a
+            # failure to propose, and the plan record scores those separately.
+            return {"applied": False, "refused_by": "guard",
+                    "would_set": values, "reason": why}
         if self.dry_run:
             return {"applied": False, "dry_run": True,
-                    "would_set": args, "reason": why}
+                    "would_set": values, "reason": why}
         live = apply_thresholds(self.cfg, mep_start, mep_stop, kub_start, kub_stop)
         applied = thresholds_from_config(live)
         self.guard.note_write(applied)

@@ -54,13 +54,24 @@ POLICY = """\
 # How a tick must end. The guard enforces the limits regardless of what the
 # model says, but a clear contract keeps the plan record parseable.
 TICK_CONTRACT = """\
+The POLICY EVALUATION section of every tick states, rule by rule, whether that
+rule fires. Python has already done the arithmetic; the numbers are shown so
+you can see the working, not so you can redo it. A rule that FIRES is not
+advice. You must do one of two things with it:
+
+  - set the thresholds it calls for, or
+  - overrule it on a line of its own, exactly: overrule POLICY <n>: <reason>
+
+Answering "no change" while a rule fires, with no overrule line, is a policy
+miss and is recorded against you.
+
 You may call at most 4 tools. Then finish with a final message that has a
 line beginning exactly "recommend: ".
 
 - If nothing should change, that line is: recommend: no change - <one-line reason>
-- If something should change, first call set_gen_thresholds, then call
-  send_telegram with a one-line explanation for the owner, then write the
-  recommend line describing what you set and why.
+- If something should change, call set_gen_thresholds with a one-line reason.
+  That write notifies the owner by itself, so do not also call send_telegram
+  for it. Then write the recommend line describing what you set and why.
 
 Never restate a number that no tool returned."""
 

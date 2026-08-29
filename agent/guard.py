@@ -261,18 +261,41 @@ class Guard:
 
     # --- rule 9: audit ------------------------------------------------------
 
-    def _audit(self, args, allowed, why, v, soc, now):
-        result = "allowed" if allowed else "refused"
-        history.record_action(self.conn, "set_gen_thresholds", args,
-                              allowed, why, v, soc, result, ts=now)
+    def _audit_line(self, now, text):
         line = (f"{datetime.fromtimestamp(now, history.tzinfo(self.cfg)).isoformat()} "
-                f"{result} args={json.dumps(args, sort_keys=True)} "
-                f"V={v} SOC={soc} reason={why}")
+                f"{text}")
         try:
             os.makedirs(config.DATA_DIR, exist_ok=True)
             with open(config.AUDIT_LOG, "a") as f:
                 f.write(line + "\n")
         except OSError as e:
             log.warning("could not write audit log: %s", e)
+
+    def _audit(self, args, allowed, why, v, soc, now):
+        result = "allowed" if allowed else "refused"
+        history.record_action(self.conn, "set_gen_thresholds", args,
+                              allowed, why, v, soc, result, ts=now)
+        self._audit_line(now, f"{result} args={json.dumps(args, sort_keys=True)} "
+                              f"V={v} SOC={soc} reason={why}")
         log.info("guard %s: %s", result, why)
         return allowed, why
+
+    def record_policy_miss(self, rules, recommend, v=None, soc=None, now=None):
+        """A rule fired and the model neither acted on it nor overruled it.
+
+        Not a refusal - nothing was attempted. It goes in the same audit log
+        because the question it answers is the same one: why did the agent do
+        what it did on a given night.
+        """
+        now = int(now or time.time())
+        for r in rules:
+            args = {"rule": r["rule"], "name": r["name"], "detail": r["detail"],
+                    "proposal": r.get("proposal"), "recommend": recommend}
+            why = (f"POLICY {r['rule']} {r['name']} fired ({r['detail']}) and was "
+                   f"neither set nor overruled; the model said: {recommend}")
+            history.record_action(self.conn, "policy_miss", args, False, why,
+                                  v, soc, "missed", ts=now)
+            self._audit_line(now, f"policy_miss args={json.dumps(args, sort_keys=True, default=str)} "
+                                  f"V={v} SOC={soc} reason={why}")
+            log.warning("policy miss: %s", why)
+        return len(rules)

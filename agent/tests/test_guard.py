@@ -393,6 +393,23 @@ def test_the_audit_log_file_is_written(ready, cfg, now, tmp_path):
     assert "allowed" in text and "V=54.0" in text and "SOC=80" in text
 
 
+def test_a_policy_miss_reaches_both_the_table_and_the_log(conn, ready, cfg, now,
+                                                          tmp_path):
+    """A rule fired and nothing was attempted; that is not a refusal, but the
+    audit log is where the question "why did it do that" gets answered."""
+    rule = {"rule": 4, "name": "solo top-up", "detail": "peak 55.0 < 57.0",
+            "proposal": {"mep_start": 55.0, "mep_stop": 57.0,
+                         "kub_start": 52.0, "kub_stop": 56.0}}
+    assert ready.record_policy_miss([rule], "no change - pack is healthy",
+                                    54.2, 71, now=now) == 1
+    row = conn.execute("SELECT * FROM actions ORDER BY ts DESC LIMIT 1").fetchone()
+    assert row["tool"] == "policy_miss" and row["allowed"] == 0
+    assert row["voltage"] == 54.2 and row["soc"] == 71
+    text = (tmp_path / "audit.log").read_text()
+    assert "policy_miss" in text and "solo top-up" in text
+    assert "no change - pack is healthy" in text
+
+
 def test_an_unreachable_dashboard_is_refused_and_audited(conn, ready, cfg, now,
                                                          monkeypatch):
     monkeypatch.setattr(history, "fetch_data",

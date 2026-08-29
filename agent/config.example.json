@@ -11,6 +11,7 @@
   "stop_voltage_min": 54.5,  "stop_voltage_max": 57.0,
   "default_start": 52.0, "default_stop": 56.0,
   "solo_peak_threshold": 57.0,
+  "storm_cloud_pct": 70, "clear_cloud_pct": 30, "predawn_hours": 2.0,
   "solo_select_voltage": 55.0,
   "solo_target": 57.0,
   "ags_max_run_hours": {"mep": 3, "kubota": 3},

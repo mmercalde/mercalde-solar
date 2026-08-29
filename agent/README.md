@@ -15,14 +15,17 @@ Every 15 minutes, day and night:
 
 1. Python gathers the facts — live status, thresholds, the last 24 hours,
    the load forecast to sunrise, the weather, today's peak voltage.
-2. The model sees those facts, may call up to 4 tools, and finishes with a
-   one-line recommendation.
-3. If it proposes a change, `guard.py` checks it against nine hard rules.
+2. `policy.py` computes every POLICY rule whose condition is arithmetic and
+   says, with the numbers, whether it fires.
+3. The model sees those facts and that evaluation, may call up to 4 tools, and
+   finishes with a one-line recommendation. A rule that fires must be either
+   set or overruled in writing; anything else is logged as a policy miss.
+4. If it proposes a change, `guard.py` checks it against the hard rules.
    A refusal goes back to the model as the tool result, with the reason.
-4. The plan record is written to the `plans` table. Every line but the
+5. The plan record is written to the `plans` table. Every line but the
    recommendation is computed in Python, including whether anything was
    applied — the model cannot claim a change it did not make.
-5. The intended thresholds are re-sent as a heartbeat, so the Pi5 watchdog
+6. The intended thresholds are re-sent as a heartbeat, so the Pi5 watchdog
    can tell the agent is alive.
 
 ## Layout
@@ -30,7 +33,8 @@ Every 15 minutes, day and night:
 | File | What it does |
 |---|---|
 | `agent.py` | the tick loop, plan record, digests, Telegram inbound, anomalies |
-| `guard.py` | the nine hard rules; every write passes through it |
+| `policy.py` | the numeric POLICY rules, computed rather than left to the model |
+| `guard.py` | the hard rules; every write passes through it |
 | `tools.py` | the seven read tools and the single write, as OpenAI schemas |
 | `prompts.py` | MISSION / SYSTEM / POLICY, meant to be edited by hand |
 | `history.py` | SQLite store, the 60 s sampler, rollups, generator-run derivation |
