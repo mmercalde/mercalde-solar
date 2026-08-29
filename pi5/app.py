@@ -951,6 +951,10 @@ body::before{
 @keyframes beat{0%{box-shadow:0 0 0 0 rgba(61,220,151,.55)}100%{box-shadow:0 0 0 11px rgba(61,220,151,0)}}
 .dot.err{background:var(--bad);animation:blink 1.1s infinite}
 @keyframes blink{0%,100%{opacity:1}50%{opacity:.25}}
+.dot.stale{background:var(--warn)}
+.dot.off{background:var(--dim2)}
+.agentb{cursor:pointer;user-select:none}
+.agentb:hover{color:var(--batt)}
 
 .banner{
   display:none;align-items:center;gap:10px;padding:13px 16px;border-radius:13px;margin-bottom:16px;
@@ -1230,6 +1234,7 @@ input[type=range]::-moz-range-thumb{width:14px;height:14px;border-radius:50%;bac
   <div class='hud hud-tr'>
     <span><span class='dot' id='liveDot'></span>&nbsp;<span class='num' id='lastUpdate_value'>--:--:--</span></span>
     <span>Errors <strong class='num' id='pollErrors_value' style='color:var(--txt)'>0</strong></span>
+    <span class='agentb' id='agentBadge' onclick='toggleAgentPlan()' title='Show the latest agent plan in the event log'><span class='dot off' id='agentDot'></span>&nbsp;<span id='agentText'>Agent &hellip;</span></span>
     <a href='/registers'>Registers &rarr;</a>
   </div>
 
@@ -1785,6 +1790,7 @@ function setIf(id,val,dflt){
 }
 
 function updateEventLog(events){
+  if(agentPlanShown)return; /* the agent plan is on screen; leave it there */
   const log=document.getElementById('eventLog');
   if(!events||events.length===0){log.innerHTML="<div class='e-info'>No events yet...</div>";return;}
   log.innerHTML=events.slice().reverse().map(e=>{
@@ -1965,28 +1971,75 @@ function setGeneratorMode(slaveId,mode){
   }).catch(e=>toast('Error: '+e,'bad'));
 }
 
+/* ---- solar agent status badge ---- */
+let agentPlan=null,agentPlanShown=false;
+async function fetchAgent(){
+  try{
+    const r=await fetch('/agent/plan');
+    renderAgent(r.ok?await r.json():null);
+  }catch(e){renderAgent(null);}
+}
+function renderAgent(d){
+  agentPlan=d;
+  const dot=document.getElementById('agentDot'),txt=document.getElementById('agentText');
+  if(!dot||!txt)return;
+  if(!d||d.online===false){
+    dot.className='dot off';txt.textContent='Agent offline';
+    if(agentPlanShown){agentPlanShown=false;fetchConfig();}
+    return;
+  }
+  if(!d.ts){dot.className='dot stale';txt.textContent='Agent \\u00b7 no plan yet';return;}
+  const mins=Math.max(0,Math.floor((Date.now()/1000-d.ts)/60));
+  dot.className='dot'+(mins>30?' stale':'');
+  let s='Agent \\u00b7 tick '+mins+' min ago';
+  if(d.learning&&d.learning.open===false)s+=' \\u00b7 learning';
+  txt.textContent=s;
+  if(agentPlanShown)showAgentPlan();
+}
+function showAgentPlan(){
+  const log=document.getElementById('eventLog');
+  if(!log)return;
+  log.innerHTML='';
+  const head=document.createElement('div');
+  head.className='e-ok';
+  head.textContent='Agent plan \\u2014 click the badge again for the event log';
+  log.appendChild(head);
+  const body=(agentPlan&&agentPlan.text)?agentPlan.text:'No plan has been recorded yet.';
+  body.split('\\n').forEach(function(line){
+    const d=document.createElement('div');
+    d.className='e-info';
+    d.textContent=line;
+    log.appendChild(d);
+  });
+}
+function toggleAgentPlan(){
+  agentPlanShown=!agentPlanShown;
+  if(agentPlanShown)showAgentPlan();else fetchConfig();
+}
+
 /* pause polling when tab hidden, resume immediately on return */
-let dataTimer,cfgTimer;
+let dataTimer,cfgTimer,agentTimer;
 function startPolling(){
-  clearInterval(dataTimer);clearInterval(cfgTimer);
+  clearInterval(dataTimer);clearInterval(cfgTimer);clearInterval(agentTimer);
   dataTimer=setInterval(fetchData,5000);
   cfgTimer=setInterval(fetchConfig,15000);
+  agentTimer=setInterval(fetchAgent,60000);
 }
 document.addEventListener('visibilitychange',()=>{
   if(document.hidden){
-    clearInterval(dataTimer);clearInterval(cfgTimer);
+    clearInterval(dataTimer);clearInterval(cfgTimer);clearInterval(agentTimer);
     if(window.Site3D)Site3D.stop();
     return;
   }
   /* on return: ALWAYS restart data polling, then resume the 3D if it is on.
      The old logic put these in an if/else, so with the 3D active the polling
      restart never ran and every value froze until a manual refresh. */
-  fetchData();fetchConfig();startPolling();
+  fetchData();fetchConfig();fetchAgent();startPolling();
   if(s3dOn&&window.Site3D&&Site3D.isReady())Site3D.start();
 });
 document.addEventListener('DOMContentLoaded',()=>{
   document.getElementById('capKw_value').textContent=(CAPS.total/1000).toFixed(1);
-  fetchData();fetchConfig();startPolling();
+  fetchData();fetchConfig();fetchAgent();startPolling();
 });
 /* ---- sun position scrubber ---- */
 let sunTimer=null;
@@ -2927,6 +2980,25 @@ def config_endpoint():
         events = list(auto_gen_state["events"][-50:])
 
     return jsonify({"config": cfg_copy, "events": events})
+
+# Solar agent on the KAMRUI. Read-only proxy so the dashboard can show an
+# agent status badge without the browser reaching across the LAN itself.
+AGENT_PLAN_URL = "http://192.168.3.152:8090/plan"
+AGENT_PLAN_TIMEOUT = 3
+
+
+@app.route('/agent/plan')
+def agent_plan_endpoint():
+    """Proxy the agent's /plan. Never fails hard: the dashboard must render
+    whether or not the agent is running."""
+    try:
+        resp = http_requests.get(AGENT_PLAN_URL, timeout=AGENT_PLAN_TIMEOUT)
+        if resp.status_code != 200:
+            return jsonify({"online": False})
+        return jsonify(resp.json())
+    except Exception as e:
+        logger.debug(f"agent plan unavailable: {e}")
+        return jsonify({"online": False})
 
 @app.route('/testtelegram')
 def test_telegram_endpoint():
