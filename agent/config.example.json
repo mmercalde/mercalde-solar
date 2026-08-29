@@ -9,7 +9,7 @@
   "digest_hours": [7, 19],
   "start_voltage_min": 52.0, "start_voltage_max": 56.0,
   "stop_voltage_min": 54.5,  "stop_voltage_max": 57.0,
-  "default_start": 52.0, "default_stop": 54.5,
+  "default_start": 52.0, "default_stop": 56.0,
   "solo_peak_threshold": 57.0,
   "solo_select_voltage": 55.0,
   "solo_target": 57.0,

@@ -215,7 +215,8 @@ def test_no_observed_rate_refuses_and_points_at_the_defaults(conn, cfg, g, now):
     ok, why = g.check(55.0, 57.0, 52.0, 54.5, "solo top-up", now=now, status=st)
     assert not ok
     assert "no observed charge rate" in why
-    assert "52.0" in why and "54.5" in why
+    # The message must quote the configured defaults, whatever they are.
+    assert str(cfg["default_start"]) in why and str(cfg["default_stop"]) in why
 
 
 def test_the_ags_cap_binds_when_it_is_tighter_than_the_pi5(ready, cfg, now):

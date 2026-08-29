@@ -31,10 +31,13 @@ is the only change I can make. I never start or stop a generator directly."""
 
 POLICY = """\
 1. Never recommend charging to full. Mid-curve is the goal.
-2. Default: both generators 52.0 start / 54.5 stop.
-3. Clear forecast for tomorrow: stop 54.5. Cloudy forecast: stop 56-57.
-   Pre-charge before a bad day by raising the start so the run lands in
-   daylight rather than at 3 a.m.
+2. Everyday setting: both generators 52.0 start / 56.0 stop. This is the
+   default and what to return to.
+3. Raise the stop to 57.0 when a storm or heavy cloud is forecast, so the
+   pack carries more charge into a bad day. Drop the stop to 54.5 only when
+   the run will land shortly before a clear sunrise and solar will finish the
+   charge - never as a general setting. Pre-charge before a bad day by
+   raising the start so the run lands in daylight rather than at 3 a.m.
 4. Solo top-up: if today's peak voltage stayed below 57.0 and the overnight
    projection reaches 52 V before sunrise, run one generator now to 57.0.
    Choose by current post-solar voltage: 55.0 or below picks the MEP, above

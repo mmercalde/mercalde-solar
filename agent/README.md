@@ -187,8 +187,13 @@ and fail on a missing `yaml`.
 
 ## The Pi5 watchdog
 
-`pi5/agent_watchdog.sh` resets the thresholds to 52.0 / 54.5 and sends one
-Telegram if the agent goes silent for 6 hours. The owner installs it by hand;
+`pi5/agent_watchdog.sh` resets the thresholds to `default_start` /
+`default_stop` and sends one Telegram if the agent goes silent for 6 hours.
+It takes those values from the agent itself, over `/plan`, so they stay in
+step with `config.json`. It measures silence from the last time the agent
+actually answered, and never resets while the learning gate is closed —
+during the learning phase the guard permits no writes, so thresholds off the
+defaults are the owner's, not the agent's. The owner installs it by hand;
 the crontab line is in the script header. It detects liveness through the
 agent's own `GET /plan`, because gunicorn on the Pi5 runs without
 `--access-logfile` and so writes no HTTP access log to search.
