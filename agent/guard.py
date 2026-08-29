@@ -23,7 +23,7 @@ import config
 import history
 import loadmodel
 import policy as policymod
-import weather
+import sun as sunmod
 
 log = logging.getLogger(__name__)
 
@@ -351,20 +351,12 @@ class Guard:
     def _daylight(self, now):
         """(sunrise, sunset) if `now` is between them, else None.
 
-        An unavailable forecast does not hold the write: Open-Meteo being
-        down is not a reason to refuse every threshold change until it comes
-        back, and POLICY 4 cannot fire without a projection anyway. It is
-        logged so a run of them is visible.
+        Computed from the site's latitude and longitude, so the hold applies
+        whether or not anything else is reachable. The only case that returns
+        None is a latitude inside a polar circle, where the sun does not both
+        rise and set that day; this site is at 32 degrees.
         """
-        try:
-            sun = weather.sun_times(self.cfg, history.local_day(now, self.cfg))
-        except Exception as e:                      # noqa: BLE001
-            log.warning("no sun times, so no daylight hold: %s", e)
-            return None
-        if not sun:
-            log.warning("no sun times for today, so no daylight hold")
-            return None
-        return sun if sun[0] <= now <= sun[1] else None
+        return sunmod.daylight(self.cfg, now)
 
     # --- heartbeat (SPEC section 9) ----------------------------------------
 

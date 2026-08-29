@@ -1,7 +1,9 @@
 """Open-Meteo forecast for the site. No API key.
 
-Hourly cloud cover, shortwave radiation and temperature, plus sunrise and
-sunset, in the site's local timezone (SPEC section 2).
+Hourly cloud cover, shortwave radiation and temperature, in the site's local
+timezone (SPEC section 2). Cloud and irradiance are the only things here that
+genuinely need asking: sunrise and sunset are computed in sun.py, so nothing
+that depends on where the sun is depends on this being reachable.
 """
 
 import logging
@@ -11,6 +13,7 @@ from datetime import datetime, timedelta
 import requests
 
 import history
+import sun
 
 log = logging.getLogger(__name__)
 
@@ -31,7 +34,7 @@ def fetch(cfg, days=3, timeout=20, force=False):
         return _cache["data"]
     r = requests.get(URL, params={
         "latitude": cfg["lat"], "longitude": cfg["lon"],
-        "hourly": HOURLY, "daily": "sunrise,sunset",
+        "hourly": HOURLY,
         "timezone": cfg["tz"], "forecast_days": days,
     }, timeout=timeout)
     r.raise_for_status()
@@ -65,29 +68,6 @@ def hourly(cfg, hours=48, now=None, data=None):
     return out
 
 
-def sun_times(cfg, day=None, data=None):
-    """(sunrise_ts, sunset_ts) for a local YYYY-MM-DD, or None if not forecast."""
-    data = data or fetch(cfg)
-    day = day or history.local_day(int(time.time()), cfg)
-    d = data["daily"]
-    if day not in d["time"]:
-        return None
-    i = d["time"].index(day)
-    return _parse_local(d["sunrise"][i], cfg), _parse_local(d["sunset"][i], cfg)
-
-
-def next_sunrise(cfg, now=None, data=None):
-    """Timestamp of the next sunrise after `now`."""
-    data = data or fetch(cfg)
-    now = int(now or time.time())
-    d = data["daily"]
-    for i, day in enumerate(d["time"]):
-        ts = _parse_local(d["sunrise"][i], cfg)
-        if ts > now:
-            return ts
-    return None
-
-
 def summary(cfg, hours=48, now=None):
     """Condensed forecast for the model and the plan record."""
     data = fetch(cfg)
@@ -115,12 +95,13 @@ def summary(cfg, hours=48, now=None):
         }
 
     out = {"hours": hours, "today": window(today), "tomorrow": window(tomorrow)}
-    sun = sun_times(cfg, today, data=data)
-    if sun:
-        out["sunrise"] = history.clock(sun[0], cfg)
-        out["sunset"] = history.clock(sun[1], cfg)
-        out["sunrise_ts"], out["sunset_ts"] = sun
-    nxt = next_sunrise(cfg, now, data=data)
+    # Computed, not fetched: see sun.py.
+    times = sun.times(cfg, today)
+    if times:
+        out["sunrise"] = history.clock(times[0], cfg)
+        out["sunset"] = history.clock(times[1], cfg)
+        out["sunrise_ts"], out["sunset_ts"] = times
+    nxt = sun.next_sunrise(cfg, now)
     if nxt:
         out["next_sunrise"] = history.clock(nxt, cfg)
         out["next_sunrise_ts"] = nxt

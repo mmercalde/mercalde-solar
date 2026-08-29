@@ -10,7 +10,12 @@ import config as cfgmod
 import guard as guardmod
 import history
 import policy
+import sun
 from stubs import StubModel
+
+# Captured before the autouse fixture below replaces it, so one test can put
+# the real computation back.
+REAL_SUN_TIMES = sun.times
 
 
 def ts_at(cfg, day, hour, minute=0):
@@ -104,12 +109,12 @@ def learn_the_pack(conn, cfg):
 
 @pytest.fixture(autouse=True)
 def sun(monkeypatch, cfg):
-    """Fixed sun times, so no test reaches Open-Meteo to learn what day it is."""
-    def sun_times(_cfg, day=None, data=None):
+    """Sun times pinned to the hours the daylight tests talk about."""
+    def times(_cfg, day=None, now=None):
         day = day or NOW_DAY
         return ts_at(cfg, day, 6, 22), ts_at(cfg, day, 19, 24)
-    monkeypatch.setattr(guardmod.weather, "sun_times", sun_times)
-    return sun_times
+    monkeypatch.setattr(guardmod.sunmod, "times", times)
+    return times
 
 
 @pytest.fixture
@@ -631,16 +636,28 @@ def test_the_hold_is_measured_against_the_owners_baseline(after_owner_edit, cfg,
     assert "daylight hold" not in (why or "")
 
 
-def test_an_unavailable_forecast_does_not_hold_every_write(ready, cfg,
-                                                           monkeypatch, caplog):
-    """Open-Meteo being down is not a reason to refuse until it comes back."""
-    monkeypatch.setattr(guardmod.weather, "sun_times",
-                        lambda *a, **k: (_ for _ in ()).throw(OSError("no route")))
-    now = midday(cfg)
+def test_the_hold_does_not_depend_on_anything_being_reachable(ready, cfg,
+                                                              monkeypatch):
+    """The real computation, with every outbound request made to fail. Sun
+    times come from the site's coordinates, so the hold still applies."""
+    import requests
+    monkeypatch.setattr(guardmod.sunmod, "times", REAL_SUN_TIMES)
+    for name in ("get", "post"):
+        monkeypatch.setattr(requests, name, lambda *a, **k: (_ for _ in ()).throw(
+            requests.ConnectionError("no route")))
+    now = ts_at(cfg, NOW_DAY, 12)          # local noon, unambiguously daylight
+    ok, why = ready.check(55.0, 57.0, 52.0, 56.0, "solo top-up", now=now,
+                          status=make_status(cfg, now, voltage=54.0, soc=80))
+    assert not ok and why.startswith("daylight hold")
+
+
+def test_the_real_computation_puts_midnight_outside_daylight(ready, cfg,
+                                                             monkeypatch):
+    monkeypatch.setattr(guardmod.sunmod, "times", REAL_SUN_TIMES)
+    now = ts_at(cfg, NOW_DAY, 2)
     ok, why = ready.check(55.0, 57.0, 52.0, 56.0, "solo top-up", now=now,
                           status=make_status(cfg, now, voltage=54.0, soc=80))
     assert ok, why
-    assert "no daylight hold" in caplog.text
 
 
 def test_a_daylight_refusal_is_audited(ready, conn, cfg, tmp_path):

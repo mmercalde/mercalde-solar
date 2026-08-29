@@ -49,7 +49,8 @@ Every 15 minutes, day and night:
 | `loadmodel.py` | load profile, solar yield, charge rates, projections, learning gate |
 | `counters.py` | Gateway energy registers over Modbus 503 |
 | `scrape_gateway.py` | InsightLocal history backfill |
-| `weather.py` | Open-Meteo forecast and archive |
+| `sun.py` | sunrise and sunset, computed from lat/lon; no network |
+| `weather.py` | Open-Meteo cloud and irradiance, forecast and archive |
 | `telegram.py` | send and long-poll |
 | `ask_server.py` | `POST /ask` and `GET /plan` for Alexa |
 | `llm.py`, `llm_probe.py` | llama-server client, and a probe to check it |

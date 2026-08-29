@@ -19,6 +19,7 @@ import time
 from datetime import datetime, timedelta
 
 import history
+import sun
 import weather
 
 log = logging.getLogger(__name__)
@@ -306,11 +307,11 @@ class LoadModel:
         """Median Wh consumed between sunset and sunrise, by month."""
         now = int(now or time.time())
         month = month or history.local(now, self.cfg).month
-        sun = weather.sun_times(self.cfg)
-        if not sun:
+        times = sun.times(self.cfg, now=now)
+        if not times:
             return None
-        sunset_h = history.local(sun[1], self.cfg).hour
-        sunrise_h = history.local(sun[0], self.cfg).hour
+        sunset_h = history.local(times[1], self.cfg).hour
+        sunrise_h = history.local(times[0], self.cfg).hour
         by_night = {}
         for t, wh in self._clean_load_rows(month=month):
             if t.hour >= sunset_h or t.hour < sunrise_h:
