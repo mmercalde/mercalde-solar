@@ -33,6 +33,8 @@ MIN_DAYS_FOR_SOLAR_FIT = 8
 LOAD_SPIKE_MULTIPLE = 2.0
 # A run shorter than this cannot say anything about a rate.
 MIN_RUN_MINUTES = 10
+# Runs needed before the charge-side curve is trusted over the resting one.
+MIN_CHARGE_CURVE_RUNS = 3
 
 # A projection this close is reported as a window, not a clock time: the pack
 # is already at the target and the minute is noise.
@@ -100,6 +102,128 @@ def _weighted_median(pairs):
         if seen >= half:
             return value
     return pairs[-1][0]
+
+
+class ChargeCurve:
+    """How the pack behaves while a generator is charging it.
+
+    The resting curve says what state of charge a pack holds at a voltage once
+    it has settled. The Pi5 does not stop on that: it stops on the terminal
+    voltage during the charge, which internal resistance and surface charge
+    lift well above the resting value. Estimating a run against the resting
+    curve therefore asks the generator to deliver charge the run never needed
+    - the morning both generators went 52 to 56 in 70 minutes, the resting
+    estimate wanted 2.8 hours for 57.
+
+    So this is learned separately, from the minute samples inside real runs,
+    and holds two relations:
+
+      soc_points  terminal volts against state of charge
+      traces      per run, the first minute the pack read each voltage
+
+    The traces answer "how long did this actually take" directly, which is the
+    better answer when the voltages either side have been seen. soc_points
+    carry the rest.
+    """
+
+    def __init__(self, gen, solo, traces, soc_points):
+        self.gen, self.solo = gen, solo
+        self.traces = traces
+        self.soc_points = soc_points
+
+    @property
+    def runs(self):
+        return len(self.traces)
+
+    @property
+    def learned(self):
+        return self.runs >= MIN_CHARGE_CURVE_RUNS
+
+    @property
+    def label(self):
+        who = "both generators" if self.gen is None else self.gen
+        if self.solo is not None:
+            who += " solo" if self.solo else " paired"
+        return f"{who}, {self.runs} run{'' if self.runs == 1 else 's'}"
+
+    @staticmethod
+    def _arrival(trace, v):
+        """Minutes into the run when the pack first read at least `v`."""
+        want = history.soc_bin(v)
+        seen = [m for b, m in trace.items() if b >= want]
+        return min(seen) if seen else None
+
+    @staticmethod
+    def _voltage_by(trace, minutes):
+        """The highest voltage the pack had reached by `minutes` into the run."""
+        seen = [b for b, m in trace.items() if m <= minutes]
+        return history.soc_bin_volts(max(seen)) if seen else None
+
+    def _usable(self, from_v):
+        """Runs that actually passed through from_v on their way up.
+
+        A run that began above from_v never charged from there, and one that
+        began well below it reached from_v with surface charge already built,
+        so it would understate a fresh run. Only runs that started at or below
+        from_v are counted, and the estimate from mid-run is optimistic by
+        whatever charge had already gone in.
+        """
+        return [t for t in self.traces
+                if t["start_v"] is not None
+                and t["start_v"] <= from_v + history.SOC_BIN_V]
+
+    def minutes_between(self, from_v, to_v):
+        """Observed minutes from one terminal voltage to another."""
+        deltas = []
+        for t in self._usable(from_v):
+            a = self._arrival(t["trace"], from_v)
+            b = self._arrival(t["trace"], to_v)
+            if a is None or b is None or b < a:
+                continue
+            deltas.append(b - a)
+        if len(deltas) < MIN_CHARGE_CURVE_RUNS:
+            return None
+        return _median(deltas), len(deltas)
+
+    def voltage_after(self, from_v, hours):
+        """The terminal voltage reached `hours` after passing from_v."""
+        reached = []
+        for t in self._usable(from_v):
+            a = self._arrival(t["trace"], from_v)
+            if a is None:
+                continue
+            v = self._voltage_by(t["trace"], a + hours * 60.0)
+            if v is not None:
+                reached.append(v)
+        if len(reached) < MIN_CHARGE_CURVE_RUNS:
+            return None
+        return _median(reached)
+
+    def soc_for_voltage(self, target_v):
+        return LoadModel._interpolate(self.soc_points, target_v)
+
+    def volts_for_soc(self, target_soc):
+        return _invert(self.soc_points, target_soc)
+
+
+def _invert(curve, target_soc):
+    """The voltage at a given state of charge on a (volts, soc, n) curve."""
+    if not curve:
+        return None
+    volts = [v for v, _, _ in curve]
+    socs = [s for _, s, _ in curve]
+    if target_soc <= socs[0]:
+        return volts[0]
+    if target_soc >= socs[-1]:
+        return volts[-1]
+    for i in range(1, len(socs)):
+        if socs[i] >= target_soc:
+            s0, s1 = socs[i - 1], socs[i]
+            v0, v1 = volts[i - 1], volts[i]
+            if s1 == s0:
+                return v1
+            return v0 + (v1 - v0) * (target_soc - s0) / (s1 - s0)
+    return volts[-1]
 
 
 class LoadModel:
@@ -454,24 +578,8 @@ class LoadModel:
         return round(_median(est))
 
     def volts_for_soc(self, target_soc):
-        """The inverse of the learned curve: the voltage at a given SOC."""
-        curve = self.voltage_soc_curve()
-        if not curve:
-            return None
-        volts = [v for v, _, _ in curve]
-        socs = [s for _, s, _ in curve]
-        if target_soc <= socs[0]:
-            return volts[0]
-        if target_soc >= socs[-1]:
-            return volts[-1]
-        for i in range(1, len(socs)):
-            if socs[i] >= target_soc:
-                s0, s1 = socs[i - 1], socs[i]
-                v0, v1 = volts[i - 1], volts[i]
-                if s1 == s0:
-                    return v1
-                return v0 + (v1 - v0) * (target_soc - s0) / (s1 - s0)
-        return volts[-1]
+        """The inverse of the learned resting curve: the voltage at a given SOC."""
+        return _invert(self.voltage_soc_curve(), target_soc)
 
     def capacity_wh(self):
         """Usable pack size, from the Battery Monitor's own Ah-remaining vs SOC."""
@@ -564,6 +672,48 @@ class LoadModel:
 
     # --- what a generator can do in a run window ----------------------------
 
+    def charge_curve(self, gen=None, solo=None, days=180, now=None):
+        """The charge-side curve for one generator, or for the pair.
+
+        Built from the minute samples inside real runs. Runs taken under an
+        exceptional house load are left out for the same reason they are left
+        out of the rate: the terminal voltage they show is the house's, not
+        the generator's.
+        """
+        now = int(now or time.time())
+        rows = history.charge_samples(self.conn, gen=gen, solo=solo,
+                                      since=now - days * 86400)
+        ceiling = None
+        mean_load = self.mean_load_w(now=now)
+        if mean_load:
+            ceiling = LOAD_SPIKE_MULTIPLE * mean_load
+
+        traces, counts = {}, {}
+        for r in rows:
+            if ceiling is not None and r["load_w"] is not None and r["load_w"] > ceiling:
+                continue
+            t = traces.get(r["run_id"])
+            if t is None:
+                t = traces[r["run_id"]] = {"start_v": r["start_v"], "trace": {}}
+            v_bin = history.soc_bin(r["battery_v"])
+            minutes = (r["ts"] - r["start_ts"]) / 60.0
+            # First arrival: the pack passes a voltage once on the way up.
+            if v_bin not in t["trace"] or minutes < t["trace"][v_bin]:
+                t["trace"][v_bin] = minutes
+            if r["batt_soc"] is not None:
+                key = (v_bin, int(round(r["batt_soc"])))
+                counts[key] = counts.get(key, 0) + 1
+
+        by_bin = {}
+        for (v_bin, soc), n in counts.items():
+            by_bin.setdefault(v_bin, []).append((soc, n))
+        points = []
+        for v_bin in sorted(by_bin):
+            pairs = by_bin[v_bin]
+            points.append((history.soc_bin_volts(v_bin),
+                           _weighted_median(pairs), sum(n for _, n in pairs)))
+        return ChargeCurve(gen, solo, list(traces.values()), _isotonic(points))
+
     def _rate_for(self, gen, solo, now):
         """The best-evidenced rate for this generator, solo history first."""
         rate = self.charge_rate(gen, solo=solo, now=now)
@@ -600,49 +750,104 @@ class LoadModel:
 
         One place, so the guard's refusal and the POLICY detail can never
         quote different arithmetic for the same question.
+
+        Three ways of answering, best evidence first. What the pack was
+        observed to do between these two voltages while charging; failing
+        that, the charge-side curve against the observed current; and only
+        when a generator has fewer than three runs on record, the resting
+        curve, which is what the Pi5 stops on only after the charge is over
+        and so reads a target as harder than it is. `basis` says which.
         """
+        curve = self.charge_curve(gen, solo=solo, now=now)
+        base = {"gen": gen, "window_h": window_h, "target_v": target_v,
+                "curve": curve}
+
+        if curve.learned:
+            observed = curve.minutes_between(from_v, target_v)
+            if observed is not None:
+                minutes, n = observed
+                hours = minutes / 60.0
+                basis = f"observed while charging ({curve.label})"
+                ok = hours <= window_h + 1e-9
+                return dict(base, ok=ok, hours=hours, rate=None, basis=basis,
+                            why=(f"{target_v:.1f} reachable in {hours:.1f} h, "
+                                 f"{basis}" if ok else
+                                 f"{target_v:.1f} took {hours:.1f} h {basis} "
+                                 f"but the run window is {window_h:.1f} h"))
+
         rate = self._rate_for(gen, solo, now)
         if rate is None or not rate.get("soc_per_h"):
             missing = ("no observed charge rate" if rate is None
                        else "the pack capacity is not learned")
-            return {"ok": False, "rate": rate, "hours": None, "gen": gen,
-                    "window_h": window_h, "target_v": target_v,
-                    "why": f"{missing} for {gen}, so {target_v:.1f} V cannot be "
-                           f"shown to be reachable"}
-        hours = self.hours_to_target(from_v, target_v, rate, soc_now=soc_now)
-        if hours is None:
-            return {"ok": False, "rate": rate, "hours": None, "gen": gen,
-                    "window_h": window_h, "target_v": target_v,
-                    "why": f"the learned voltage/SOC curve does not reach "
-                           f"{target_v:.1f} V, so it cannot be shown to be "
-                           f"reachable"}
-        ok = hours <= window_h + 1e-9
-        return {"ok": ok, "rate": rate, "hours": hours, "gen": gen,
-                "window_h": window_h, "target_v": target_v,
-                "why": (f"{target_v:.1f} reachable in {hours:.1f} h at "
-                        f"{rate_phrase(rate)}" if ok else
-                        f"{target_v:.1f} needs {hours:.1f} h at "
-                        f"{rate_phrase(rate)} but the run window is "
-                        f"{window_h:.1f} h")}
+            return dict(base, ok=False, rate=rate, hours=None, basis=None,
+                        why=f"{missing} for {gen}, so {target_v:.1f} V cannot "
+                            f"be shown to be reachable")
 
-    def voltage_after(self, from_v, hours, rate, soc_now=None):
+        # A learned charge curve still cannot speak for a voltage no run has
+        # ever reached, and 57.0 is exactly that until a run is allowed to go
+        # there. Falling back to the resting curve keeps a conservative answer
+        # rather than refusing on a gap in the evidence; the basis says so.
+        soc_target = curve.soc_for_voltage(target_v) if curve.learned else None
+        if soc_target is not None:
+            basis = f"charging curve ({curve.label})"
+        else:
+            soc_target = self.soc_for_voltage(target_v)
+            basis = (f"resting curve ({curve.label}, none of them reached "
+                     f"{target_v:.1f} V)" if curve.learned else
+                     f"resting curve, {curve.runs} charging "
+                     f"run{'' if curve.runs == 1 else 's'} on record")
+        hours = self._hours_from(soc_target, from_v, rate, soc_now)
+        if hours is None:
+            return dict(base, ok=False, rate=rate, hours=None, basis=basis,
+                        why=f"neither the charging nor the resting curve "
+                            f"reaches {target_v:.1f} V, so it cannot be shown "
+                            f"to be reachable")
+        ok = hours <= window_h + 1e-9
+        return dict(base, ok=ok, rate=rate, hours=hours, basis=basis,
+                    why=(f"{target_v:.1f} reachable in {hours:.1f} h at "
+                         f"{rate_phrase(rate)}, {basis}" if ok else
+                         f"{target_v:.1f} needs {hours:.1f} h at "
+                         f"{rate_phrase(rate)} but the run window is "
+                         f"{window_h:.1f} h, {basis}"))
+
+    def _hours_from(self, soc_target, from_v, rate, soc_now):
+        if soc_target is None:
+            return None
+        if soc_now is None:
+            soc_now = self.soc_for_voltage(from_v)
+        if soc_now is None:
+            return None
+        if soc_target <= soc_now:
+            return 0.0
+        return (soc_target - soc_now) / rate["soc_per_h"]
+
+    def voltage_after(self, from_v, hours, rate, soc_now=None, curve=None):
         """The voltage the pack reaches after `hours` at this rate."""
         if not rate or not rate.get("soc_per_h"):
             return None
         soc = soc_now if soc_now is not None else self.soc_for_voltage(from_v)
         if soc is None:
             return None
-        return self.volts_for_soc(min(100.0, soc + rate["soc_per_h"] * hours))
+        soc = min(100.0, soc + rate["soc_per_h"] * hours)
+        if curve is not None and curve.learned:
+            return curve.volts_for_soc(soc)
+        return self.volts_for_soc(soc)
 
     def best_reachable_target(self, gen, from_v, window_h, ceiling, floor,
                               step=0.5, solo=None, soc_now=None, now=None):
         """The highest stop voltage reachable in the window, rounded down.
 
-        None when even `floor` is out of reach, so a caller cannot end up
-        proposing a target that is not worth running for.
+        Read off the same evidence reach() uses, so a rule that is told 57.0
+        is out of range is not then handed a lower target from a different
+        curve. None when even `floor` is out of reach, so a caller cannot
+        propose a target that is not worth running for.
         """
-        rate = self._rate_for(gen, solo, now)
-        v = self.voltage_after(from_v, window_h, rate, soc_now=soc_now)
+        curve = self.charge_curve(gen, solo=solo, now=now)
+        v = curve.voltage_after(from_v, window_h) if curve.learned else None
+        if v is None:
+            rate = self._rate_for(gen, solo, now)
+            v = self.voltage_after(from_v, window_h, rate, soc_now=soc_now,
+                                   curve=curve)
         if v is None:
             return None
         v = math.floor(min(v, ceiling) / step) * step

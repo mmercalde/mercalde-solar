@@ -104,7 +104,8 @@ def test_an_unreachable_target_still_fires_at_the_best_it_can_reach(cfg, night):
     r = policy.solo_top_up(cfg, night, model)
     assert r["fires"] and r["mode"] == "solo-reduced" and r["target"] == 56.0
     assert "57.0 needs 2.7 h" in r["detail"] and "POLICY 5" in r["detail"]
-    assert "highest reachable in 2.0 h is 56.0, so MEP alone to 56.0" in r["detail"]
+    assert ("highest reachable in 2.0 h is 56.0 (resting curve, 0 charging "
+            "runs on record), so MEP alone to 56.0") in r["detail"]
     assert r["proposal"] == {"mep_start": 54.0, "mep_stop": 56.0,
                              "kub_start": 52.0, "kub_stop": 56.0}
 

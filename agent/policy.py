@@ -166,8 +166,9 @@ def solo_top_up(cfg, f, model):
     lower = model.best_reachable_target(gen, v, window, ceiling=target,
                                         floor=floor, soc_now=soc, solo=True)
     if lower is not None:
-        parts.append(f"highest reachable in {window:.1f} h is {lower:.1f}, so "
-                     f"{label} alone to {lower:.1f}")
+        parts.append(f"highest reachable in {window:.1f} h is {lower:.1f} "
+                     f"({reach.get('basis') or 'no curve'}), so {label} alone "
+                     f"to {lower:.1f}")
         start, values = _proposal(cfg, gen, lower)
         if start <= v:
             parts.append(f"the run begins when the pack falls to {start:.1f}")

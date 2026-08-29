@@ -22,7 +22,9 @@ class StubModel:
     per generator, with None for the pair meaning no paired history.
     """
 
-    def __init__(self, rates=None, pair=None, soc_at_52=40.0, soc_per_v=10.0):
+    def __init__(self, rates=None, pair=None, soc_at_52=40.0, soc_per_v=10.0,
+                 basis="resting curve, 0 charging runs on record"):
+        self.basis = basis
         self.rates = rates if rates is not None else {
             "mep": {"a": 90.0, "soc_per_h": 15.0},
             "kubota": {"a": 60.0, "soc_per_h": 10.0}}
@@ -43,14 +45,14 @@ class StubModel:
         rate = self._rate(gen)
         who = "both generators" if gen is None else gen
         if rate is None:
-            return {"ok": False, "rate": None, "hours": None,
+            return {"ok": False, "rate": None, "hours": None, "basis": None,
                     "why": f"no observed charge rate for {who}, so "
                            f"{target_v:.1f} V cannot be shown to be reachable"}
         soc = self._soc(from_v) if soc_now is None else soc_now
         hours = max(0.0, (self._soc(target_v) - soc) / rate["soc_per_h"])
         ok = hours <= window_h + 1e-9
         phrase = loadmodel.rate_phrase(rate)
-        return {"ok": ok, "rate": rate, "hours": hours,
+        return {"ok": ok, "rate": rate, "hours": hours, "basis": self.basis,
                 "why": (f"{target_v:.1f} reachable in {hours:.1f} h at {phrase}"
                         if ok else
                         f"{target_v:.1f} needs {hours:.1f} h at {phrase} but "

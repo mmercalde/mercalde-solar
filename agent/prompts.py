@@ -47,8 +47,12 @@ POLICY = """\
    generator's observed charge rate. A charge rate is current into the pack,
    in amps and the state of charge per hour it gives. Volts per hour is not a
    rate: it is the generator minus whatever the house was drawing at the time.
-   If 57.0 cannot be reached in the window, take the highest target that can
-   be, down to 55.0, or run both generators if together they reach 57.0.
+   Reachability is judged on what the pack does while charging, from real
+   runs, because that is the voltage the Pi5 stops on; the settled resting
+   voltage is only a fallback until a generator has three runs on record. The
+   POLICY line says which was used. If 57.0 cannot be reached in the window,
+   take the highest target that can be, down to 55.0, or run both generators
+   if together they reach 57.0.
 6. Return the thresholds to default once the reason for changing them has
    passed.
 7. Restate numbers only from tool results. Never compute watt-hours, hours or

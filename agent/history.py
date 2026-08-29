@@ -669,6 +669,33 @@ def record_action(conn, tool, args, allowed, reason, voltage, soc, result, ts=No
     return ts
 
 
+def charge_samples(conn, gen=None, solo=None, since=0, include_exercise=False):
+    """Every sample taken during a generator run, tagged with its run.
+
+    The charge-side behaviour of the pack is not in gen_runs - that table
+    holds one row per run - but the minute samples are still there, so the
+    terminal voltage against state of charge and against minutes into the run
+    is read straight off them. `samples` is purged at 90 days, so this sees
+    the runs of the last quarter whatever `since` asks for.
+    """
+    sql = ("SELECT r.id AS run_id, r.start_ts, r.start_v, r.load_w, "
+           "s.ts, s.battery_v, s.batt_soc "
+           "FROM gen_runs r JOIN samples s "
+           "  ON s.ts >= r.start_ts AND s.ts <= r.stop_ts "
+           "WHERE r.stop_ts IS NOT NULL AND r.start_ts >= ? "
+           "  AND s.battery_v IS NOT NULL")
+    args = [since]
+    if not include_exercise:
+        sql += " AND r.kind != 'exercise'"
+    if gen is not None:
+        sql += " AND r.gen=?"
+        args.append(gen)
+    if solo is not None:
+        sql += " AND r.solo=?"
+        args.append(int(solo))
+    return conn.execute(sql + " ORDER BY r.id, s.ts", args).fetchall()
+
+
 def recent_actions(conn, limit=5):
     """The last few guard decisions and policy misses, newest first."""
     return conn.execute(

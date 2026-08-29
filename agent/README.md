@@ -19,7 +19,9 @@ Every 15 minutes, day and night:
    says, with the numbers, whether it fires. Whether a target is reachable is
    `loadmodel.py`'s answer, in amps into the pack against the learned capacity
    and voltage/SOC curve — never in volts per hour, which measures the
-   generator minus the house.
+   generator minus the house. The curve is the charge-side one, learned from
+   the minute samples inside real runs, because the Pi5 stops on the terminal
+   voltage during a charge and not on the settled resting voltage.
 3. The model sees those facts and that evaluation, may call up to 4 tools, and
    finishes with a one-line recommendation. A rule that fires must be either
    set or overruled in writing; anything else is logged as a policy miss.

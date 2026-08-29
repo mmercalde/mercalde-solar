@@ -492,7 +492,7 @@ def test_reach_off_the_end_of_the_curve_says_so(conn, cfg, lm):
     add_run(conn, cfg, "mep", "2026-08-10", 2, amps=90.0)
     r = lm.reach("mep", 52.0, 57.0, 2.0, now=ts_at(cfg, "2026-08-20", 22))
     assert not r["ok"] and r["hours"] is None
-    assert "does not reach 57.0 V" in r["why"]
+    assert "neither the charging nor the resting curve reaches 57.0 V" in r["why"]
 
 
 def test_the_highest_reachable_target_rounds_down_to_a_half_volt(cfg, reachable):
@@ -533,6 +533,184 @@ def test_capacity_in_ah_comes_from_the_monitor(conn, cfg, lm):
 def test_capacity_needs_evidence(conn, cfg, lm):
     add_sample(conn, cfg, ts_at(cfg, "2026-08-20", 2), 53.0, 50, -1200, ah=1000)
     assert lm.capacity_ah() is None
+
+
+# --- the charge-side curve --------------------------------------------------
+
+def add_charging_run(conn, cfg, day, hour, minutes, v_start, v_end, gen="mep",
+                     solo=1, soc_start=40, soc_end=None, load_w=600.0,
+                     amps=150.0, kind="auto"):
+    """A run written as the sampler would have: one row a minute, plus the
+    gen_runs row derive_gen_runs would have closed."""
+    start = ts_at(cfg, day, hour)
+    soc_end = soc_end if soc_end is not None else soc_start + 20
+    for i in range(minutes + 1):
+        frac = i / minutes
+        history.record_sample(conn, {
+            "batteryVoltage": round(v_start + (v_end - v_start) * frac, 2),
+            "battSocBM": round(soc_start + (soc_end - soc_start) * frac),
+            "battPower": 8000, "battCurrent": amps, "battAhRemaining": 1000,
+            "battMonitorOnline": True,
+            "mep803aAction": (history.GEN_RUNNING
+                              if gen == "mep" or not solo else history.GEN_STOPPED),
+            "kubotaAction": (history.GEN_RUNNING
+                             if gen == "kubota" or not solo else history.GEN_STOPPED),
+            "acPower1": load_w / 2, "acPower2": load_w / 2,
+            "mppt80PVPower": 0, "southArrayPVPower": 0, "westArrayPVPower": 0,
+        }, ts=start + i * 60)
+    conn.execute(
+        "INSERT INTO gen_runs (gen, start_ts, stop_ts, duration_min, start_v, "
+        "stop_v, rate_v_per_h, rate_a, load_w, solo, kind) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        (gen, start, start + minutes * 60, minutes, v_start, v_end,
+         (v_end - v_start) / (minutes / 60.0), amps, load_w, solo, kind))
+    conn.commit()
+    return start
+
+
+def this_morning(conn, cfg, n=3, minutes=70):
+    """Both generators, 52.0 to 56.0, in 70 minutes. What actually happened."""
+    for i in range(n):
+        add_charging_run(conn, cfg, f"2026-08-{10+i:02d}", 2, minutes, 52.0, 56.0,
+                         gen="mep", solo=0, soc_start=40, soc_end=62)
+
+
+def test_the_charge_curve_reads_the_minutes_off_real_runs(conn, cfg, lm):
+    this_morning(conn, cfg)
+    curve = lm.charge_curve(None, solo=False, now=ts_at(cfg, "2026-08-20", 12))
+    assert curve.learned and curve.runs == 3
+    assert curve.minutes_between(52.0, 56.0) == (70.0, 3)
+
+
+def test_reach_prefers_what_was_observed_over_either_curve(conn, cfg, lm):
+    """The morning's run answers the question directly: 70 minutes."""
+    this_morning(conn, cfg)
+    r = lm.reach(None, 52.0, 56.0, 2.0, solo=False, soc_now=40,
+                 now=ts_at(cfg, "2026-08-20", 12))
+    assert r["ok"] and round(r["hours"], 3) == round(70 / 60, 3)
+    assert r["basis"] == "observed while charging (both generators paired, 3 runs)"
+    assert "reachable in 1.2 h, observed while charging" in r["why"]
+
+
+def test_two_runs_are_not_yet_a_charge_curve(conn, cfg, lm):
+    """Under three runs the resting curve is still what is used."""
+    this_morning(conn, cfg, n=2)
+    scraped(conn, {52.0: (40, 900), 56.0: (85, 900), 57.0: (95, 900)})
+    r = lm.reach(None, 52.0, 56.0, 2.0, solo=False, soc_now=40,
+                 now=ts_at(cfg, "2026-08-20", 12))
+    assert r["basis"] == "resting curve, 2 charging runs on record"
+    assert "resting curve, 2 charging runs on record" in r["why"]
+
+
+def test_the_charge_curve_gives_the_state_of_charge_a_voltage_really_costs(conn,
+                                                                           cfg, lm):
+    """56.0 V reads 62% while charging and 85% once settled. The resting curve
+    would ask a run for 23 points of charge it never needs."""
+    this_morning(conn, cfg)
+    scraped(conn, {52.0: (40, 900), 56.0: (85, 900), 57.0: (95, 900)})
+    now = ts_at(cfg, "2026-08-20", 12)
+    assert lm.charge_curve(None, solo=False, now=now).soc_for_voltage(56.0) == 62
+    assert lm.soc_for_voltage(56.0) == 85
+
+
+def runs_to_57(conn, cfg, n=3, minutes=100):
+    for i in range(n):
+        add_charging_run(conn, cfg, f"2026-08-{10+i:02d}", 2, minutes, 52.0, 57.0,
+                         gen="mep", solo=0, soc_start=40, soc_end=70)
+
+
+def test_runs_that_reached_the_target_answer_it_from_the_minutes(conn, cfg, lm):
+    runs_to_57(conn, cfg)
+    scraped(conn, {52.0: (40, 900), 57.0: (95, 900)})
+    r = lm.reach(None, 52.0, 57.0, 3.0, solo=False, soc_now=45,
+                 now=ts_at(cfg, "2026-08-20", 12))
+    assert r["basis"] == "observed while charging (both generators paired, 3 runs)"
+    assert round(r["hours"], 3) == round(100 / 60, 3)
+
+
+def test_the_charge_curve_prices_a_target_the_minutes_cannot_reach(conn, cfg, lm):
+    """The pack is at 51.5, lower than any run has ever begun, so no run says
+    how long it takes from there. The charge-side curve still prices 57.0."""
+    runs_to_57(conn, cfg)
+    scraped(conn, {51.0: (30, 900), 52.0: (40, 900), 57.0: (95, 900)})
+    now = ts_at(cfg, "2026-08-20", 12)
+    curve = lm.charge_curve(None, solo=False, now=now)
+    assert curve.minutes_between(51.5, 57.0) is None, "no run started that low"
+    r = lm.reach(None, 51.5, 57.0, 3.0, solo=False, soc_now=35, now=now)
+    assert r["basis"] == "charging curve (both generators paired, 3 runs)"
+    assert "charging curve (both generators paired, 3 runs)" in r["why"]
+
+
+def test_minutes_from_mid_run_use_the_runs_that_passed_through(conn, cfg, lm):
+    """A run that began at 52.0 did pass 54.0, so it can time 54.0 to 57.0 -
+    optimistically, by whatever charge was already in when it got there."""
+    runs_to_57(conn, cfg, minutes=100)
+    curve = lm.charge_curve(None, solo=False, now=ts_at(cfg, "2026-08-20", 12))
+    minutes, n = curve.minutes_between(54.0, 57.0)
+    assert n == 3 and 0 < minutes < 100
+
+
+def test_a_target_no_run_has_reached_falls_back_and_says_so(conn, cfg, lm):
+    """Every run stopped at 56.0, so the charge curve cannot price 57.0. The
+    resting curve answers instead, conservatively, and the basis admits it."""
+    this_morning(conn, cfg)
+    scraped(conn, {52.0: (40, 900), 56.0: (85, 900), 57.0: (95, 900)})
+    now = ts_at(cfg, "2026-08-20", 12)
+    r = lm.reach(None, 52.0, 57.0, 3.0, solo=False, soc_now=40, now=now)
+    assert r["basis"] == ("resting curve (both generators paired, 3 runs, "
+                          "none of them reached 57.0 V)")
+    assert r["hours"] is not None
+
+
+def test_the_charge_side_estimate_is_shorter_than_the_resting_one(conn, cfg, lm):
+    """The whole point. The Pi5 stops on the charging voltage, not the settled
+    one, so the resting curve prices every target as harder than it is: the
+    same 52.0 to 57.0 is 1.7 h of observed run and over 7 h of resting
+    arithmetic."""
+    runs_to_57(conn, cfg)
+    add_run(conn, cfg, "mep", "2026-08-15", 6, amps=150.0, solo=1)
+    scraped(conn, {52.0: (40, 900), 56.0: (85, 900), 57.0: (95, 900)})
+    now = ts_at(cfg, "2026-08-20", 12)
+    charging = lm.reach(None, 52.0, 57.0, 8.0, solo=False, soc_now=40, now=now)
+    resting = lm.reach("mep", 52.0, 57.0, 8.0, solo=True, soc_now=40, now=now)
+    assert charging["basis"].startswith("observed while charging")
+    assert resting["basis"].startswith("resting curve, 0 charging runs")
+    assert charging["hours"] < resting["hours"] / 3
+
+
+def test_a_run_under_an_exceptional_load_does_not_shape_the_curve(conn, cfg, lm):
+    """Its terminal voltage is the house's, not the generator's."""
+    build_load_history(conn, cfg, days=30, start="2026-08-01",
+                       night_wh=900, day_wh=400)
+    this_morning(conn, cfg)
+    add_charging_run(conn, cfg, "2026-08-14", 20, 70, 52.0, 52.6, gen="mep",
+                     solo=0, load_w=7000.0)
+    curve = lm.charge_curve(None, solo=False, now=ts_at(cfg, "2026-08-20", 12))
+    assert curve.runs == 3, "the steam-bath run is not one of them"
+
+
+def test_a_run_that_started_above_the_question_is_not_evidence_for_it(conn, cfg,
+                                                                      lm):
+    """A run beginning at 54 never charged from 52."""
+    for i in range(3):
+        add_charging_run(conn, cfg, f"2026-08-{10+i:02d}", 2, 40, 54.0, 56.0,
+                         gen="mep", solo=1)
+    curve = lm.charge_curve("mep", solo=True, now=ts_at(cfg, "2026-08-20", 12))
+    assert curve.learned
+    assert curve.minutes_between(52.0, 56.0) is None
+    assert curve.minutes_between(54.0, 56.0) == (40.0, 3)
+
+
+def test_the_highest_reachable_target_reads_off_the_charge_curve(conn, cfg, lm):
+    """Half the 70 minutes reaches about 54.0, so it asks for 54.0."""
+    this_morning(conn, cfg)
+    v = lm.charge_curve(None, solo=False,
+                        now=ts_at(cfg, "2026-08-20", 12)).voltage_after(52.0, 35 / 60)
+    assert 53.9 <= v <= 54.1
+    got = lm.best_reachable_target(None, 52.0, 35 / 60, ceiling=57.0, floor=52.0,
+                                   solo=False, soc_now=40,
+                                   now=ts_at(cfg, "2026-08-20", 12))
+    assert got == 54.0
 
 
 # --- solar ------------------------------------------------------------------

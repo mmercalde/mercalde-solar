@@ -313,11 +313,11 @@ class Guard:
                     f"{reach['why']}. Use the default thresholds "
                     f"{self.cfg['default_start']} / {self.cfg['default_stop']}")
             if not reach["ok"]:
-                return False, (
-                    f"{gen} would need {reach['hours']:.1f} h to lift the pack "
-                    f"from {v} V to {want[pkey]} V at its observed "
-                    f"{loadmodel.rate_phrase(reach['rate'])}, but its run "
-                    f"window is {window_h:.1f} h")
+                # The load model's own sentence, so this refusal and the
+                # POLICY line in the plan record cannot read differently.
+                return False, (f"{gen} cannot lift the pack from {v} V to "
+                               f"{want[pkey]} V in its run window: "
+                               f"{reach['why']}")
 
         return True, "permitted"
 

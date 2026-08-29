@@ -219,8 +219,8 @@ def test_an_unreachable_target_is_refused(ready, cfg, now):
     60% to 95% is thirty-five of them: seven hours, not two."""
     st = make_status(cfg, now, voltage=52.0, soc=60)
     ok, why = ready.check(52.0, 54.5, 55.0, 57.0, "solo top-up", now=now, status=st)
-    assert not ok and "kubota" in why
-    assert "would need 7.0 h" in why and "run window is 2.0 h" in why
+    assert not ok and "kubota cannot lift the pack from 52.0 V to 57.0 V" in why
+    assert "57.0 needs 7.0 h" in why and "run window is 2.0 h" in why
     assert "100 A into the pack (5.0% SOC/h)" in why
 
 
@@ -283,6 +283,7 @@ def test_the_ags_cap_binds_when_it_is_tighter_than_the_pi5(ready, cfg, now):
     st = make_status(cfg, now, voltage=52.0, soc=60, max_runtime=600)
     ok, why = ready.check(52.0, 54.5, 55.0, 57.0, "x", now=now, status=st)
     assert not ok and "7.0 h" in why and "run window is 3.0 h" in why
+    assert "resting curve" in why, "and it says which curve said so"
 
 
 def test_solo_and_paired_rates_are_chosen_correctly(conn, cfg, g, now):
