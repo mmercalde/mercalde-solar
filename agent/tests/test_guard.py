@@ -553,17 +553,58 @@ def test_the_heartbeat_sends_the_defaults_before_any_write(ready, cfg, now):
 
 def test_the_heartbeat_sends_the_last_intended_values(ready, cfg, now):
     ready.note_write({"mep_start": 55.0, "mep_stop": 57.0,
-                      "kub_start": 52.0, "kub_stop": 54.5}, now=now - 600)
+                      "kub_start": 52.0, "kub_stop": 54.5}, now=now - 3700)
     send, values, _ = ready.heartbeat(now=now)
     assert send and values["mep_start"] == 55.0
 
 
-def test_the_heartbeat_ignores_the_rate_limit_and_the_no_op_rule(ready, cfg, now):
-    """Both would refuse a real write here; the heartbeat still goes out."""
+def test_the_heartbeat_ignores_the_no_op_rule(ready, cfg, now):
+    """A real write of these values would be refused as a no-op; the
+    heartbeat exists precisely to re-send what is already in force."""
     ready.note_write({"mep_start": 52.0, "mep_stop": 54.5,
-                      "kub_start": 52.0, "kub_stop": 54.5}, now=now - 60)
+                      "kub_start": 52.0, "kub_stop": 54.5}, now=now - 3700)
     send, values, _ = ready.heartbeat(now=now)
     assert send and values["mep_start"] == 52.0
+
+
+def test_the_heartbeat_is_hourly_not_per_tick(ready, cfg, now):
+    """At the 15-minute tick this wrote "Config updated" to the Pi5 event log
+    96 times a day. The watchdog's window is six hours."""
+    ready.note_heartbeat({"mep_start": 52.0, "mep_stop": 56.0,
+                          "kub_start": 52.0, "kub_stop": 56.0}, now=now - 900)
+    send, values, why = ready.heartbeat(now=now)
+    assert not send and values is None
+    assert "15 minutes ago" in why and "hourly" in why
+    send, _, _ = ready.heartbeat(now=now + 2701)
+    assert send, "an hour after the last one it goes out again"
+
+
+def test_a_real_write_also_defers_the_heartbeat(ready, cfg, now):
+    """The thresholds have just been sent; re-sending them adds nothing."""
+    ready.note_write({"mep_start": 55.0, "mep_stop": 57.0,
+                      "kub_start": 52.0, "kub_stop": 56.0}, now=now - 600)
+    send, _, why = ready.heartbeat(now=now)
+    assert not send and "10 minutes ago" in why
+
+
+def test_the_heartbeat_is_not_the_rate_limit_clock(ready, cfg, now):
+    """The bug this hid: with the heartbeat setting last_write_ts every tick,
+    rule 5 refused every model write for as long as the agent was alive."""
+    ready.note_heartbeat({"mep_start": 52.0, "mep_stop": 56.0,
+                          "kub_start": 52.0, "kub_stop": 56.0}, now=now - 60)
+    assert ready.state["last_write_ts"] == 0
+    ok, why = ready.check(52.0, 57.0, 52.0, 57.0, "storm tomorrow",
+                          now=now, status=make_status(cfg, now, mep_stop=56.0,
+                                                      kub_stop=56.0))
+    assert ok, why
+
+
+def test_a_heartbeat_still_keeps_the_intended_values_current(ready, now):
+    """It reads back what /config reported, so a Pi5 clamp is not later
+    mistaken for the owner editing by hand."""
+    ready.note_heartbeat({"mep_start": 52.0, "mep_stop": 56.0,
+                          "kub_start": 52.0, "kub_stop": 56.0}, now=now)
+    assert ready.intended()["mep_stop"] == 56.0
 
 
 def test_the_heartbeat_stops_while_standing_down_for_the_owner(ready, now):

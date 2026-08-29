@@ -27,8 +27,9 @@ Every 15 minutes, day and night:
 5. The plan record is written to the `plans` table. Every line but the
    recommendation is computed in Python, including whether anything was
    applied — the model cannot claim a change it did not make.
-6. The intended thresholds are re-sent as a heartbeat, so the Pi5 watchdog
-   can tell the agent is alive.
+6. Once an hour, if nothing else has sent them, the intended thresholds are
+   re-sent as a heartbeat. The Pi5 watchdog reads liveness from `GET /plan`
+   and resets after six hours of silence, so hourly is finer than it needs.
 
 ## Layout
 

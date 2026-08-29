@@ -450,7 +450,7 @@ class Agent:
         return record
 
     def heartbeat(self, facts):
-        """SPEC section 9: re-send the intended thresholds every tick."""
+        """SPEC section 9: re-send the intended thresholds, hourly."""
         if self.dry_run:
             return False
         send, values, why = self.guard.heartbeat(now=facts["now"])
@@ -461,8 +461,8 @@ class Agent:
             live = toolsmod.apply_thresholds(
                 self.cfg, values["mep_start"], values["mep_stop"],
                 values["kub_start"], values["kub_stop"])
-            self.guard.note_write(toolsmod.thresholds_from_config(live),
-                                  now=facts["now"])
+            self.guard.note_heartbeat(toolsmod.thresholds_from_config(live),
+                                      now=facts["now"])
             log.debug("heartbeat sent %s", values)
             return True
         except requests.RequestException as e:
