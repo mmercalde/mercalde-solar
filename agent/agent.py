@@ -498,7 +498,7 @@ class Agent:
         if evening:
             plan = history.latest_plan(self.conn)
             if plan:
-                lines += ["", plan["text"]]
+                lines += ["", telegram.escape(plan["text"])]
         else:
             since = now - 16 * 3600
             source_ts, predicted = self.reference_projection(now)
@@ -701,7 +701,7 @@ class Agent:
                     continue
                 log.info("telegram in: %s", text[:120])
                 try:
-                    telegram.send(self.cfg, self.answer(text))
+                    telegram.send(self.cfg, telegram.escape(self.answer(text)))
                 except Exception:                    # noqa: BLE001
                     log.exception("failed to answer a Telegram message")
             if not updates:
@@ -784,9 +784,9 @@ class Agent:
         except Exception:                            # noqa: BLE001
             log.exception("anomaly handling failed")
             reply = ""
-        text = f"⚠️ <b>{message}</b>"
+        text = f"⚠️ <b>{telegram.escape(message)}</b>"
         if reply:
-            text += f"\n\n{reply}"
+            text += f"\n\n{telegram.escape(reply)}"
         if self.dry_run:
             print(text)
         else:

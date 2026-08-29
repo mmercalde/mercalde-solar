@@ -70,7 +70,7 @@ def write_message(applied, reason):
     return (f"⚙️ <b>Thresholds set</b>\n"
             f"MEP {applied['mep_start']} / {applied['mep_stop']}, "
             f"Kubota {applied['kub_start']} / {applied['kub_stop']}\n"
-            f"{reason}")
+            f"{telegram.escape(reason)}")
 
 
 def thresholds_from_config(live):
@@ -288,9 +288,10 @@ class Tools:
         return r.json()
 
     def send_telegram(self, text):
+        # The model's words are text, not markup.
         if self.dry_run:
             return {"sent": False, "dry_run": True, "text": text}
-        return {"sent": telegram.send(self.cfg, text)}
+        return {"sent": telegram.send(self.cfg, telegram.escape(text))}
 
     # --- write --------------------------------------------------------------
 

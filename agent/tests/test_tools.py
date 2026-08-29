@@ -269,3 +269,19 @@ def test_a_failing_tool_does_not_kill_the_tick(conn, cfg, monkeypatch):
                         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
     t = tools.Tools(conn, cfg)
     assert "boom" in json.loads(t.call("get_status", {}))["error"]
+
+
+def test_the_write_message_escapes_the_reason(conn, cfg, sent):
+    """POLICY details contain "<", which is what silenced the first live days."""
+    t = tools.Tools(conn, cfg, guard=StubGuard(allowed=True))
+    t.set_gen_thresholds(55.5, 57.0, 52.0, 54.5, "solo top-up: peak 56.0 < 57.0")
+    assert "peak 56.0 &lt; 57.0" in sent[0]
+    assert "peak 56.0 < 57.0" not in sent[0]
+
+
+def test_a_model_message_is_escaped_too(conn, cfg, monkeypatch):
+    out = []
+    monkeypatch.setattr(tools.telegram, "send",
+                        lambda cfg, text, **k: out.append(text) or True)
+    tools.Tools(conn, cfg).send_telegram("load < 2 kW & falling")
+    assert out == ["load &lt; 2 kW &amp; falling"]
