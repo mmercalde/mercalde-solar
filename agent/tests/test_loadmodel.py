@@ -320,6 +320,29 @@ def test_project_voltage_when_already_below_target(conn, cfg, lm, monkeypatch):
         add_sample(conn, cfg, base - 86400 + i * 60, 52.0, 50, -1000, ah=1000)
     p = lm.project_voltage(52.0, now=base + 1300)
     assert p["hours"] == 0.0
+    # The first live night printed "?" here, from 03:10 on, when the pack sat
+    # within 0.7 V of 52. There is nothing unknown about it.
+    assert p["at"] == "now"
+    assert lm.projection_label(p, base + 1300) == "now"
+
+
+def test_a_projection_inside_the_quarter_hour_is_a_window_not_a_clock(conn, cfg, lm,
+                                                                      monkeypatch):
+    """A minute-precise time ten minutes out is spurious precision."""
+    base = ts_at(cfg, "2026-08-20", 22)
+    assert lm.projection_label({"reached": base + 600}, base) == "≤ 15 min"
+    assert lm.projection_label({"reached": base + 1200}, base) == "22:20"
+
+
+def test_a_projection_that_was_never_reached_has_no_label(lm):
+    assert lm.projection_label({"reached": None, "reason": "x"}) is None
+    assert lm.projection_label(None) is None
+
+
+def test_a_projection_missing_its_label_is_derived_not_dashed(conn, cfg, lm):
+    """Nothing may put "?" back: an old record without `at` still reads."""
+    base = ts_at(cfg, "2026-08-20", 22)
+    assert lm.projection_label({"reached": base + 7200}, base) == "00:00"
 
 
 # --- solar ------------------------------------------------------------------

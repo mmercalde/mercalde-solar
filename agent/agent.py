@@ -199,7 +199,8 @@ class Agent:
         sunrise = (datetime.fromtimestamp(facts["sunrise_ts"], tz).strftime("%H:%M")
                    if facts["sunrise_ts"] else "?")
         if proj and proj.get("reached"):
-            lines.append(f"projected 52.0 V at: {proj.get('at', '?')}   "
+            lines.append(f"projected 52.0 V at: "
+                         f"{self.model.projection_label(proj, facts['now'])}   "
                          f"sunrise {sunrise}")
         else:
             why = (proj or {}).get("reason", "unknown")
@@ -286,7 +287,8 @@ class Agent:
         else:
             parts.append("  expected load: not learned yet")
         if proj.get("reached"):
-            parts.append(f"  pack reaches 52.0 V at {proj.get('at')} "
+            parts.append(f"  pack reaches 52.0 V at "
+                         f"{self.model.projection_label(proj, f['now'])} "
                          f"(in {proj.get('hours')} h)")
         else:
             parts.append(f"  pack reaches 52.0 V: not projected "

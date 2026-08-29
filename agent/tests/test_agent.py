@@ -107,6 +107,21 @@ def test_plan_record_says_what_it_has_not_learned(a, cfg):
     assert lines[4].endswith("not learned yet")
 
 
+def test_a_projection_already_at_the_target_reads_now_not_a_question_mark(a, cfg):
+    f = base_facts(cfg)
+    f["projection"] = {"reached": f["now"], "at": "now", "hours": 0.0,
+                       "reason": "already at or below target"}
+    line = a.plan_record(f, "x", "y").splitlines()[3]
+    assert line == "projected 52.0 V at: now   sunrise 06:31"
+    assert "?" not in line
+
+
+def test_a_projection_with_no_label_is_still_not_a_question_mark(a, cfg):
+    f = base_facts(cfg)
+    f["projection"] = {"reached": f["now"] + 600}
+    assert "≤ 15 min" in a.plan_record(f, "x", "y").splitlines()[3]
+
+
 def test_load_line_admits_when_a_generator_hides_the_load(a, cfg):
     f = base_facts(cfg)
     f["load_w"] = None

@@ -25,6 +25,10 @@ log = logging.getLogger(__name__)
 # A profile cell needs this many observations before it is worth quoting.
 MIN_SAMPLES_PER_HOUR = 3
 MIN_DAYS_FOR_SOLAR_FIT = 8
+# A projection this close is reported as a window, not a clock time: the pack
+# is already at the target and the minute is noise.
+PROJECTION_SOON_SECONDS = 900
+
 # A voltage bin of the learned curve needs this many observations before it
 # is treated as a point. The backfill supplies thousands per bin; live
 # sampling alone can take weeks to reach it at the start threshold.
@@ -410,8 +414,13 @@ class LoadModel:
 
         available_wh = (sample["batt_soc"] - soc_target) / 100.0 * capacity
         if available_wh <= 0:
-            return {"reached": now, "hours": 0.0, "reason": "already at or below target",
-                    "soc_now": sample["batt_soc"], "soc_target": round(soc_target, 1)}
+            # There is nothing left above the target, so the answer is "now",
+            # not an unknown. Leaving `at` unset printed "?" from 03:10 onward
+            # on the first live night, exactly when the number mattered most.
+            return {"reached": now, "at": "now", "hours": 0.0,
+                    "reason": "already at or below target",
+                    "soc_now": sample["batt_soc"], "soc_target": round(soc_target, 1),
+                    "available_wh": round(available_wh)}
 
         forecast = weather.hourly(self.cfg, hours=hours, now=now)
         solar_by_ts = {f["ts"]: f for f in forecast}
@@ -442,9 +451,8 @@ class LoadModel:
                 frac = remaining / net
                 reached = ts + int(frac * 3600)
                 return {"reached": reached,
-                        "at": datetime.fromtimestamp(reached, history.tzinfo(self.cfg))
-                                      .strftime("%H:%M"),
-                        "hours": round((reached - now) / 3600.0, 2),
+                        "at": self._at_label(reached, now),
+                        "hours": round(max(0.0, reached - now) / 3600.0, 2),
                         "soc_now": sample["batt_soc"],
                         "soc_target": round(soc_target, 1),
                         "capacity_wh": capacity,
@@ -453,6 +461,22 @@ class LoadModel:
         return {"reached": None, "reason": f"not reached within {hours} h",
                 "soc_now": sample["batt_soc"], "soc_target": round(soc_target, 1),
                 "available_wh": round(available_wh)}
+
+    def _at_label(self, reached, now):
+        """How a projected time is written. Never "?"."""
+        if reached <= now:
+            return "now"
+        if reached - now <= PROJECTION_SOON_SECONDS:
+            return f"≤ {PROJECTION_SOON_SECONDS // 60} min"
+        return (datetime.fromtimestamp(reached, history.tzinfo(self.cfg))
+                        .strftime("%H:%M"))
+
+    def projection_label(self, projection, now=None):
+        """The display string for a projection, whatever shape it arrived in."""
+        p = projection or {}
+        if not p.get("reached"):
+            return None
+        return p.get("at") or self._at_label(p["reached"], int(now or time.time()))
 
     # --- data coverage (guard rule 6) --------------------------------------
 
