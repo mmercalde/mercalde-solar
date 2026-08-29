@@ -210,3 +210,14 @@ def test_unknown_paths_are_404(server):
     with pytest.raises(urllib.error.HTTPError) as e:
         get(server, "/nope")
     assert e.value.code == 404
+
+
+def test_recent_actions_are_newest_first_and_capped(cfg, conn):
+    """The dashboard badge lists them under the plan record."""
+    for i in range(8):
+        history.record_action(conn, "set_gen_thresholds", {"mep_start": 52.0},
+                              i % 2, f"reason {i}", 54.2, 71,
+                              "allowed" if i % 2 else "refused", ts=1000 + i)
+    rows = history.recent_actions(conn, limit=5)
+    assert len(rows) == 5
+    assert [r["reason"] for r in rows] == [f"reason {i}" for i in (7, 6, 5, 4, 3)]

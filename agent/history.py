@@ -669,6 +669,13 @@ def record_action(conn, tool, args, allowed, reason, voltage, soc, result, ts=No
     return ts
 
 
+def recent_actions(conn, limit=5):
+    """The last few guard decisions and policy misses, newest first."""
+    return conn.execute(
+        "SELECT ts, tool, args, allowed, reason, voltage, soc, result "
+        "FROM actions ORDER BY ts DESC LIMIT ?", (limit,)).fetchall()
+
+
 def _r(v, places):
     return None if v is None else round(v, places)
 

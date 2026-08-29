@@ -953,8 +953,28 @@ body::before{
 @keyframes blink{0%,100%{opacity:1}50%{opacity:.25}}
 .dot.stale{background:var(--warn)}
 .dot.off{background:var(--dim2)}
-.agentb{cursor:pointer;user-select:none}
+.agentb{cursor:pointer;user-select:none;position:relative}
 .agentb:hover{color:var(--batt)}
+/* The plan popover hangs off the badge; the badge is its positioning parent. */
+.agentpop{position:absolute;top:calc(100% + 8px);right:0;z-index:60;
+  width:min(30rem,calc(100vw - 2rem));max-height:min(32rem,70vh);overflow:auto;
+  background:var(--panel,#12151b);color:var(--txt);border:1px solid var(--line,#2a2f3a);
+  border-radius:10px;padding:.7rem .8rem;text-align:left;cursor:default;
+  box-shadow:0 10px 30px rgba(0,0,0,.45);font-size:.72rem;line-height:1.45}
+.agentpop h4{margin:0 0 .4rem;font-size:.68rem;letter-spacing:.08em;
+  text-transform:uppercase;color:var(--dim2)}
+.agentpop .pl{white-space:pre-wrap;word-break:break-word;font-family:ui-monospace,
+  SFMono-Regular,Menlo,monospace}
+.agentpop .pl.fire{color:var(--warn)}
+.agentpop .pl.rec{color:var(--batt)}
+.agentpop .acts{margin-top:.7rem;border-top:1px solid var(--line,#2a2f3a);
+  padding-top:.5rem}
+.agentpop .act{display:flex;gap:.5rem;padding:.15rem 0}
+.agentpop .act .at{color:var(--dim2);flex:0 0 5.2rem}
+.agentpop .act .rs{flex:0 0 4.2rem}
+.agentpop .act .rs.no{color:var(--bad)}
+.agentpop .act .rs.yes{color:var(--good)}
+.agentpop .act .why{flex:1 1 auto;color:var(--dim2);word-break:break-word}
 
 .banner{
   display:none;align-items:center;gap:10px;padding:13px 16px;border-radius:13px;margin-bottom:16px;
@@ -1234,7 +1254,7 @@ input[type=range]::-moz-range-thumb{width:14px;height:14px;border-radius:50%;bac
   <div class='hud hud-tr'>
     <span><span class='dot' id='liveDot'></span>&nbsp;<span class='num' id='lastUpdate_value'>--:--:--</span></span>
     <span>Errors <strong class='num' id='pollErrors_value' style='color:var(--txt)'>0</strong></span>
-    <span class='agentb' id='agentBadge' onclick='toggleAgentPlan()' title='Show the latest agent plan in the event log'><span class='dot off' id='agentDot'></span>&nbsp;<span id='agentText'>Agent &hellip;</span></span>
+    <span class='agentb' id='agentBadge' onclick='toggleAgentPlan(event)' title='Show the latest agent plan'><span class='dot off' id='agentDot'></span>&nbsp;<span id='agentText'>Agent &hellip;</span><span class='agentpop' id='agentPop' hidden onclick='event.stopPropagation()'></span></span>
     <a href='/registers'>Registers &rarr;</a>
   </div>
 
@@ -1790,7 +1810,6 @@ function setIf(id,val,dflt){
 }
 
 function updateEventLog(events){
-  if(agentPlanShown)return; /* the agent plan is on screen; leave it there */
   const log=document.getElementById('eventLog');
   if(!events||events.length===0){log.innerHTML="<div class='e-info'>No events yet...</div>";return;}
   log.innerHTML=events.slice().reverse().map(e=>{
@@ -1985,7 +2004,7 @@ function renderAgent(d){
   if(!dot||!txt)return;
   if(!d||d.online===false){
     dot.className='dot off';txt.textContent='Agent offline';
-    if(agentPlanShown){agentPlanShown=false;fetchConfig();}
+    hideAgentPlan();
     return;
   }
   if(!d.ts){dot.className='dot stale';txt.textContent='Agent \\u00b7 no plan yet';return;}
@@ -1999,26 +2018,66 @@ function renderAgent(d){
   txt.textContent=s;
   if(agentPlanShown)showAgentPlan();
 }
+/* The plan goes in a popover anchored to the badge, not into the event log:
+   the log is for the dashboard's own events, and a plan record buried in it
+   scrolls away as soon as anything else happens. */
 function showAgentPlan(){
-  const log=document.getElementById('eventLog');
-  if(!log)return;
-  log.innerHTML='';
-  const head=document.createElement('div');
-  head.className='e-ok';
-  head.textContent='Agent plan \\u2014 click the badge again for the event log';
-  log.appendChild(head);
+  const pop=document.getElementById('agentPop');
+  if(!pop)return;
+  pop.innerHTML='';
+  const head=document.createElement('h4');
+  head.textContent='Latest plan';
+  pop.appendChild(head);
   const body=(agentPlan&&agentPlan.text)?agentPlan.text:'No plan has been recorded yet.';
   body.split('\\n').forEach(function(line){
     const d=document.createElement('div');
-    d.className='e-info';
+    d.className='pl'+(/:\\s*FIRES\\b/.test(line)?' fire':'')
+                   +(/^(recommend|applied):/i.test(line)?' rec':'');
     d.textContent=line;
-    log.appendChild(d);
+    pop.appendChild(d);
   });
+  const acts=(agentPlan&&agentPlan.actions)||[];
+  const wrap=document.createElement('div');
+  wrap.className='acts';
+  const ah=document.createElement('h4');
+  ah.textContent='Last '+(acts.length||5)+' actions';
+  wrap.appendChild(ah);
+  if(!acts.length){
+    const d=document.createElement('div');
+    d.className='pl';
+    d.textContent='Nothing has been attempted yet.';
+    wrap.appendChild(d);
+  }
+  acts.forEach(function(a){
+    const row=document.createElement('div');
+    row.className='act';
+    const at=document.createElement('span');
+    at.className='at';at.textContent=a.at||'';
+    const rs=document.createElement('span');
+    rs.className='rs'+(a.result==='allowed'?' yes':' no');
+    rs.textContent=a.result||'';
+    const why=document.createElement('span');
+    why.className='why';why.textContent=a.reason||'';
+    row.appendChild(at);row.appendChild(rs);row.appendChild(why);
+    wrap.appendChild(row);
+  });
+  pop.appendChild(wrap);
+  pop.hidden=false;
 }
-function toggleAgentPlan(){
+function hideAgentPlan(){
+  agentPlanShown=false;
+  const pop=document.getElementById('agentPop');
+  if(pop)pop.hidden=true;
+}
+function toggleAgentPlan(e){
+  if(e)e.stopPropagation();
   agentPlanShown=!agentPlanShown;
-  if(agentPlanShown)showAgentPlan();else fetchConfig();
+  if(agentPlanShown)showAgentPlan();else hideAgentPlan();
 }
+document.addEventListener('click',function(){if(agentPlanShown)hideAgentPlan();});
+document.addEventListener('keydown',function(e){
+  if(e.key==='Escape'&&agentPlanShown)hideAgentPlan();
+});
 
 /* pause polling when tab hidden, resume immediately on return */
 let dataTimer,cfgTimer,agentTimer;

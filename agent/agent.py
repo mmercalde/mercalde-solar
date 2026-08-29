@@ -662,6 +662,17 @@ class Agent:
                    "baseline": baseline,
                    "owner_baseline": self.guard.owner_baseline(),
                    "intended": self.guard.intended()}
+        # The dashboard badge shows these under the plan, so the owner can see
+        # what the agent has been refused as well as what it decided.
+        try:
+            payload["actions"] = [
+                {"at": history.clock(r["ts"], self.cfg), "tool": r["tool"],
+                 "result": r["result"], "reason": r["reason"],
+                 "voltage": r["voltage"]}
+                for r in history.recent_actions(conn, limit=5)]
+        except sqlite3.Error as e:
+            log.warning("could not read recent actions: %s", e)
+            payload["actions"] = []
         plan = history.latest_plan(conn)
         if plan:
             try:
