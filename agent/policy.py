@@ -175,7 +175,7 @@ def solo_top_up(cfg, f, model):
         return _rule(4, name, True, "; ".join(parts), values, gen=gen,
                      target=lower, mode="solo-reduced")
 
-    # Not even the floor solo. Both together, if the pair can make the target.
+    # Not even the floor solo. Both together, at the best they can do.
     pair_window = min(w for w in windows.values()) if windows else window
     pair = model.reach(None, v, target, pair_window, solo=False, soc_now=soc)
     if pair["ok"]:
@@ -186,6 +186,20 @@ def solo_top_up(cfg, f, model):
                      target=target, mode="both")
     parts.append(f"{floor:.1f} is out of reach alone and both together "
                  f"{pair['why']}")
+    # The pair gets the same treatment as one generator: the highest target it
+    # can actually reach, rather than nothing. Without this the everyday stop
+    # of 56.0 could never be exceeded, no run would ever reach 57.0, and the
+    # charge-side curve could never learn what 57.0 costs.
+    pair_lower = model.best_reachable_target(None, v, pair_window, ceiling=target,
+                                             floor=floor, soc_now=soc, solo=False)
+    if pair_lower is not None:
+        parts.append(f"highest the pair can reach in {pair_window:.1f} h is "
+                     f"{pair_lower:.1f} ({pair.get('basis') or 'no curve'}), "
+                     f"so run both to {pair_lower:.1f}")
+        start, values = _both_proposal(cfg, pair_lower)
+        return _rule(4, name, True, "; ".join(parts), values, gen="both",
+                     target=pair_lower, mode="both-reduced")
+    parts.append(f"and the pair cannot reach {floor:.1f} either")
     return _rule(4, name, False, "; ".join(parts))
 
 

@@ -137,13 +137,28 @@ def test_a_reachable_solo_target_is_preferred_to_running_both(cfg, night):
     assert r["mode"] == "solo-reduced" and r["gen"] == "mep"
 
 
+def test_the_pair_also_takes_the_best_it_can_reach(cfg, night):
+    """Without this the everyday 56.0 stop could never be exceeded, no run
+    would ever reach 57.0, and the charge curve could never learn its cost."""
+    model = StubModel(rates={"mep": {"a": 20.0, "soc_per_h": 3.0}},
+                      pair={"a": 80.0, "soc_per_h": 12.0})
+    r = policy.solo_top_up(cfg, night, model)
+    assert r["fires"] and r["mode"] == "both-reduced" and r["gen"] == "both"
+    # 63% and two hours at 12 points an hour is 87%, which is 56.7 -> 56.5.
+    assert r["target"] == 56.5
+    assert "highest the pair can reach in 2.0 h is 56.5" in r["detail"]
+    assert r["proposal"] == {"mep_start": 54.5, "mep_stop": 56.5,
+                             "kub_start": 54.5, "kub_stop": 56.5}
+
+
 def test_nothing_fires_when_neither_one_nor_both_can_do_anything_useful(cfg,
                                                                         night):
     model = StubModel(rates={"mep": {"a": 20.0, "soc_per_h": 3.0}},
-                      pair={"a": 40.0, "soc_per_h": 6.0})
+                      pair={"a": 14.0, "soc_per_h": 2.0})
     r = policy.solo_top_up(cfg, night, model)
     assert not r["fires"]
     assert "55.0 is out of reach alone and both together 57.0 needs" in r["detail"]
+    assert "the pair cannot reach 55.0 either" in r["detail"]
 
 
 def test_without_paired_history_the_pair_is_not_assumed(cfg, night):
