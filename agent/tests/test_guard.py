@@ -102,6 +102,16 @@ def learn_the_pack(conn, cfg):
         }, ts=base + i * 60)
 
 
+@pytest.fixture(autouse=True)
+def sun(monkeypatch, cfg):
+    """Fixed sun times, so no test reaches Open-Meteo to learn what day it is."""
+    def sun_times(_cfg, day=None, data=None):
+        day = day or NOW_DAY
+        return ts_at(cfg, day, 6, 22), ts_at(cfg, day, 19, 24)
+    monkeypatch.setattr(guardmod.weather, "sun_times", sun_times)
+    return sun_times
+
+
 @pytest.fixture
 def g(conn, cfg, tmp_path, monkeypatch):
     monkeypatch.setattr(cfgmod, "DATA_DIR", str(tmp_path))
@@ -544,6 +554,102 @@ def test_the_owner_baseline_survives_a_restart(conn, cfg, ready, now, tmp_path,
     g._save_state()
     reborn = guardmod.Guard(conn, cfg, state_path=str(tmp_path / "state2.json"))
     assert reborn.baseline() == OWNER
+
+
+# --- rule 10: the daylight hold ---------------------------------------------
+
+def midday(cfg):
+    return ts_at(cfg, NOW_DAY, 9, 36)
+
+
+def test_a_start_raise_is_refused_while_the_sun_is_up(ready, cfg):
+    """The 9:36 am event: POLICY 4 fired and the MEP started. Whatever rule
+    asks, no generator is raised into a producing day."""
+    now = midday(cfg)
+    ok, why = ready.check(55.0, 57.0, 52.0, 56.0, "solo top-up", now=now,
+                          status=make_status(cfg, now, voltage=54.0, soc=80))
+    assert not ok and why.startswith("daylight hold")
+    assert "9:36 am" in why and "6:22 am" in why and "7:24 pm" in why
+    assert "would raise mep start above the baseline" in why
+
+
+def test_a_firing_rule_does_not_get_past_the_daylight_hold(ready, cfg):
+    """It is not a policy question. The rule may fire and still be refused."""
+    now = midday(cfg)
+    ok, why = ready.check(55.0, 57.0, 52.0, 56.0, "POLICY 4 solo top-up", now=now,
+                          status=make_status(cfg, now, voltage=54.0, soc=80),
+                          policy=a_firing_rule(cfg, now))
+    assert not ok and why.startswith("daylight hold")
+
+
+def test_both_generators_raised_are_both_named(ready, cfg):
+    now = midday(cfg)
+    ok, why = ready.check(55.0, 57.0, 55.0, 57.0, "both", now=now,
+                          status=make_status(cfg, now, voltage=54.0, soc=80))
+    assert not ok and "mep and kubota start above the baseline" in why
+
+
+def test_a_stop_raise_is_allowed_in_daylight(ready, cfg):
+    """Raising a stop starts nothing, so a storm forecast is acted on at once."""
+    now = midday(cfg)
+    ok, why = ready.check(52.0, 57.0, 52.0, 57.0, "storm tomorrow", now=now,
+                          status=make_status(cfg, now, voltage=54.0, soc=80))
+    assert ok, why
+
+
+def test_lowering_a_start_is_allowed_in_daylight(ready, cfg):
+    now = midday(cfg)
+    st = make_status(cfg, now, voltage=54.0, soc=80, mep_start=54.0)
+    ready.state["intended"] = {"mep_start": 54.0, "mep_stop": 54.5,
+                               "kub_start": 52.0, "kub_stop": 54.5}
+    ok, why = ready.check(52.0, 56.0, 52.0, 56.0, "back to default", now=now,
+                          status=st)
+    assert ok, why
+
+
+def test_the_same_write_is_permitted_after_sunset(ready, cfg):
+    now = ts_at(cfg, NOW_DAY, 19, 25)
+    ok, why = ready.check(55.0, 57.0, 52.0, 56.0, "solo top-up", now=now,
+                          status=make_status(cfg, now, voltage=54.0, soc=80))
+    assert ok, why
+
+
+def test_the_same_write_is_permitted_before_sunrise(ready, cfg):
+    now = ts_at(cfg, NOW_DAY, 5, 0)
+    ok, why = ready.check(55.0, 57.0, 52.0, 56.0, "solo top-up", now=now,
+                          status=make_status(cfg, now, voltage=54.0, soc=80))
+    assert ok, why
+
+
+def test_the_hold_is_measured_against_the_owners_baseline(after_owner_edit, cfg,
+                                                          now):
+    """The owner set 52.0 starts; a write to those starts raises nothing."""
+    day = midday(cfg)
+    ok, why = after_owner_edit.check(52.0, 56.0, 52.0, 56.0, "matching the owner",
+                                     now=day,
+                                     status=owner_status(cfg, day))
+    assert "daylight hold" not in (why or "")
+
+
+def test_an_unavailable_forecast_does_not_hold_every_write(ready, cfg,
+                                                           monkeypatch, caplog):
+    """Open-Meteo being down is not a reason to refuse until it comes back."""
+    monkeypatch.setattr(guardmod.weather, "sun_times",
+                        lambda *a, **k: (_ for _ in ()).throw(OSError("no route")))
+    now = midday(cfg)
+    ok, why = ready.check(55.0, 57.0, 52.0, 56.0, "solo top-up", now=now,
+                          status=make_status(cfg, now, voltage=54.0, soc=80))
+    assert ok, why
+    assert "no daylight hold" in caplog.text
+
+
+def test_a_daylight_refusal_is_audited(ready, conn, cfg, tmp_path):
+    now = midday(cfg)
+    ready.check(55.0, 57.0, 52.0, 56.0, "solo top-up", now=now,
+                status=make_status(cfg, now, voltage=54.0, soc=80))
+    row = conn.execute("SELECT * FROM actions ORDER BY ts DESC LIMIT 1").fetchone()
+    assert row["allowed"] == 0 and row["reason"].startswith("daylight hold")
+    assert "daylight hold" in (tmp_path / "audit.log").read_text()
 
 
 # --- rule 9: audit ----------------------------------------------------------

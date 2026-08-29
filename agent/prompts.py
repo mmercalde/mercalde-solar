@@ -57,7 +57,8 @@ POLICY = """\
    passed.
 7. Generators are never run for a top-up while the sun is still producing -
    the day's solar goes into the pack first. Top-up decisions are made after
-   sunset, once today's production is known.
+   sunset, once today's production is known. The guard refuses a start raise
+   between sunrise and sunset whatever rule asks for it.
 8. Restate numbers only from tool results. Never compute watt-hours, hours or
    rates myself. When uncertain, send a Telegram instead of acting. Every
    action carries a one-line reason."""

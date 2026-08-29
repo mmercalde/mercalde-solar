@@ -23,6 +23,7 @@ import config
 import history
 import loadmodel
 import policy as policymod
+import weather
 
 log = logging.getLogger(__name__)
 
@@ -269,6 +270,27 @@ class Guard:
                 f"move them, and none fires; the agent may always return to "
                 f"them")
 
+        # Rule 10: the daylight hold. Between sunrise and sunset no write may
+        # raise a generator's start above the owner's baseline, whatever rule
+        # proposed it. The day's solar goes into the pack first, and the Pi5's
+        # own low-voltage auto-start stays the only thing that runs a
+        # generator in that window. POLICY 4 holds itself to the same window,
+        # but this does not depend on a rule remembering to.
+        daylight = self._daylight(now)
+        if daylight:
+            base = self.baseline()
+            raised = [gen for gen, skey, _, _ in GEN_KEYS
+                      if want[skey] > base[skey] + EPS]
+            if raised:
+                return False, (
+                    f"daylight hold: it is {history.clock(now, self.cfg)}, "
+                    f"between sunrise {history.clock(daylight[0], self.cfg)} and "
+                    f"sunset {history.clock(daylight[1], self.cfg)}, and this "
+                    f"would raise {' and '.join(raised)} start above the "
+                    f"baseline. The day's solar goes into the pack first; only "
+                    f"the Pi5's {self.cfg['default_start']} V auto-start runs a "
+                    f"generator before sunset")
+
         # Rule 1: bounds.
         smin, smax = self.cfg["start_voltage_min"], self.cfg["start_voltage_max"]
         pmin, pmax = self.cfg["stop_voltage_min"], self.cfg["stop_voltage_max"]
@@ -325,6 +347,24 @@ class Guard:
                                f"{reach['why']}")
 
         return True, "permitted"
+
+    def _daylight(self, now):
+        """(sunrise, sunset) if `now` is between them, else None.
+
+        An unavailable forecast does not hold the write: Open-Meteo being
+        down is not a reason to refuse every threshold change until it comes
+        back, and POLICY 4 cannot fire without a projection anyway. It is
+        logged so a run of them is visible.
+        """
+        try:
+            sun = weather.sun_times(self.cfg, history.local_day(now, self.cfg))
+        except Exception as e:                      # noqa: BLE001
+            log.warning("no sun times, so no daylight hold: %s", e)
+            return None
+        if not sun:
+            log.warning("no sun times for today, so no daylight hold")
+            return None
+        return sun if sun[0] <= now <= sun[1] else None
 
     # --- heartbeat (SPEC section 9) ----------------------------------------
 
