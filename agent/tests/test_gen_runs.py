@@ -185,3 +185,65 @@ def test_gen_running_hours_excludes_those_hours(conn, cfg):
     history.derive_gen_runs(conn, cfg)
     hours = history.gen_running_hours(conn, start - 86400, start + 86400)
     assert history.hour_floor(start) in hours
+
+
+# --- the peak POLICY 4 asks about is solar's ---------------------------------
+
+def solar_sample(conn, cfg, day, hhmm, v):
+    history.record_sample(conn, {
+        "batteryVoltage": v, "battSocBM": 70, "battPower": 2000,
+        "battCurrent": 37.0, "battMonitorOnline": True,
+        "mep803aAction": history.GEN_STOPPED, "kubotaAction": history.GEN_STOPPED,
+        "acPower1": 600, "acPower2": 600,
+        "mppt80PVPower": 3000, "southArrayPVPower": 3000, "westArrayPVPower": 3000,
+    }, ts=ts_at(cfg, day, hhmm))
+
+
+def test_the_peak_ignores_what_a_generator_did(conn, cfg):
+    """"peak today 56.0 V" was this morning's generator run, not the sun."""
+    feed(conn, cfg, ts_at(cfg, "2026-08-29", "05:00"), 60,
+         v_start=52.0, v_end=56.0)
+    history.derive_gen_runs(conn, cfg)
+    solar_sample(conn, cfg, "2026-08-29", "13:00", 54.4)
+    peak = history.solar_peak(conn, cfg, "2026-08-29",
+                             now=ts_at(cfg, "2026-08-29", "21:00"))
+    assert peak == 54.4, "the sun got to 54.4; the MEP got to 56.0"
+
+
+def test_the_peak_restarts_after_a_run_ends(conn, cfg):
+    """The pack keeps the generator's surface charge for a while, and that
+    voltage is the generator's too."""
+    solar_sample(conn, cfg, "2026-08-29", "12:00", 55.9)
+    feed(conn, cfg, ts_at(cfg, "2026-08-29", "17:00"), 60,
+         v_start=52.0, v_end=56.5)
+    history.derive_gen_runs(conn, cfg)
+    solar_sample(conn, cfg, "2026-08-29", "19:00", 53.2)
+    peak = history.solar_peak(conn, cfg, "2026-08-29",
+                             now=ts_at(cfg, "2026-08-29", "21:00"))
+    assert peak == 53.2, "only what was measured once the pack had settled"
+
+
+def test_the_peak_waits_for_the_pack_to_settle_after_a_run(conn, cfg):
+    feed(conn, cfg, ts_at(cfg, "2026-08-29", "17:00"), 60,
+         v_start=52.0, v_end=56.5)
+    history.derive_gen_runs(conn, cfg)
+    solar_sample(conn, cfg, "2026-08-29", "18:20", 55.4)   # inside the settle
+    solar_sample(conn, cfg, "2026-08-29", "18:40", 53.1)   # after it
+    assert history.solar_peak(conn, cfg, "2026-08-29",
+                              now=ts_at(cfg, "2026-08-29", "21:00")) == 53.1
+
+
+def test_a_day_with_no_generator_keeps_the_whole_day(conn, cfg):
+    solar_sample(conn, cfg, "2026-08-29", "10:00", 53.0)
+    solar_sample(conn, cfg, "2026-08-29", "13:00", 56.8)
+    solar_sample(conn, cfg, "2026-08-29", "17:00", 55.0)
+    assert history.solar_peak(conn, cfg, "2026-08-29",
+                              now=ts_at(cfg, "2026-08-29", "21:00")) == 56.8
+
+
+def test_a_day_that_is_all_generator_has_no_solar_peak(conn, cfg):
+    feed(conn, cfg, ts_at(cfg, "2026-08-29", "05:00"), 60, pre=0, post=0,
+         v_start=52.0, v_end=56.0)
+    history.derive_gen_runs(conn, cfg)
+    assert history.solar_peak(conn, cfg, "2026-08-29",
+                              now=ts_at(cfg, "2026-08-29", "06:30")) is None

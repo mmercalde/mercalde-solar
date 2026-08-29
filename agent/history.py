@@ -31,6 +31,9 @@ SAMPLE_SECONDS = 60
 SAMPLE_RETENTION_DAYS = 90
 # A gap longer than this is a dropout, not elapsed time: do not integrate energy across it.
 MAX_INTEGRATION_GAP = 300
+# How long after a generator stops the pack's voltage is still that
+# generator's doing rather than the sun's.
+SOLAR_PEAK_SETTLE_SECONDS = 1800
 
 GEN_RUNNING = 9
 GEN_STOPPED = 10
@@ -558,6 +561,31 @@ def rollup_daily(conn, cfg, days=None):
 
 
 # --- reads used by tools and the plan record --------------------------------
+
+def solar_peak(conn, cfg, day, now=None):
+    """The highest voltage solar reached today, in volts, or None.
+
+    POLICY 4 asks whether *solar* got the pack to 57.0, so a generator's own
+    work must not answer for it. Samples taken while either generator ran are
+    excluded, and so is everything up to SOLAR_PEAK_SETTLE_SECONDS after the
+    last one stopped: the pack carries the surface charge a generator put
+    there for a while afterwards, and that voltage is still the generator's.
+    """
+    lo, hi = day_bounds(day, cfg)
+    hi = min(hi, int(now or time.time()))
+    last_stop = conn.execute(
+        "SELECT MAX(COALESCE(stop_ts, start_ts)) AS t FROM gen_runs "
+        "WHERE COALESCE(stop_ts, start_ts) >= ? AND start_ts <= ?",
+        (lo, hi)).fetchone()
+    since = (max(lo, last_stop["t"] + SOLAR_PEAK_SETTLE_SECONDS)
+             if last_stop and last_stop["t"] else lo)
+    row = conn.execute(
+        "SELECT MAX(battery_v) AS p FROM samples WHERE ts >= ? AND ts <= ? "
+        "AND (mep_action IS NULL OR mep_action != ?) "
+        "AND (kub_action IS NULL OR kub_action != ?)",
+        (since, hi, GEN_RUNNING, GEN_RUNNING)).fetchone()
+    return row["p"] if row else None
+
 
 def latest_sample(conn):
     return conn.execute("SELECT * FROM samples ORDER BY ts DESC LIMIT 1").fetchone()

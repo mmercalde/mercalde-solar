@@ -115,11 +115,11 @@ class Agent:
         gen_running = (data.get("mep803aAction") == history.GEN_RUNNING
                        or data.get("kubotaAction") == history.GEN_RUNNING)
 
-        peak_row = self.conn.execute(
-            "SELECT MAX(battery_v) p, MIN(battery_v) m FROM samples WHERE ts >= ?",
-            (history.day_bounds(today, self.cfg)[0],)).fetchone()
-        peak_today = peak_row["p"] if peak_row else None
-        if peak_today is None or (data.get("batteryVoltage") or 0) > peak_today:
+        # Solar's peak, not a generator's: POLICY 4 asks whether the day's sun
+        # reached 57.0. The live reading only counts while nothing is running.
+        peak_today = history.solar_peak(self.conn, self.cfg, today, now=now)
+        if not gen_running and (peak_today is None
+                                or (data.get("batteryVoltage") or 0) > peak_today):
             peak_today = data.get("batteryVoltage")
 
         wx = weather.summary(self.cfg, now=now)
