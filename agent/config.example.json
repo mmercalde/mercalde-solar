@@ -1,0 +1,20 @@
+{
+  "dashboard_url": "http://192.168.3.10:8080",
+  "llm_url": "http://127.0.0.1:8080/v1/chat/completions",
+  "llm_model": "qwen3",
+  "telegram": {"token": "", "chat_id": ""},
+  "gateway": {"url": "https://192.168.3.131", "user": "Admin", "password": ""},
+  "lat": 32.36, "lon": -117.06, "tz": "America/Tijuana",
+  "tick_minutes": 15,
+  "digest_hours": [7, 19],
+  "start_voltage_min": 52.0, "start_voltage_max": 56.0,
+  "stop_voltage_min": 54.5,  "stop_voltage_max": 57.0,
+  "default_start": 52.0, "default_stop": 54.5,
+  "solo_peak_threshold": 57.0,
+  "solo_select_voltage": 55.0,
+  "solo_target": 57.0,
+  "ags_max_run_hours": {"mep": 3, "kubota": 3},
+  "exercise": {"mep_days": 5, "kubota_days": 3, "start": "09:00", "minutes": 30},
+  "learning_live_days": 7,
+  "ask_port": 8090
+}

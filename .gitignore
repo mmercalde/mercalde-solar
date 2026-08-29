@@ -27,3 +27,8 @@ secrets.py
 # Runtime data and vendored libraries
 pi5/ac_diag_log.json
 pi5/vendor/
+
+# Solar agent
+agent/config.json
+agent/data/
+agent/venv/
