@@ -301,7 +301,7 @@ def test_the_report_names_the_plan_it_scored(a, cfg, morning, monkeypatch, capsy
 
 def stub_data(**over):
     d = {"pollErrors": 0, "mepAgsOnline": True, "kubotaAgsOnline": True,
-         "mppt80PVPower": 1000, "southArrayPVPower": 1000, "westArrayPVPower": 1000,
+         "mppt80PVPower": 2000, "southArrayPVPower": 2000, "westArrayPVPower": 2000,
          "batteryVoltage": 54.0, "autoGenEnabled": True,
          "mep803aAction": history.GEN_STOPPED, "kubotaAction": history.GEN_STOPPED}
     d.update(over)
@@ -358,7 +358,7 @@ def test_array_imbalance_needs_thirty_minutes(quiet, monkeypatch):
 def test_array_imbalance_resets_when_output_recovers(quiet, monkeypatch):
     fire(quiet, monkeypatch, westArrayPVPower=10)
     assert "west" in quiet.array_low_since
-    fire(quiet, monkeypatch, westArrayPVPower=1000)
+    fire(quiet, monkeypatch, westArrayPVPower=2000)
     assert "west" not in quiet.array_low_since
 
 
@@ -366,6 +366,39 @@ def test_arrays_are_not_compared_at_night(quiet, monkeypatch):
     fire(quiet, monkeypatch, mppt80PVPower=10, southArrayPVPower=10,
          westArrayPVPower=0)
     assert quiet.array_low_since == {}
+
+
+def test_dawn_is_not_a_weak_array(quiet, monkeypatch):
+    """07:31 on the first live day: mppt80 0 W against an average of 188 W.
+    One group faces the sun minutes before the others; that is not a fault."""
+    fire(quiet, monkeypatch, mppt80PVPower=0, southArrayPVPower=188,
+         westArrayPVPower=188)
+    assert quiet.array_low_since == {}, "the others are not making real power yet"
+
+
+def test_the_others_must_be_over_the_floor_before_it_counts(quiet, monkeypatch):
+    fire(quiet, monkeypatch, mppt80PVPower=0, southArrayPVPower=1000,
+         westArrayPVPower=1000)
+    assert quiet.array_low_since == {}, "an average of exactly 1000 is not over it"
+    fire(quiet, monkeypatch, mppt80PVPower=0, southArrayPVPower=1100,
+         westArrayPVPower=1100)
+    assert "mppt80" in quiet.array_low_since
+
+
+def test_a_weak_array_sends_the_model_at_the_pv_side(a, monkeypatch):
+    asked = []
+    monkeypatch.setattr(a, "answer", lambda q, *x, **k: asked.append(q) or "")
+    a.on_anomaly("array_mppt80", "mppt80 array has produced under 30%.")
+    assert "PV side" in asked[0]
+    assert "MPPT" in asked[0] and "breaker" in asked[0]
+    assert "do not reach for get_ac_diag" in asked[0]
+
+
+def test_other_anomalies_get_no_pv_hint(a, monkeypatch):
+    asked = []
+    monkeypatch.setattr(a, "answer", lambda q, *x, **k: asked.append(q) or "")
+    a.on_anomaly("ags_mepAgsOnline", "MEP AGS has gone offline.")
+    assert "PV side" not in asked[0]
 
 
 def test_each_anomaly_has_its_own_cooldown(quiet, monkeypatch):

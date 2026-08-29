@@ -44,7 +44,21 @@ ANOMALY_COOLDOWN = 1800
 POLL_ERROR_JUMP = 10
 ARRAY_IMBALANCE_RATIO = 0.30
 ARRAY_IMBALANCE_SECONDS = 1800
-DAYLIGHT_MIN_W = 200          # below this the arrays are not comparable
+# The healthy arrays must be making real power before a quiet one means
+# anything. At dawn one group faces the sun minutes before the others, so
+# 0 W against an average of 188 W is the sun coming up, not a fault: that is
+# what fired at 07:31 on the first live day.
+ARRAY_MIN_OTHERS_AVG_W = 1000
+
+# Extra direction for the model when it is woken by an anomaly, so it looks
+# where the fault can actually be.
+ANOMALY_HINTS = {
+    "array_": "Diagnose this on the PV side: shading or soiling on that "
+              "group, its array breaker or fuses, the string wiring, and the "
+              "MPPT's own state and mode. The inverters and the AC side are "
+              "not implicated by one array being down, so do not reach for "
+              "get_ac_diag.",
+}
 RECOMMEND_RE = re.compile(r"^\s*recommend:\s*(.+)$", re.IGNORECASE | re.MULTILINE)
 
 
@@ -682,21 +696,18 @@ class Agent:
         arrays = {"mppt80": data.get("mppt80PVPower") or 0,
                   "south": data.get("southArrayPVPower") or 0,
                   "west": data.get("westArrayPVPower") or 0}
-        if sum(arrays.values()) > DAYLIGHT_MIN_W:
-            for name, w in arrays.items():
-                others = [v for k, v in arrays.items() if k != name]
-                avg = sum(others) / len(others)
-                if avg > 0 and w < ARRAY_IMBALANCE_RATIO * avg:
-                    since = self.array_low_since.setdefault(name, now)
-                    if now - since >= ARRAY_IMBALANCE_SECONDS:
-                        fired.append((f"array_{name}",
-                                      f"{name} array has produced under 30% of the "
-                                      f"others' average for 30 minutes "
-                                      f"({w:.0f} W vs {avg:.0f} W)."))
-                else:
-                    self.array_low_since.pop(name, None)
-        else:
-            self.array_low_since.clear()
+        for name, w in arrays.items():
+            others = [v for k, v in arrays.items() if k != name]
+            avg = sum(others) / len(others)
+            if avg > ARRAY_MIN_OTHERS_AVG_W and w < ARRAY_IMBALANCE_RATIO * avg:
+                since = self.array_low_since.setdefault(name, now)
+                if now - since >= ARRAY_IMBALANCE_SECONDS:
+                    fired.append((f"array_{name}",
+                                  f"{name} array has produced under 30% of the "
+                                  f"others' average for 30 minutes "
+                                  f"({w:.0f} W vs {avg:.0f} W)."))
+            else:
+                self.array_low_since.pop(name, None)
 
         v = data.get("batteryVoltage")
         gen_running = (data.get("mep803aAction") == history.GEN_RUNNING
@@ -722,9 +733,14 @@ class Agent:
 
     def on_anomaly(self, key, message):
         """Wake the model with the anomaly as its question."""
+        question = (f"ANOMALY: {message} What does this mean and what, "
+                    f"if anything, should be done?")
+        hint = next((h for prefix, h in ANOMALY_HINTS.items()
+                     if key.startswith(prefix)), None)
+        if hint:
+            question += f"\n\n{hint}"
         try:
-            reply = self.answer(f"ANOMALY: {message} What does this mean and what, "
-                                f"if anything, should be done?")
+            reply = self.answer(question)
         except Exception:                            # noqa: BLE001
             log.exception("anomaly handling failed")
             reply = ""
