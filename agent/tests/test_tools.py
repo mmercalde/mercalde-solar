@@ -165,11 +165,63 @@ def test_write_tool_notes_the_applied_values(conn, cfg, monkeypatch):
     guard = StubGuard(allowed=True)
     monkeypatch.setattr(tools, "apply_thresholds",
                         lambda *a, **k: LIVE_CONFIG["config"])
+    monkeypatch.setattr(tools.telegram, "send", lambda *a, **k: True)
     t = tools.Tools(conn, cfg, guard=guard)
     out = t.set_gen_thresholds(55.5, 57.0, 52.0, 54.5, "solo top-up")
     assert out["applied"] is True
     assert guard.noted == {"mep_start": 55.5, "mep_stop": 57.0,
                            "kub_start": 52.0, "kub_stop": 54.5}
+
+
+# --- every executed write tells the owner -----------------------------------
+
+@pytest.fixture
+def sent(monkeypatch):
+    """Captures what would go to Telegram."""
+    out = []
+    monkeypatch.setattr(tools, "apply_thresholds",
+                        lambda *a, **k: LIVE_CONFIG["config"])
+    monkeypatch.setattr(tools.telegram, "send",
+                        lambda cfg, text, **k: out.append(text) or True)
+    return out
+
+
+def test_an_executed_write_sends_the_values_and_the_reason(conn, cfg, sent):
+    """The 04:10 write sent nothing; the model was trusted to do it."""
+    t = tools.Tools(conn, cfg, guard=StubGuard(allowed=True))
+    out = t.set_gen_thresholds(55.5, 57.0, 52.0, 54.5, "POLICY 4 solo top-up")
+    assert out["notified"] is True
+    assert len(sent) == 1
+    assert "MEP 55.5 / 57.0, Kubota 52.0 / 54.5" in sent[0]
+    assert "POLICY 4 solo top-up" in sent[0]
+
+
+def test_the_message_quotes_what_the_dashboard_read_back(conn, cfg, sent):
+    """A Pi5 clamp must reach the owner as the number that is in force."""
+    t = tools.Tools(conn, cfg, guard=StubGuard(allowed=True))
+    t.set_gen_thresholds(56.0, 58.0, 52.0, 54.5, "clamped somewhere")
+    assert "MEP 55.5 / 57.0" in sent[0], "the /config response, not the request"
+
+
+def test_a_refused_write_tells_nobody(conn, cfg, sent):
+    t = tools.Tools(conn, cfg, guard=StubGuard(allowed=False, reason="rate limit"))
+    t.set_gen_thresholds(55.5, 57.0, 52.0, 54.5, "solo top-up")
+    assert sent == []
+
+
+def test_a_dry_run_tells_nobody(conn, cfg, sent):
+    t = tools.Tools(conn, cfg, guard=StubGuard(allowed=True), dry_run=True)
+    t.set_gen_thresholds(55.5, 57.0, 52.0, 54.5, "solo top-up")
+    assert sent == []
+
+
+def test_a_telegram_failure_does_not_undo_the_write(conn, cfg, monkeypatch):
+    monkeypatch.setattr(tools, "apply_thresholds",
+                        lambda *a, **k: LIVE_CONFIG["config"])
+    monkeypatch.setattr(tools.telegram, "send", lambda *a, **k: False)
+    t = tools.Tools(conn, cfg, guard=StubGuard(allowed=True))
+    out = t.set_gen_thresholds(55.5, 57.0, 52.0, 54.5, "solo top-up")
+    assert out["applied"] is True and out["notified"] is False
 
 
 # --- dispatch ---------------------------------------------------------------

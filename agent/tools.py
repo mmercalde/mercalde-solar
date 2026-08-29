@@ -65,6 +65,14 @@ def apply_thresholds(cfg, mep_start, mep_stop, kub_start, kub_stop,
     return r.json()["config"]
 
 
+def write_message(applied, reason):
+    """What the owner is told about a threshold write."""
+    return (f"⚙️ <b>Thresholds set</b>\n"
+            f"MEP {applied['mep_start']} / {applied['mep_stop']}, "
+            f"Kubota {applied['kub_start']} / {applied['kub_stop']}\n"
+            f"{reason}")
+
+
 def thresholds_from_config(live):
     """Pull the four values the agent owns out of a /config response."""
     return {
@@ -299,7 +307,13 @@ class Tools:
         live = apply_thresholds(self.cfg, mep_start, mep_stop, kub_start, kub_stop)
         applied = thresholds_from_config(live)
         self.guard.note_write(applied)
-        return {"applied": True, "now": applied, "reason": reason}
+        # Every executed write tells the owner, in Python, with the values the
+        # dashboard read back rather than the ones that were asked for. The
+        # 04:10 write on the first live night sent nothing, because the model
+        # was trusted to call send_telegram itself and did not.
+        notified = telegram.send(self.cfg, write_message(applied, reason))
+        return {"applied": True, "now": applied, "reason": reason,
+                "notified": notified}
 
     # --- dispatch -----------------------------------------------------------
 
