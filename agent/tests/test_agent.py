@@ -1,6 +1,7 @@
 """Agent logic that runs without a model or a network: the plan record,
 the recommendation contract, answer grounding, and the anomaly triggers."""
 
+import sqlite3
 from datetime import datetime
 
 import pytest
@@ -11,7 +12,12 @@ import history
 
 @pytest.fixture
 def a(cfg, conn, monkeypatch, tmp_path):
-    monkeypatch.setattr(agentmod.history, "connect", lambda *a, **k: conn)
+    # Agent resolves a connection per thread; hand every thread the same
+    # in-memory one. `connect` is only used once, to create the schema, and
+    # its result is closed, so it must not be the shared connection.
+    monkeypatch.setattr(agentmod.history, "connect",
+                        lambda *a, **k: sqlite3.connect(":memory:"))
+    monkeypatch.setattr(agentmod.history, "thread_connection", lambda *a, **k: conn)
     monkeypatch.setattr(agentmod.guardmod.Guard, "_save_state", lambda self: None)
     inst = agentmod.Agent(cfg, dry_run=True)
     inst.guard.state_path = str(tmp_path / "state.json")

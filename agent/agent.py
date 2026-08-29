@@ -15,6 +15,7 @@ import json
 import logging
 import re
 import signal
+import sqlite3
 import sys
 import threading
 import time
@@ -55,12 +56,16 @@ def _kwh(wh):
 
 
 class Agent:
-    def __init__(self, cfg, dry_run=False):
+    def __init__(self, cfg, dry_run=False, db_path=None):
         self.cfg = cfg
         self.dry_run = dry_run
-        self.conn = history.connect()
-        self.model = loadmodel.LoadModel(self.conn, cfg)
-        self.guard = guardmod.Guard(self.conn, cfg, model=self.model)
+        self.db_path = db_path or config.DB_PATH
+        # Create the schema once here, then let every thread resolve its own
+        # connection: scheduler jobs, the Telegram poll and the ask server all
+        # run off the main thread, and sqlite3 forbids sharing a connection.
+        history.connect(self.db_path).close()
+        self.model = loadmodel.LoadModel(self.connection, cfg)
+        self.guard = guardmod.Guard(self.connection, cfg, model=self.model)
         self.llm = LLM(cfg)
         self.lock = threading.Lock()          # one model conversation at a time
         self.anomaly_last = {}
@@ -69,8 +74,16 @@ class Agent:
         self.telegram_offset = None
         self.stop_event = threading.Event()
 
+    def connection(self):
+        """This thread's database connection."""
+        return history.thread_connection(self.db_path)
+
+    @property
+    def conn(self):
+        return self.connection()
+
     def tools(self):
-        return toolsmod.Tools(self.conn, self.cfg, guard=self.guard,
+        return toolsmod.Tools(self.connection, self.cfg, guard=self.guard,
                               dry_run=self.dry_run)
 
     # --- facts the plan record is built from --------------------------------
@@ -498,15 +511,36 @@ class Agent:
         return (f"Battery {v} volts, {soc} percent charge. "
                 f"Solar {solar:.0f} watts. {gen}")
 
-    def latest_plan_json(self):
-        plan = history.latest_plan(self.conn)
-        if not plan:
-            return None
+    def latest_plan_json(self, conn=None):
+        """The plan record plus the live learning gate.
+
+        Takes a connection so the ask server can hand in a short-lived
+        read-only one from its own thread. Always returns a payload, even
+        before the first tick: the Pi5 watchdog treats any answer as proof the
+        agent is alive, and needs `learning.open` to know whether the agent is
+        even allowed to have moved the thresholds.
+        """
+        conn = conn or self.conn
+        model = loadmodel.LoadModel(conn, self.cfg)
         try:
-            data = json.loads(plan["data"] or "{}")
-        except json.JSONDecodeError:
-            data = {}
-        return {"ts": plan["ts"], "text": plan["text"], "data": data}
+            gate = model.learning_status()
+        except sqlite3.Error as e:
+            log.warning("could not read the learning gate: %s", e)
+            gate = None
+        payload = {"ts": None, "text": None, "data": {}, "learning": gate,
+                   # The Pi5 watchdog resets to these; it must not carry its
+                   # own copy of numbers that live in config.json.
+                   "defaults": {"start": self.cfg["default_start"],
+                                "stop": self.cfg["default_stop"]},
+                   "intended": self.guard.intended()}
+        plan = history.latest_plan(conn)
+        if plan:
+            try:
+                data = json.loads(plan["data"] or "{}")
+            except json.JSONDecodeError:
+                data = {}
+            payload.update(ts=plan["ts"], text=plan["text"], data=data)
+        return payload
 
     def telegram_loop(self):
         """Long-poll for owner messages. Only the configured chat is answered."""
@@ -633,12 +667,12 @@ class Agent:
             evening = hour >= 12
             sched.add_job(self.digest, "cron", hour=hour, minute=0,
                           args=[evening], id=f"digest_{hour}")
-        sched.add_job(lambda: history.purge_samples(self.conn), "cron", hour=3,
+        sched.add_job(lambda: history.purge_samples(self.connection()), "cron", hour=3,
                       minute=30, id="purge")
         sched.start()
 
         server = ask_server.serve(self.cfg, self.answer, self.latest_plan_json,
-                                  host=ask_host)
+                                  host=ask_host, db_path=self.db_path)
         threading.Thread(target=self.telegram_loop, name="telegram",
                          daemon=True).start()
 

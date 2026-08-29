@@ -146,12 +146,16 @@ class Tools:
     """
 
     def __init__(self, conn, cfg, guard=None, dry_run=False):
-        self.conn = conn
+        self._conn = conn
         self.cfg = cfg
         self.guard = guard
         self.dry_run = dry_run
         self.model = loadmodel.LoadModel(conn, cfg)
         self.calls = []
+
+    @property
+    def conn(self):
+        return history.resolve(self._conn)
 
     # --- read ---------------------------------------------------------------
 

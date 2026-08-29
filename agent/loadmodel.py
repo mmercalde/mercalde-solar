@@ -35,8 +35,13 @@ def _median(values):
 
 class LoadModel:
     def __init__(self, conn, cfg):
-        self.conn = conn
+        # `conn` may be a connection or a provider of one; see history.resolve.
+        self._conn = conn
         self.cfg = cfg
+
+    @property
+    def conn(self):
+        return history.resolve(self._conn)
 
     # --- shared filtering ---------------------------------------------------
 

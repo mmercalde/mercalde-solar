@@ -9,8 +9,11 @@ WireGuard through the Pi5, and nothing else should.
 
 import json
 import logging
+import sqlite3
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+import history
 
 log = logging.getLogger(__name__)
 
@@ -40,11 +43,30 @@ class _Handler(BaseHTTPRequestHandler):
         if self.path.rstrip("/") != "/plan":
             self._send(404, "not found")
             return
-        plan = self.server.plan_provider() if self.server.plan_provider else None
-        if not plan:
-            self._send(503, json.dumps({"error": "no plan recorded yet"}),
+        if not self.server.plan_provider:
+            self._send(503, json.dumps({"error": "no plan provider"}),
                        "application/json")
             return
+        # Each request runs on its own thread, and a sqlite3 connection may
+        # only be used by the thread that created it. Open a short-lived
+        # read-only connection here rather than borrowing the agent's.
+        conn = None
+        try:
+            conn = history.readonly_connection(self.server.db_path)
+            plan = self.server.plan_provider(conn)
+        except sqlite3.Error as e:
+            log.warning("could not read the plan: %s", e)
+            self._send(503, json.dumps({"error": f"database unavailable: {e}"}),
+                       "application/json")
+            return
+        except Exception:                            # noqa: BLE001
+            log.exception("plan provider failed")
+            self._send(500, json.dumps({"error": "plan provider failed"}),
+                       "application/json")
+            return
+        finally:
+            if conn is not None:
+                conn.close()
         self._send(200, json.dumps(plan, default=str), "application/json")
 
     def do_POST(self):
@@ -82,18 +104,24 @@ class AskServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
-    def __init__(self, addr, ask_handler, plan_provider):
+    def __init__(self, addr, ask_handler, plan_provider, db_path=None):
         super().__init__(addr, _Handler)
         self.ask_handler = ask_handler
         self.plan_provider = plan_provider
+        self.db_path = db_path
 
 
-def serve(cfg, ask_handler, plan_provider, host=None, port=None):
-    """Start the server on a daemon thread. Returns the server, or None."""
+def serve(cfg, ask_handler, plan_provider, host=None, port=None, db_path=None):
+    """Start the server on a daemon thread. Returns the server, or None.
+
+    `plan_provider` is called with a read-only connection opened for that
+    request; see _Handler.do_GET.
+    """
     host = host or BIND_HOST
-    port = port or cfg["ask_port"]
+    # `or` would swallow port 0, which asks the OS for a free port.
+    port = cfg["ask_port"] if port is None else port
     try:
-        server = AskServer((host, port), ask_handler, plan_provider)
+        server = AskServer((host, port), ask_handler, plan_provider, db_path)
     except OSError as e:
         log.error("cannot bind ask server to %s:%s (%s). Alexa and /plan will "
                   "be unavailable; the rest of the agent runs normally.",

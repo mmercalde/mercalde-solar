@@ -16,6 +16,7 @@ YYYY-MM-DD string because "yesterday" is a local-calendar idea.
 import json
 import logging
 import sqlite3
+import threading
 import time
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -120,6 +121,53 @@ def connect(path=None):
     conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript(SCHEMA)
     return conn
+
+
+# A sqlite3 connection may only be used by the thread that made it. The agent
+# runs jobs on APScheduler worker threads, a Telegram poll thread and the ask
+# server's handler threads, so a single shared connection raises
+# ProgrammingError as soon as anything runs off the main thread. Each thread
+# gets its own connection instead; WAL mode lets them read while one writes.
+_local = threading.local()
+
+
+def thread_connection(path=None):
+    """The calling thread's connection, opened on first use in that thread."""
+    key = path or config.DB_PATH
+    cache = getattr(_local, "conns", None)
+    if cache is None:
+        cache = _local.conns = {}
+    conn = cache.get(key)
+    if conn is None:
+        conn = cache[key] = connect(key)
+    return conn
+
+
+def readonly_connection(path=None):
+    """A fresh read-only connection. Caller closes it.
+
+    Used for one-off reads from short-lived threads, where caching a
+    connection per thread would leak one per request.
+    """
+    path = path or config.DB_PATH
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=30)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def resolve(conn):
+    """Accept either a connection or a zero-argument provider of one.
+
+    Long-lived objects (the load model, the guard, the tool registry) are
+    built once on the main thread but used from several others, so they hold
+    a provider and resolve it per call.
+
+    Note a sqlite3.Connection is itself callable, so the test is on the type,
+    not on callable().
+    """
+    if isinstance(conn, sqlite3.Connection):
+        return conn
+    return conn()
 
 
 # --- time helpers -----------------------------------------------------------

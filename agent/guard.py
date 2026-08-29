@@ -37,11 +37,15 @@ GEN_KEYS = (("mep", "mep_start", "mep_stop", "mep803a"),
 
 class Guard:
     def __init__(self, conn, cfg, model=None, state_path=None):
-        self.conn = conn
+        self._conn = conn
         self.cfg = cfg
         self.model = model or loadmodel.LoadModel(conn, cfg)
         self.state_path = state_path or os.path.join(config.DATA_DIR, "guard_state.json")
         self.state = self._load_state()
+
+    @property
+    def conn(self):
+        return history.resolve(self._conn)
 
     # --- persisted state ----------------------------------------------------
 
