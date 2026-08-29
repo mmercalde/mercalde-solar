@@ -54,6 +54,7 @@ class Guard:
         self.model = model or loadmodel.LoadModel(conn, cfg)
         self.state_path = state_path or os.path.join(config.DATA_DIR, "guard_state.json")
         self.state = self._load_state()
+        self.last_seen = None
 
     @property
     def conn(self):
@@ -190,6 +191,10 @@ class Guard:
         data, live = st["data"], st["config"]
         v = data.get("batteryVoltage")
         soc = data.get("battSocBM")
+        # What the dashboard said when this write was judged. The tool reads
+        # it back to describe the change to the owner without a second fetch.
+        self.last_seen = {"thresholds": self._live_thresholds(live),
+                          "voltage": v, "soc": soc, "ts": now}
 
         allowed, why = self._evaluate(want, data, live, v, soc, now, reason, policy)
         return self._audit(args, allowed, why, v, soc, now)

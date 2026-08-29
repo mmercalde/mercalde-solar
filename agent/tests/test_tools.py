@@ -196,6 +196,66 @@ def test_an_executed_write_sends_the_values_and_the_reason(conn, cfg, sent):
     assert "POLICY 4 solo top-up" in sent[0]
 
 
+# --- the message says who did it, and what happens next ---------------------
+
+BEFORE = {"mep_start": 52.0, "mep_stop": 56.0,
+          "kub_start": 52.0, "kub_stop": 56.0}
+AFTER = {"mep_start": 55.0, "mep_stop": 57.0,
+         "kub_start": 52.0, "kub_stop": 56.0}
+
+
+def test_the_message_names_the_agent_the_change_and_the_effect():
+    """Four numbers alone read like the Pi5's own low-voltage auto-start."""
+    m = tools.write_message(AFTER, "solo top-up", before=BEFORE, voltage=54.2,
+                            default_start=52.0)
+    assert "Agent raised MEP start 52.0 → 55.0" in m
+    assert "solo top-up" in m
+    assert "MEP will start now" in m
+    assert "not the Pi5's 52.0 V auto-start" in m
+    assert "Now MEP 55.0 / 57.0, Kubota 52.0 / 56.0; pack 54.2 V" in m
+
+
+def test_a_start_above_the_pack_says_the_generator_runs_now():
+    _, effects = tools.describe_write(BEFORE, AFTER, voltage=54.2)
+    assert effects == ["MEP will start now"]
+
+
+def test_a_start_below_the_pack_says_when_it_will_run():
+    _, effects = tools.describe_write(BEFORE, AFTER, voltage=56.4)
+    assert effects == ["MEP will start when the pack falls to 55.0"]
+
+
+def test_a_stop_only_change_promises_no_generator():
+    """Raising a stop does not start anything, so nothing is claimed."""
+    after = dict(BEFORE, mep_stop=57.0, kub_stop=57.0)
+    changes, effects = tools.describe_write(BEFORE, after, voltage=54.2)
+    assert effects == []
+    assert changes == ["raised MEP stop 56.0 → 57.0", "raised Kubota stop 56.0 → 57.0"]
+
+
+def test_a_lowered_threshold_says_lowered():
+    after = dict(BEFORE, mep_stop=54.5)
+    changes, _ = tools.describe_write(BEFORE, after, voltage=54.2)
+    assert changes == ["lowered MEP stop 56.0 → 54.5"]
+
+
+def test_an_unchanged_value_is_not_reported_as_a_change():
+    changes, _ = tools.describe_write(BEFORE, dict(BEFORE, mep_start=55.0), 54.2)
+    assert changes == ["raised MEP start 52.0 → 55.0"]
+
+
+def test_the_write_reads_the_before_values_off_the_guard(conn, cfg, sent):
+    """The guard already fetched them to judge the write; no second call."""
+    guard = StubGuard(allowed=True)
+    guard.last_seen = {"thresholds": {"mep_start": 55.5, "mep_stop": 57.0,
+                                      "kub_start": 52.0, "kub_stop": 54.5},
+                       "voltage": 54.2}
+    t = tools.Tools(conn, cfg, guard=guard)
+    t.set_gen_thresholds(55.5, 57.0, 52.0, 54.5, "solo top-up")
+    assert "Agent set the thresholds" in sent[0], "nothing moved"
+    assert "pack 54.2 V" in sent[0]
+
+
 def test_the_message_quotes_what_the_dashboard_read_back(conn, cfg, sent):
     """A Pi5 clamp must reach the owner as the number that is in force."""
     t = tools.Tools(conn, cfg, guard=StubGuard(allowed=True))

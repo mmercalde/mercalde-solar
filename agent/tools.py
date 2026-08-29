@@ -65,12 +65,58 @@ def apply_thresholds(cfg, mep_start, mep_stop, kub_start, kub_stop,
     return r.json()["config"]
 
 
-def write_message(applied, reason):
-    """What the owner is told about a threshold write."""
-    return (f"⚙️ <b>Thresholds set</b>\n"
-            f"MEP {applied['mep_start']} / {applied['mep_stop']}, "
-            f"Kubota {applied['kub_start']} / {applied['kub_stop']}\n"
-            f"{telegram.escape(reason)}")
+GEN_LABELS = (("MEP", "mep_start", "mep_stop"), ("Kubota", "kub_start", "kub_stop"))
+
+
+def describe_write(before, applied, voltage):
+    """The change, as cause and effect, in one line each.
+
+    "Thresholds set" with four numbers reads like the Pi5's own 52 V
+    auto-start once it is on a phone screen at three in the morning. The
+    owner needs to know the agent did this, what it did, and what will happen
+    next.
+    """
+    def moved(was, now, label, what):
+        if was is not None and abs(was - now) < 0.05:
+            return None
+        verb = "raised" if was is None or now > was else "lowered"
+        return (f"{verb} {label} {what} {was} → {now}" if was is not None
+                else f"set {label} {what} to {now}")
+
+    changes, effects = [], []
+    for label, skey, pkey in GEN_LABELS:
+        change = moved((before or {}).get(skey), applied[skey], label, "start")
+        if change:
+            changes.append(change)
+            if voltage is not None:
+                effects.append(f"{label} will start now" if applied[skey] > voltage
+                               else f"{label} will start when the pack falls to "
+                                    f"{applied[skey]}")
+        change = moved((before or {}).get(pkey), applied[pkey], label, "stop")
+        if change:
+            changes.append(change)
+    return changes, effects
+
+
+def write_message(applied, reason, before=None, voltage=None, default_start=None):
+    """What the owner is told about a threshold write.
+
+    "Thresholds set" with four numbers reads like the Pi5's own low-voltage
+    auto-start once it is on a phone at three in the morning, so the message
+    leads with who did what and says what will happen because of it.
+    """
+    changes, effects = describe_write(before, applied, voltage)
+    head = ("Agent " + ", ".join(changes)) if changes else "Agent set the thresholds"
+    lines = [f"⚙️ <b>{telegram.escape(head)}</b>", telegram.escape(reason)]
+    if effects:
+        tail = "; ".join(effects) + ". This is the agent"
+        if default_start is not None:
+            tail += f", not the Pi5's {default_start} V auto-start"
+        lines.append(telegram.escape(tail + "."))
+    lines.append(f"Now MEP {applied['mep_start']} / {applied['mep_stop']}, "
+                 f"Kubota {applied['kub_start']} / {applied['kub_stop']}"
+                 + (f"; pack {voltage} V" if voltage is not None else ""))
+    return "\n".join(lines)
 
 
 def thresholds_from_config(live):
@@ -319,7 +365,11 @@ class Tools:
         # dashboard read back rather than the ones that were asked for. The
         # 04:10 write on the first live night sent nothing, because the model
         # was trusted to call send_telegram itself and did not.
-        notified = telegram.send(self.cfg, write_message(applied, reason))
+        seen = getattr(self.guard, "last_seen", None) or {}
+        notified = telegram.send(self.cfg, write_message(
+            applied, reason, before=seen.get("thresholds"),
+            voltage=seen.get("voltage"),
+            default_start=self.cfg["default_start"]))
         return {"applied": True, "now": applied, "reason": reason,
                 "notified": notified}
 
