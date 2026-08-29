@@ -124,6 +124,8 @@ class Agent:
 
         wx = weather.summary(self.cfg, now=now)
         sunrise_ts = wx.get("next_sunrise_ts")
+        sunset_ts = wx.get("sunset_ts")
+        remaining_solar_wh = self.model.remaining_solar_wh(now=now)
         hours_to_sunrise = (max(1, int((sunrise_ts - now) / 3600) + 1)
                             if sunrise_ts else 12)
         forecast = self.model.load_forecast(min(hours_to_sunrise, 24), now=now)
@@ -159,6 +161,7 @@ class Agent:
             "solar_w": solar_w, "gen_running": gen_running,
             "peak_today": peak_today,
             "weather": wx, "sunrise_ts": sunrise_ts,
+            "sunset_ts": sunset_ts, "remaining_solar_wh": remaining_solar_wh,
             "forecast": forecast, "projection": projection,
             "drawdown": drawdown, "gate": gate, "soc_curve": soc_curve,
             "tomorrow_cloud": tomorrow_cloud, "est_solar": est_solar,
@@ -166,6 +169,7 @@ class Agent:
             "thresholds": toolsmod.thresholds_from_config(live),
             "intended": self.guard.intended(),
             "owner_baseline": self.guard.owner_baseline(),
+            "baseline": self.guard.baseline(),
             "run_window_h": run_window_h,
             "charge_rates": self.model.charge_rates(now=now),
         }
@@ -575,7 +579,7 @@ class Agent:
 
         An answer must be grounded in a tool result. Qwen3-8B will sometimes
         answer a question about live state without calling anything, and then
-        it invents the number — which POLICY 7 forbids. So a reply produced
+        it invents the number — which POLICY 8 forbids. So a reply produced
         with no tool call is retried once, and if the model still will not
         look, Python answers from /data instead of letting a made-up voltage
         reach the owner or Alexa.

@@ -14,6 +14,7 @@
   "storm_cloud_pct": 70, "clear_cloud_pct": 30, "predawn_hours": 2.0,
   "solo_select_voltage": 55.0,
   "solo_target": 57.0, "solo_target_floor": 55.0,
+  "solo_window": "sunset",
   "ags_max_run_hours": {"mep": 3, "kubota": 3},
   "exercise": {"mep_days": 5, "kubota_days": 3, "start": "09:00", "minutes": 30},
   "learning_live_days": 7,

@@ -366,6 +366,31 @@ class LoadModel:
         return {"month": month, "days": len(pairs), "learned": True,
                 "clear_day_wh": round(clear), "cloud_derate": round(k, 3)}
 
+    def remaining_solar_wh(self, now=None, until=None):
+        """Wh of solar still expected today, from now to sunset.
+
+        The same walk project_voltage does, so the two cannot disagree about
+        how much of the day is left. None until the solar model is learned.
+        """
+        now = int(now or time.time())
+        m = self.solar_model(now=now)
+        if not m.get("learned"):
+            return None
+        forecast = weather.hourly(self.cfg, hours=24, now=now)
+        if not forecast:
+            return None
+        day_rad = sum(f["radiation"] for f in forecast[:24]) or 1
+        per_unit = m["clear_day_wh"] / day_rad
+        today = history.local_day(now, self.cfg)
+        total = 0.0
+        for f in forecast:
+            if f["ts"] < now - 3600 or history.local_day(f["ts"], self.cfg) != today:
+                continue
+            if until is not None and f["ts"] >= until:
+                continue
+            total += f["radiation"] * per_unit
+        return round(total)
+
     def estimate_solar_wh(self, cloud_pct, month=None, now=None):
         m = self.solar_model(month, now)
         if not m.get("learned"):

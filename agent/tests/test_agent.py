@@ -189,7 +189,7 @@ def test_an_empty_answer_is_reported_as_such():
 # --- answer grounding -------------------------------------------------------
 
 def test_an_ungrounded_answer_is_replaced_with_real_data(a, monkeypatch):
-    """POLICY 7: a number no tool returned must never reach the owner."""
+    """POLICY 8: a number no tool returned must never reach the owner."""
     monkeypatch.setattr(a, "run_model", lambda *args, **kw: ("Battery is 99.9 V.", None))
     monkeypatch.setattr(agentmod.history, "fetch_data", lambda *a, **k: {
         "batteryVoltage": 54.08, "battSocBM": 89,

@@ -55,7 +55,10 @@ POLICY = """\
    if together they reach 57.0.
 6. Return the thresholds to default once the reason for changing them has
    passed.
-7. Restate numbers only from tool results. Never compute watt-hours, hours or
+7. Generators are never run for a top-up while the sun is still producing -
+   the day's solar goes into the pack first. Top-up decisions are made after
+   sunset, once today's production is known.
+8. Restate numbers only from tool results. Never compute watt-hours, hours or
    rates myself. When uncertain, send a Telegram instead of acting. Every
    action carries a one-line reason."""
 

@@ -34,6 +34,45 @@ EPS = 0.05
 OVERRULE_RE = re.compile(r"overrul\w*\s*:?\s*policy\s*(\d+)", re.IGNORECASE)
 
 
+def window_opens(cfg, f):
+    """When today's top-up window opens, from `solo_window`.
+
+    "sunset", or "sunset-30" for half an hour before it. The point of the
+    window is that the day's solar goes into the pack first: a top-up is
+    decided once production is finished and the peak is known, not at half
+    past nine in the morning with eight hours of sun still to come.
+    """
+    spec = str(cfg.get("solo_window") or "sunset").strip().lower()
+    base, _, offset = spec.partition("-")
+    if base.strip() != "sunset":
+        return None
+    ts = f.get("sunset_ts")
+    if not ts:
+        return None
+    try:
+        return ts - int(offset) * 60 if offset else ts
+    except ValueError:
+        return ts
+
+
+def _held_for_daylight(cfg, f):
+    """The reason a top-up is held, or None if the window is open.
+
+    The window runs from sunset to midnight. Before it the sun is still
+    filling the pack; after midnight the evening's decision has been made.
+    """
+    now, opens = f.get("now"), window_opens(cfg, f)
+    if not now or not opens:
+        return None
+    if now >= opens:
+        return None
+    left = f.get("remaining_solar_wh")
+    solar = (f"{left / 1000.0:.1f} kWh" if left is not None
+             else "not learned yet")
+    return (f"held until sunset {_clock(opens, cfg)}; remaining solar today "
+            f"{solar}")
+
+
 def _clock(ts, cfg):
     return history.clock(ts, cfg) if ts else "?"
 
@@ -115,6 +154,9 @@ def solo_top_up(cfg, f, model):
     it is.
     """
     name = "solo top-up"
+    held = _held_for_daylight(cfg, f)
+    if held:
+        return _rule(4, name, False, held, held=True)
     peak, v, soc = f.get("peak_today"), f.get("voltage"), f.get("soc")
     limit = cfg["solo_peak_threshold"]
     proj = f.get("projection") or {}
@@ -223,11 +265,23 @@ def storm_stop(cfg, f):
     if all(s is not None and abs(s - target) < EPS for s in stops):
         return _rule(3, name, False,
                      f"{detail}, but both stops are already {target:.1f}")
+    proposal = {"mep_start": cfg["default_start"], "mep_stop": target,
+                "kub_start": cfg["default_start"], "kub_stop": target}
+    # Raising a stop does not start anything, so it is never held. A
+    # pre-charge that raises a start would run a generator, and that waits
+    # for the same window POLICY 4 waits for.
+    baseline = f.get("baseline") or {}
+    raises_a_start = any(
+        proposal[k] > (baseline.get(k, cfg["default_start"])) + EPS
+        for k in ("mep_start", "kub_start"))
+    if raises_a_start:
+        held = _held_for_daylight(cfg, f)
+        if held:
+            return _rule(3, name, False, f"{detail}, but the pre-charge start "
+                         f"raise is {held}", held=True)
     return _rule(3, name, True,
                  f"{detail} → stop {target:.1f} (live stops MEP "
-                 f"{stops[0]} / Kubota {stops[1]})",
-                 {"mep_start": cfg["default_start"], "mep_stop": target,
-                  "kub_start": cfg["default_start"], "kub_stop": target})
+                 f"{stops[0]} / Kubota {stops[1]})", proposal)
 
 
 def predawn_stop(cfg, f, superseded=False):

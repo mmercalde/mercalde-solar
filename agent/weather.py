@@ -119,6 +119,7 @@ def summary(cfg, hours=48, now=None):
     if sun:
         out["sunrise"] = history.clock(sun[0], cfg)
         out["sunset"] = history.clock(sun[1], cfg)
+        out["sunrise_ts"], out["sunset_ts"] = sun
     nxt = next_sunrise(cfg, now, data=data)
     if nxt:
         out["next_sunrise"] = history.clock(nxt, cfg)

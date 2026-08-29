@@ -36,8 +36,12 @@ def night(cfg):
         "sunrise_ts": ts_at(cfg, "2026-08-28", 6, 21),
         "projection": {"reached": ts_at(cfg, "2026-08-28", 3, 8), "at": "3:08 am"},
         "tomorrow_cloud": 20,
+        "sunset_ts": ts_at(cfg, "2026-08-27", 19, 24),
+        "remaining_solar_wh": 0,
         "thresholds": {"mep_start": 52.0, "mep_stop": 56.0,
                        "kub_start": 52.0, "kub_stop": 56.0},
+        "baseline": {"mep_start": 52.0, "mep_stop": 56.0,
+                     "kub_start": 52.0, "kub_stop": 56.0},
         "run_window_h": {"mep": 2.0, "kubota": 2.0},
     }
 
@@ -176,6 +180,57 @@ def test_a_start_below_the_current_voltage_is_called_out(cfg, night, model):
     assert "the run begins when the pack falls to 55.0" in r["detail"]
 
 
+# --- POLICY 4 waits for the day's solar to finish ---------------------------
+
+def daytime(cfg, night, hour=9, minute=36, remaining=8200):
+    """The 9:36 am live event: a 14% cloud day with the sun still climbing."""
+    night["now"] = ts_at(cfg, "2026-08-27", hour, minute)
+    night["remaining_solar_wh"] = remaining
+    return night
+
+
+def test_the_rule_is_held_while_the_sun_is_still_producing(cfg, night, model):
+    """It fired at 9:36 am and started the MEP. The day's solar goes in first."""
+    r = policy.solo_top_up(cfg, daytime(cfg, night), model)
+    assert not r["fires"] and r["held"]
+    assert r["detail"] == ("held until sunset 7:24 pm; remaining solar today "
+                           "8.2 kWh")
+    assert policy.line(r).startswith("POLICY 4 solo top-up: held")
+
+
+def test_the_hold_says_so_when_the_solar_model_is_not_learned(cfg, night, model):
+    night = daytime(cfg, night, remaining=None)
+    r = policy.solo_top_up(cfg, night, model)
+    assert "remaining solar today not learned yet" in r["detail"]
+
+
+def test_the_window_opens_at_sunset(cfg, night, model):
+    assert policy.solo_top_up(cfg, daytime(cfg, night, 19, 23), model)["held"]
+    assert policy.solo_top_up(cfg, daytime(cfg, night, 19, 24), model)["fires"]
+
+
+def test_the_window_can_open_early(cfg, night, model):
+    cfg = dict(cfg, solo_window="sunset-30")
+    assert policy.solo_top_up(cfg, daytime(cfg, night, 18, 53), model)["held"]
+    assert policy.solo_top_up(cfg, daytime(cfg, night, 18, 54), model)["fires"]
+
+
+def test_the_window_closes_at_midnight(cfg, night, model):
+    """The evening's decision has been made; the small hours are not the time
+    to make another."""
+    night["now"] = ts_at(cfg, "2026-08-28", 1, 30)
+    night["sunset_ts"] = ts_at(cfg, "2026-08-28", 19, 23)
+    r = policy.solo_top_up(cfg, night, model)
+    assert not r["fires"] and r["held"]
+
+
+def test_without_a_sunset_the_rule_is_not_held(cfg, night, model):
+    """No forecast is not a reason to sit on a decision all night."""
+    night = daytime(cfg, night)
+    night["sunset_ts"] = None
+    assert policy.solo_top_up(cfg, night, model)["fires"]
+
+
 # --- POLICY 3: storm ---------------------------------------------------------
 
 def test_heavy_cloud_raises_both_stops(cfg, night, model):
@@ -201,6 +256,29 @@ def test_stops_already_at_57_do_not_fire_again(cfg, night, model):
 def test_an_unknown_forecast_does_not_fire(cfg, night, model):
     night["tomorrow_cloud"] = None
     assert not policy.storm_stop(cfg, night)["fires"]
+
+
+def test_a_stop_raise_is_never_held_by_daylight(cfg, night, model):
+    """Raising a stop does not start anything, so a storm forecast is acted on
+    the moment it appears."""
+    night = daytime(cfg, night)
+    night["tomorrow_cloud"] = 85
+    r = policy.storm_stop(cfg, night)
+    assert r["fires"] and not r.get("held")
+    assert r["proposal"]["mep_stop"] == 57.0
+
+
+def test_a_pre_charge_start_raise_waits_for_the_window(cfg, night, model):
+    """A storm proposal that raised a start would run a generator in daylight,
+    and that waits for the same window POLICY 4 waits for."""
+    night = daytime(cfg, night)
+    night["tomorrow_cloud"] = 85
+    night["baseline"] = {"mep_start": 52.0, "mep_stop": 56.0,
+                         "kub_start": 52.0, "kub_stop": 56.0}
+    cfg = dict(cfg, default_start=54.0)     # the proposal now raises the start
+    r = policy.storm_stop(cfg, night)
+    assert not r["fires"] and r["held"]
+    assert "the pre-charge start raise is held until sunset" in r["detail"]
 
 
 # --- POLICY 3: the pre-dawn 54.5 case ---------------------------------------
