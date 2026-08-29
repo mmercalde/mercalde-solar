@@ -84,14 +84,38 @@ def call_to_action(rules):
 
 # --- POLICY 4: solo top-up --------------------------------------------------
 
-def solo_top_up(cfg, f):
-    """Peak short of 57.0 and 52 V before sunrise: run one generator to 57.0.
+def _proposal(cfg, gen, target):
+    """One generator raised to `target`, the other left as the backstop."""
+    start = min(cfg["start_voltage_max"], target - MIN_STOP_MINUS_START)
+    other_s, other_p = cfg["default_start"], cfg["default_stop"]
+    values = ({"mep_start": start, "mep_stop": target,
+               "kub_start": other_s, "kub_stop": other_p} if gen == "mep" else
+              {"mep_start": other_s, "mep_stop": other_p,
+               "kub_start": start, "kub_stop": target})
+    return start, values
+
+
+def _both_proposal(cfg, target):
+    start = min(cfg["start_voltage_max"], target - MIN_STOP_MINUS_START)
+    return start, {"mep_start": start, "mep_stop": target,
+                   "kub_start": start, "kub_stop": target}
+
+
+def solo_top_up(cfg, f, model):
+    """Peak short of 57.0 and 52 V before sunrise: run a generator to 57.0.
 
     Every clause is a comparison the model was previously left to make in its
     head, so each one is reported with both numbers whether it passes or not.
+
+    When the chosen generator cannot make 57.0 inside its run window, the rule
+    does not simply fall silent. It fires for the highest target that
+    generator can actually reach, rounded down to half a volt and never below
+    solo_target_floor; and if even that is out of reach, for both generators
+    together when the pair can make 57.0. The detail says which of the three
+    it is.
     """
     name = "solo top-up"
-    peak, v = f.get("peak_today"), f.get("voltage")
+    peak, v, soc = f.get("peak_today"), f.get("voltage"), f.get("soc")
     limit = cfg["solo_peak_threshold"]
     proj = f.get("projection") or {}
     sunrise, reached = f.get("sunrise_ts"), proj.get("reached")
@@ -119,33 +143,49 @@ def solo_top_up(cfg, f):
     label = "MEP" if gen == "mep" else "Kubota"
     parts.append(f"V {v:.1f} {'≤' if v <= select else '>'} {select:.1f} → {label}")
 
-    # POLICY 5: a target is only valid if it is reachable in the run window.
+    windows = f.get("run_window_h") or {}
+    window = windows.get(gen)
     target = cfg["solo_target"]
-    rate = (f.get("charge_rates") or {}).get(gen)
-    window = (f.get("run_window_h") or {}).get(gen)
-    if not rate or not rate.get("v_per_h"):
-        return _rule(4, name, False, "; ".join(parts + [
-            f"no observed solo charge rate for {label}, so {target:.1f} cannot "
-            f"be shown reachable (POLICY 5)"]))
-    needed = (target - v) / rate["v_per_h"]
-    if window is not None and needed > window + 1e-9:
-        return _rule(4, name, False, "; ".join(parts + [
-            f"{target:.1f} needs {_hours(needed)} h at {rate['v_per_h']} V/h but "
-            f"the run window is {window:.1f} h (POLICY 5)"]))
-    parts.append(f"{target:.1f} reachable in {_hours(needed)} h at "
-                 f"{rate['v_per_h']} V/h")
 
-    # The start has to clear the stop by 2.0 V, so it cannot simply be the
-    # configured maximum when the target is 57.0.
-    start = min(cfg["start_voltage_max"], target - MIN_STOP_MINUS_START)
-    if start <= v:
-        parts.append(f"the run begins when the pack falls to {start:.1f}")
-    other_s, other_p = cfg["default_start"], cfg["default_stop"]
-    proposal = ({"mep_start": start, "mep_stop": target,
-                 "kub_start": other_s, "kub_stop": other_p} if gen == "mep" else
-                {"mep_start": other_s, "mep_stop": other_p,
-                 "kub_start": start, "kub_stop": target})
-    return _rule(4, name, True, "; ".join(parts), proposal, gen=gen)
+    # POLICY 5: a target is only valid if it is reachable in the run window.
+    reach = model.reach(gen, v, target, window, solo=True, soc_now=soc)
+    if reach["ok"]:
+        parts.append(reach["why"])
+        start, values = _proposal(cfg, gen, target)
+        if start <= v:
+            parts.append(f"the run begins when the pack falls to {start:.1f}")
+        return _rule(4, name, True, "; ".join(parts), values, gen=gen,
+                     target=target, mode="solo")
+    if reach["hours"] is None:
+        return _rule(4, name, False,
+                     "; ".join(parts + [f"{reach['why']} (POLICY 5)"]))
+    parts.append(reach["why"] + " (POLICY 5)")
+
+    # Solo, but only as high as the window allows.
+    floor = cfg["solo_target_floor"]
+    lower = model.best_reachable_target(gen, v, window, ceiling=target,
+                                        floor=floor, soc_now=soc, solo=True)
+    if lower is not None:
+        parts.append(f"highest reachable in {window:.1f} h is {lower:.1f}, so "
+                     f"{label} alone to {lower:.1f}")
+        start, values = _proposal(cfg, gen, lower)
+        if start <= v:
+            parts.append(f"the run begins when the pack falls to {start:.1f}")
+        return _rule(4, name, True, "; ".join(parts), values, gen=gen,
+                     target=lower, mode="solo-reduced")
+
+    # Not even the floor solo. Both together, if the pair can make the target.
+    pair_window = min(w for w in windows.values()) if windows else window
+    pair = model.reach(None, v, target, pair_window, solo=False, soc_now=soc)
+    if pair["ok"]:
+        parts.append(f"{floor:.1f} is out of reach alone, but both together "
+                     f"{pair['why']}, so run both")
+        start, values = _both_proposal(cfg, target)
+        return _rule(4, name, True, "; ".join(parts), values, gen="both",
+                     target=target, mode="both")
+    parts.append(f"{floor:.1f} is out of reach alone and both together "
+                 f"{pair['why']}")
+    return _rule(4, name, False, "; ".join(parts))
 
 
 # --- POLICY 3: the two stop-voltage cases -----------------------------------
@@ -225,14 +265,17 @@ def predawn_stop(cfg, f, superseded=False):
 
 # --- the whole evaluation ---------------------------------------------------
 
-def evaluate(cfg, facts):
+def evaluate(cfg, facts, model):
     """Every numeric rule, in rule order, against one tick's facts.
+
+    `model` is the LoadModel: the rules decide, it does the physics, and the
+    guard asks it the same questions so the two cannot disagree.
 
     POLICY 4 is computed first because it settles the pre-dawn clause of
     POLICY 3: both want the stop moved, and a top-up to 57.0 is not served by
     stopping at 54.5.
     """
-    four = solo_top_up(cfg, facts)
+    four = solo_top_up(cfg, facts, model)
     return [storm_stop(cfg, facts),
             predawn_stop(cfg, facts, superseded=four["fires"]),
             four]

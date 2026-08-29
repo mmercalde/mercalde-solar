@@ -106,7 +106,8 @@ SCHEMAS = [
     {"type": "function", "function": {
         "name": "get_gen_runtime",
         "description": "Generator runs over the last N days with observed charge "
-                       "rates, per generator totals, and solo vs paired rates.",
+                       "rates in amps into the pack, per generator totals, and "
+                       "solo vs paired rates.",
         "parameters": {"type": "object", "properties": {
             "days": {"type": "integer", "description": "How many days back, 1 to 365."}},
             "required": ["days"]}}},
@@ -252,13 +253,20 @@ class Tools:
                       "start": history.stamp(r["start_ts"], self.cfg),
                       "minutes": r["duration_min"],
                       "start_v": r["start_v"], "stop_v": r["stop_v"],
-                      "v_per_h": (round(r["rate_v_per_h"], 2)
-                                  if r["rate_v_per_h"] is not None else None),
-                      "amps": (round(r["rate_a"], 1)
-                               if r["rate_a"] is not None else None),
+                      "amps_into_pack": (round(r["rate_a"], 1)
+                                         if r["rate_a"] is not None else None),
+                      "house_load_w": (round(r["load_w"])
+                                       if r["load_w"] is not None else None),
+                      "observed_v_per_h": (round(r["rate_v_per_h"], 2)
+                                           if r["rate_v_per_h"] is not None
+                                           else None),
                       "solo": bool(r["solo"]), "kind": r["kind"]}
                      for r in runs],
-            "note": "exercise runs are excluded",
+            "note": "Exercise runs are excluded. A charge rate is amps into "
+                    "the pack and the state of charge per hour that gives; "
+                    "observed_v_per_h is what the terminal voltage did under "
+                    "whatever the house was drawing at the time, and is not a "
+                    "generator's rate. Do not plan from it.",
         }
 
     def get_weather(self):

@@ -10,6 +10,7 @@ import config as cfgmod
 import guard as guardmod
 import history
 import policy
+from stubs import StubModel
 
 
 def ts_at(cfg, day, hour, minute=0):
@@ -64,7 +65,7 @@ def open_the_gate(conn, cfg, now):
         }, ts=ts_at(cfg, f"2026-08-{d:02d}", 12))
 
 
-def add_rate(conn, cfg, gen, v_per_h=1.5, solo=1, n=3, kind="auto"):
+def add_rate(conn, cfg, gen, amps=150.0, solo=1, n=3, kind="auto"):
     # Distinct start times: gen_runs is keyed on (gen, start_ts), and one gen
     # has both solo and paired history.
     hour = 2 + (0 if solo else 6)
@@ -72,10 +73,33 @@ def add_rate(conn, cfg, gen, v_per_h=1.5, solo=1, n=3, kind="auto"):
         start = ts_at(cfg, f"2026-08-{10+i:02d}", hour)
         conn.execute(
             "INSERT INTO gen_runs (gen, start_ts, stop_ts, duration_min, start_v, "
-            "stop_v, rate_v_per_h, rate_a, solo, kind) VALUES (?,?,?,?,?,?,?,?,?,?)",
-            (gen, start, start + 3600, 60, 52.0, 52.0 + v_per_h, v_per_h, 90.0,
+            "stop_v, rate_v_per_h, rate_a, load_w, solo, kind) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (gen, start, start + 3600, 60, 52.0, 53.5, 1.5, amps, 600.0,
              solo, kind))
     conn.commit()
+
+
+def learn_the_pack(conn, cfg):
+    """A 2000 Ah pack and the curve that says what a stop voltage costs.
+
+    52.0 V is 60%, 54.0 V is 80%, 57.0 V is 95%, so the three volts from the
+    everyday resting point to a full top-up are fifteen points of charge. At
+    150 A a 2000 Ah pack gains 7.5 points an hour, which is exactly the two
+    hours the Pi5 allows a run.
+    """
+    counts = {(history.soc_bin(v), soc): 900 for v, soc in
+              ((52.0, 60), (54.0, 80), (55.0, 85), (56.0, 90), (57.0, 95))}
+    history.record_soc_observations(conn, "2025-08-01", counts)
+    base = ts_at(cfg, "2026-08-19", 2)
+    for i in range(20):
+        history.record_sample(conn, {
+            "batteryVoltage": 54.0, "battSocBM": 50, "battPower": -1200,
+            "battCurrent": -22.0, "battAhRemaining": 1000,
+            "battMonitorOnline": True,
+            "mep803aAction": history.GEN_STOPPED,
+            "kubotaAction": history.GEN_STOPPED,
+        }, ts=base + i * 60)
 
 
 @pytest.fixture
@@ -87,12 +111,13 @@ def g(conn, cfg, tmp_path, monkeypatch):
 
 @pytest.fixture
 def ready(conn, cfg, g, now):
-    """A guard whose gate is open and which has observed charge rates."""
+    """A guard whose gate is open, with a learned pack and charge rates."""
     open_the_gate(conn, cfg, now)
-    add_rate(conn, cfg, "mep", 1.5, solo=1)
-    add_rate(conn, cfg, "mep", 1.5, solo=0)
-    add_rate(conn, cfg, "kubota", 1.0, solo=1)
-    add_rate(conn, cfg, "kubota", 1.0, solo=0)
+    learn_the_pack(conn, cfg)
+    add_rate(conn, cfg, "mep", 150.0, solo=1)
+    add_rate(conn, cfg, "mep", 150.0, solo=0)
+    add_rate(conn, cfg, "kubota", 100.0, solo=1)
+    add_rate(conn, cfg, "kubota", 100.0, solo=0)
     return g
 
 
@@ -190,17 +215,49 @@ def test_a_running_generators_start_is_irrelevant(ready, cfg, now):
 # --- rule 4: reachability ---------------------------------------------------
 
 def test_an_unreachable_target_is_refused(ready, cfg, now):
-    """Kubota at 1.0 V/h cannot lift 52.0 -> 57.0 inside a 2 h window."""
-    st = make_status(cfg, now, voltage=52.0)
+    """The Kubota puts 100 A into a 2000 Ah pack, which is 5 points an hour.
+    60% to 95% is thirty-five of them: seven hours, not two."""
+    st = make_status(cfg, now, voltage=52.0, soc=60)
     ok, why = ready.check(52.0, 54.5, 55.0, 57.0, "solo top-up", now=now, status=st)
-    assert not ok and "run window" in why and "kubota" in why
+    assert not ok and "kubota" in why
+    assert "would need 7.0 h" in why and "run window is 2.0 h" in why
+    assert "100 A into the pack (5.0% SOC/h)" in why
 
 
 def test_a_reachable_target_is_permitted(ready, cfg, now):
-    """MEP at 1.5 V/h needs 2.0 h for 54.0 -> 57.0, inside the 2 h Pi5 window."""
-    st = make_status(cfg, now, voltage=54.0)
+    """The MEP's 150 A is 7.5 points an hour; 80% to 95% is exactly two."""
+    st = make_status(cfg, now, voltage=54.0, soc=80)
     ok, why = ready.check(55.0, 57.0, 52.0, 54.5, "solo top-up", now=now, status=st)
     assert ok, why
+
+
+def test_volts_per_hour_is_not_what_reachability_is_judged_on(ready, conn, cfg,
+                                                              now):
+    """The 20:09 MEP run: 150 A into the pack, but the terminal voltage barely
+    moved under a 7 kW load. The rate is the current, not the voltage."""
+    conn.execute("UPDATE gen_runs SET rate_v_per_h=0.864 WHERE gen='mep'")
+    conn.commit()
+    st = make_status(cfg, now, voltage=54.0, soc=80)
+    ok, why = ready.check(55.0, 57.0, 52.0, 54.5, "solo top-up", now=now, status=st)
+    assert ok, why
+
+
+def test_a_run_taken_under_an_exceptional_load_is_not_a_rate(ready, conn, cfg,
+                                                             now):
+    """With every MEP run measured through a steam bath there is no MEP rate
+    left, and an unproven target is refused rather than guessed at."""
+    for d in range(1, 9):
+        history.put_hourly(conn, ts_at(cfg, f"2026-08-{d:02d}", 12), "load",
+                           None, None, None, 600, None, None, 60, "live")
+    for h in range(24):
+        for d in range(1, 15):
+            history.put_hourly(conn, ts_at(cfg, f"2026-08-{d:02d}", h), "load",
+                               None, None, None, 600, None, None, 60, "live")
+    conn.execute("UPDATE gen_runs SET load_w=7000 WHERE gen='mep'")
+    conn.commit()
+    st = make_status(cfg, now, voltage=54.0, soc=80)
+    ok, why = ready.check(55.0, 57.0, 52.0, 54.5, "solo top-up", now=now, status=st)
+    assert not ok and "no observed charge rate for mep" in why
 
 
 def test_reachability_only_applies_to_generators_that_will_fire(ready, cfg, now):
@@ -212,7 +269,8 @@ def test_reachability_only_applies_to_generators_that_will_fire(ready, cfg, now)
 
 def test_no_observed_rate_refuses_and_points_at_the_defaults(conn, cfg, g, now):
     open_the_gate(conn, cfg, now)      # gate open, but no runs recorded
-    st = make_status(cfg, now, voltage=52.5)
+    learn_the_pack(conn, cfg)
+    st = make_status(cfg, now, voltage=52.5, soc=65)
     ok, why = g.check(55.0, 57.0, 52.0, 54.5, "solo top-up", now=now, status=st)
     assert not ok
     assert "no observed charge rate" in why
@@ -222,17 +280,18 @@ def test_no_observed_rate_refuses_and_points_at_the_defaults(conn, cfg, g, now):
 
 def test_the_ags_cap_binds_when_it_is_tighter_than_the_pi5(ready, cfg, now):
     """A 10 h Pi5 maxRuntime still cannot beat the 3 h AGS limit."""
-    st = make_status(cfg, now, voltage=52.0, max_runtime=600)
+    st = make_status(cfg, now, voltage=52.0, soc=60, max_runtime=600)
     ok, why = ready.check(52.0, 54.5, 55.0, 57.0, "x", now=now, status=st)
-    assert not ok and "5.0 h" in why and "3.0 h" in why
+    assert not ok and "7.0 h" in why and "run window is 3.0 h" in why
 
 
 def test_solo_and_paired_rates_are_chosen_correctly(conn, cfg, g, now):
     """Only the solo rate exists; a paired firing must still find a rate."""
     open_the_gate(conn, cfg, now)
-    add_rate(conn, cfg, "mep", 3.0, solo=1)
-    add_rate(conn, cfg, "kubota", 3.0, solo=1)
-    st = make_status(cfg, now, voltage=54.0)
+    learn_the_pack(conn, cfg)
+    add_rate(conn, cfg, "mep", 300.0, solo=1)
+    add_rate(conn, cfg, "kubota", 300.0, solo=1)
+    st = make_status(cfg, now, voltage=54.0, soc=80)
     ok, why = g.check(55.0, 57.0, 55.0, 57.0, "both fire", now=now, status=st)
     assert ok, why
 
@@ -390,11 +449,11 @@ def owner_status(cfg, now):
 def a_firing_rule(cfg, now):
     """A real evaluation in which POLICY 4 fires and nothing else does."""
     return policy.evaluate(cfg, {
-        "voltage": 54.0, "peak_today": 55.0, "sunrise_ts": now + 8 * 3600,
+        "voltage": 54.0, "soc": 80.0, "peak_today": 55.0,
+        "sunrise_ts": now + 8 * 3600,
         "projection": {"reached": now + 4 * 3600}, "tomorrow_cloud": 20,
         "thresholds": dict(OWNER),
-        "charge_rates": {"mep": {"v_per_h": 1.6}, "kubota": {"v_per_h": 1.0}},
-        "run_window_h": {"mep": 2.0, "kubota": 2.0}})
+        "run_window_h": {"mep": 2.0, "kubota": 2.0}}, StubModel())
 
 
 def test_an_owner_edit_is_remembered_as_the_baseline(ready, cfg, now):

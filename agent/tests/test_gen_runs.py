@@ -15,7 +15,7 @@ def ts_at(cfg, day, hhmm):
 
 
 def feed(conn, cfg, start_ts, minutes, gen="mep", mode=2, other_running=False,
-         v_start=52.0, v_end=55.0, pre=2, post=2):
+         v_start=52.0, v_end=55.0, pre=2, post=2, amps=55.0, load_w=1200):
     """Write a minute-resolution run: `pre` stopped samples, the run, `post` stopped."""
     total = pre + minutes + post
     for i in range(total):
@@ -28,12 +28,12 @@ def feed(conn, cfg, start_ts, minutes, gen="mep", mode=2, other_running=False,
         data = {
             "batteryVoltage": round(v, 2), "battSocBM": 80,
             "battPower": 3000 if running else -1200,
-            "battCurrent": 55.0 if running else -22.0,
+            "battCurrent": amps if running else -22.0,
             "mep803aAction": act if gen == "mep" else other,
             "kubotaAction": act if gen == "kubota" else other,
             "mep803aMode": mode if gen == "mep" else 2,
             "kubotaMode": mode if gen == "kubota" else 2,
-            "acPower1": 600, "acPower2": 600,
+            "acPower1": load_w / 2, "acPower2": load_w / 2,
             "mppt80PVPower": 0, "southArrayPVPower": 0, "westArrayPVPower": 0,
             "battMonitorOnline": True, "pollErrors": 0, "autoGenEnabled": True,
         }
@@ -122,6 +122,46 @@ def test_charge_rate_recorded(conn, cfg):
     run = conn.execute("SELECT * FROM gen_runs").fetchone()
     assert run["rate_v_per_h"] == 2.0
     assert run["rate_a"] == 55.0
+
+
+def test_the_house_load_during_the_run_is_recorded(conn, cfg):
+    """So a run measured through a steam bath can be left out of the rate."""
+    feed(conn, cfg, ts_at(cfg, "2026-08-10", "20:09"), 60, load_w=7000)
+    history.derive_gen_runs(conn, cfg)
+    assert conn.execute("SELECT load_w FROM gen_runs").fetchone()["load_w"] == 7000
+
+
+def test_the_current_is_the_net_over_the_run(conn, cfg):
+    """Charge the pack gave back to a load is charge it did not keep, so the
+    mean is over the whole run and not over the charging minutes only."""
+    start = ts_at(cfg, "2026-08-10", "02:00")
+    feed(conn, cfg, start, 60, amps=100.0)
+    # Halve it: one minute in ten went the other way, at the same size.
+    conn.execute("UPDATE samples SET batt_current=-100.0 "
+                 "WHERE ts >= ? AND ts < ? AND (ts / 60) % 2 = 0", (start, start + 3600))
+    conn.commit()
+    conn.execute("DELETE FROM gen_runs")
+    history.derive_gen_runs(conn, cfg)
+    assert conn.execute("SELECT rate_a FROM gen_runs").fetchone()["rate_a"] == 0.0
+
+
+def test_load_w_is_added_to_a_database_that_predates_it(conn, cfg, tmp_path):
+    """CREATE TABLE IF NOT EXISTS leaves an existing table alone."""
+    import sqlite3
+    path = str(tmp_path / "old.sqlite")
+    old = sqlite3.connect(path)
+    old.execute("CREATE TABLE gen_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                "gen TEXT NOT NULL, start_ts INTEGER NOT NULL, stop_ts INTEGER, "
+                "duration_min REAL, start_v REAL, stop_v REAL, rate_v_per_h REAL, "
+                "rate_a REAL, solo INTEGER, kind TEXT)")
+    old.execute("INSERT INTO gen_runs (gen, start_ts) VALUES ('mep', 1)")
+    old.commit()
+    old.close()
+    fresh = history.connect(path)
+    cols = {r["name"] for r in fresh.execute("PRAGMA table_info(gen_runs)")}
+    assert "load_w" in cols
+    assert fresh.execute("SELECT load_w FROM gen_runs").fetchone()["load_w"] is None
+    fresh.close()
 
 
 def test_derive_is_idempotent(conn, cfg):

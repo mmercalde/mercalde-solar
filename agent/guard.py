@@ -191,10 +191,10 @@ class Guard:
         v = data.get("batteryVoltage")
         soc = data.get("battSocBM")
 
-        allowed, why = self._evaluate(want, data, live, v, now, reason, policy)
+        allowed, why = self._evaluate(want, data, live, v, soc, now, reason, policy)
         return self._audit(args, allowed, why, v, soc, now)
 
-    def _evaluate(self, want, data, live, v, now, reason="", policy=None):
+    def _evaluate(self, want, data, live, v, soc, now, reason="", policy=None):
         # Rule 7: stale data. Nothing below can be trusted without this.
         if not data.get("battMonitorOnline"):
             return False, ("battery monitor is offline, so state of charge and "
@@ -298,27 +298,26 @@ class Guard:
                                f"{live[cfg_key]['stopVoltage']} to {want[pkey]} "
                                f"mid-run (raising is allowed)")
 
-        # Rule 4: reachability for any generator that will fire now.
+        # Rule 4: reachability for any generator that will fire now. The
+        # arithmetic is the load model's, so this refusal and the POLICY 5
+        # line in the plan record cannot disagree about the same question.
         firing = [g for g in GEN_KEYS if want[g[1]] > v + EPS]
         solo = len(firing) == 1
         for gen, skey, pkey, cfg_key in firing:
-            rate = self.model.charge_rate(gen, solo=solo, now=now)
-            if rate is None:
-                rate = self.model.charge_rate(gen, solo=None, now=now)
-            if rate is None or not rate.get("v_per_h"):
-                return False, (
-                    f"no observed charge rate for {gen} yet, so {want[pkey]} V "
-                    f"cannot be shown to be reachable. Use the default thresholds "
-                    f"{self.cfg['default_start']} / {self.cfg['default_stop']}")
             window_h = min(live[cfg_key]["maxRuntime"] / 60.0,
                            self.cfg["ags_max_run_hours"][gen])
-            needed_h = (want[pkey] - v) / rate["v_per_h"]
-            if needed_h > window_h + 1e-9:
+            reach = self.model.reach(gen, v, want[pkey], window_h, solo=solo,
+                                     soc_now=soc, now=now)
+            if reach["hours"] is None:
                 return False, (
-                    f"{gen} would need {needed_h:.1f} h to lift the pack from "
-                    f"{v} V to {want[pkey]} V at its observed "
-                    f"{rate['v_per_h']} V/h, but its run window is "
-                    f"{window_h:.1f} h")
+                    f"{reach['why']}. Use the default thresholds "
+                    f"{self.cfg['default_start']} / {self.cfg['default_stop']}")
+            if not reach["ok"]:
+                return False, (
+                    f"{gen} would need {reach['hours']:.1f} h to lift the pack "
+                    f"from {v} V to {want[pkey]} V at its observed "
+                    f"{loadmodel.rate_phrase(reach['rate'])}, but its run "
+                    f"window is {window_h:.1f} h")
 
         return True, "permitted"
 

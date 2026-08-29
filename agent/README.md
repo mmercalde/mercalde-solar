@@ -16,7 +16,10 @@ Every 15 minutes, day and night:
 1. Python gathers the facts — live status, thresholds, the last 24 hours,
    the load forecast to sunrise, the weather, today's peak voltage.
 2. `policy.py` computes every POLICY rule whose condition is arithmetic and
-   says, with the numbers, whether it fires.
+   says, with the numbers, whether it fires. Whether a target is reachable is
+   `loadmodel.py`'s answer, in amps into the pack against the learned capacity
+   and voltage/SOC curve — never in volts per hour, which measures the
+   generator minus the house.
 3. The model sees those facts and that evaluation, may call up to 4 tools, and
    finishes with a one-line recommendation. A rule that fires must be either
    set or overruled in writing; anything else is logged as a policy miss.

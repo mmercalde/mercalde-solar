@@ -141,14 +141,10 @@ class Agent:
                               else t.get("cloud_pct"))
             est_solar = self.model.estimate_solar_wh(tomorrow_cloud, now=now)
 
-        # POLICY 4 and 5 are arithmetic over these two, so they are gathered
-        # here rather than left for the model to guess at.
-        charge_rates, run_window_h = {}, {}
+        # POLICY 4 and 5 ask the load model whether a target is reachable; the
+        # windows are the only part of that question the dashboard owns.
+        run_window_h = {}
         for gen, cfg_key in (("mep", "mep803a"), ("kubota", "kubota")):
-            rate = self.model.charge_rate(gen, solo=True, now=now)
-            if rate is None:
-                rate = self.model.charge_rate(gen, solo=None, now=now)
-            charge_rates[gen] = rate
             try:
                 run_window_h[gen] = min(live[cfg_key]["maxRuntime"] / 60.0,
                                         self.cfg["ags_max_run_hours"][gen])
@@ -170,9 +166,10 @@ class Agent:
             "thresholds": toolsmod.thresholds_from_config(live),
             "intended": self.guard.intended(),
             "owner_baseline": self.guard.owner_baseline(),
-            "charge_rates": charge_rates, "run_window_h": run_window_h,
+            "run_window_h": run_window_h,
+            "charge_rates": self.model.charge_rates(now=now),
         }
-        facts["policy"] = policymod.evaluate(self.cfg, facts)
+        facts["policy"] = policymod.evaluate(self.cfg, facts, self.model)
         return facts
 
     # --- the plan record ----------------------------------------------------
@@ -314,6 +311,17 @@ class Agent:
         else:
             parts.append(f"  pack reaches 52.0 V: not projected "
                          f"({proj.get('reason', 'unknown')})")
+        rates = f.get("charge_rates") or {}
+        for key, label in (("mep_solo", "MEP alone"), ("kubota_solo", "Kubota alone"),
+                           ("both_running", "both together")):
+            r = rates.get(key)
+            if r:
+                parts.append(f"  observed charge rate, {label}: "
+                             f"{loadmodel.rate_phrase(r)} over {r['runs']} runs"
+                             + (f", {r['excluded_load_spikes']} left out for "
+                                f"an exceptional house load"
+                                if r.get("excluded_load_spikes") else ""))
+
         sc = f["soc_curve"]
         if sc.get("soc_at_start_threshold") is not None:
             parts.append(f"  learned: {sc['start_threshold_v']} V is about "

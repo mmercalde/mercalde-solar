@@ -13,6 +13,7 @@ say "not yet learned" instead of inventing a number.
 """
 
 import logging
+import math
 import statistics
 import time
 from datetime import datetime, timedelta
@@ -25,6 +26,14 @@ log = logging.getLogger(__name__)
 # A profile cell needs this many observations before it is worth quoting.
 MIN_SAMPLES_PER_HOUR = 3
 MIN_DAYS_FOR_SOLAR_FIT = 8
+# A run taken while the house drew more than this multiple of its mean load
+# says more about the load than about the generator, so it is left out of the
+# learned rate. The 20:09 MEP run on the first live night was one of these: a
+# 7 kW steam bath against a mean nearer 1.5 kW.
+LOAD_SPIKE_MULTIPLE = 2.0
+# A run shorter than this cannot say anything about a rate.
+MIN_RUN_MINUTES = 10
+
 # A projection this close is reported as a window, not a clock time: the pack
 # is already at the target and the minute is noise.
 PROJECTION_SOON_SECONDS = 900
@@ -67,6 +76,15 @@ def _isotonic(points):
             out.append((volts, value, w))
             i += 1
     return out
+
+
+def rate_phrase(rate):
+    """How a charge rate is written wherever the owner or the model sees one."""
+    if not rate or rate.get("a") is None:
+        return "no observed rate"
+    if rate.get("soc_per_h") is None:
+        return f"{rate['a']:.0f} A into the pack"
+    return f"{rate['a']:.0f} A into the pack ({rate['soc_per_h']:.1f}% SOC/h)"
 
 
 def _weighted_median(pairs):
@@ -234,29 +252,64 @@ class LoadModel:
 
     # --- generators ---------------------------------------------------------
 
-    def charge_rate(self, gen, solo=None, days=180, now=None):
-        """Observed charge rate for a generator, in V/h and A.
+    def charge_rate(self, gen=None, solo=None, days=180, now=None):
+        """Observed charge rate, as current into the pack.
 
-        Exercise runs are excluded: 30 minutes at 09:00 with the sun already up
-        says nothing about how fast that generator lifts the pack at night.
+        Volts per hour is not a generator's rate. It is the generator minus
+        whatever the house happened to be drawing, and on the first live night
+        the MEP's 20:09 run was measured through a 7 kW steam bath and came
+        out at 0.864 V/h - a number about the bath, not the generator. The
+        shunt's net current is Ah/h into the pack, which against the learned
+        capacity is a state-of-charge rate, and the learned voltage/SOC curve
+        turns that into volts when a target needs one.
+
+        Runs taken while the house drew more than LOAD_SPIKE_MULTIPLE times
+        its mean load are still not the generator's rate, so they are left
+        out. Exercise runs are too: 30 minutes at 09:00 with the sun already
+        up says nothing about lifting the pack at night.
+
+        `gen` of None pools every generator's runs, which is how the two of
+        them running together are measured.
         """
         now = int(now or time.time())
-        sql = ("SELECT rate_v_per_h, rate_a, duration_min FROM gen_runs "
-               "WHERE gen=? AND kind != 'exercise' AND rate_v_per_h IS NOT NULL "
+        sql = ("SELECT gen, rate_v_per_h, rate_a, load_w, duration_min "
+               "FROM gen_runs WHERE kind != 'exercise' AND rate_a IS NOT NULL "
                "AND start_ts >= ?")
-        args = [gen, now - days * 86400]
+        args = [now - days * 86400]
+        if gen is not None:
+            sql += " AND gen=?"
+            args.append(gen)
         if solo is not None:
             sql += " AND solo=?"
             args.append(int(solo))
-        rows = self.conn.execute(sql, args).fetchall()
-        # A run too short to move the pack gives a meaningless rate.
-        rows = [r for r in rows if r["duration_min"] >= 10 and r["rate_v_per_h"] > 0]
+        rows = [r for r in self.conn.execute(sql, args).fetchall()
+                if r["duration_min"] >= MIN_RUN_MINUTES and r["rate_a"] > 0]
+
+        mean_load = self.mean_load_w(now=now)
+        spikes = 0
+        if mean_load:
+            ceiling = LOAD_SPIKE_MULTIPLE * mean_load
+            kept = [r for r in rows if r["load_w"] is None or r["load_w"] <= ceiling]
+            spikes = len(rows) - len(kept)
+            rows = kept
         if not rows:
             return None
-        return {"gen": gen, "solo": solo, "runs": len(rows),
-                "v_per_h": round(_median([r["rate_v_per_h"] for r in rows]), 3),
-                "a": round(_median([r["rate_a"] for r in rows if r["rate_a"] is not None]), 1)
-                     if any(r["rate_a"] is not None for r in rows) else None}
+
+        amps = _median([r["rate_a"] for r in rows])
+        capacity_ah = self.capacity_ah()
+        observed_v = [r["rate_v_per_h"] for r in rows if r["rate_v_per_h"] is not None]
+        return {
+            "gen": gen, "solo": solo, "runs": len(rows),
+            "a": round(amps, 1),
+            "capacity_ah": capacity_ah,
+            "soc_per_h": (round(100.0 * amps / capacity_ah, 2)
+                          if capacity_ah else None),
+            "mean_load_w": round(mean_load) if mean_load else None,
+            "excluded_load_spikes": spikes,
+            # Recorded because it happened. Nothing plans from it.
+            "observed_v_per_h": (round(_median(observed_v), 3)
+                                 if observed_v else None),
+        }
 
     def charge_rates(self, now=None):
         out = {}
@@ -268,7 +321,22 @@ class LoadModel:
             r = self.charge_rate(gen, solo=None, now=now)
             if r:
                 out[gen] = r
+        both = self.charge_rate(None, solo=False, now=now)
+        if both:
+            out["both_running"] = both
         return out
+
+    def mean_load_w(self, now=None):
+        """The house's mean load in W, from the learned hourly profile.
+
+        Wh in an hour is W, so the mean of the profile's cells is the mean
+        load. None until the profile has been learned, and a rate computed
+        without it says so rather than quietly skipping the spike filter.
+        """
+        now = int(now or time.time())
+        p = self.load_profile(month=history.local(now, self.cfg).month)
+        values = list(p["profile"].values())
+        return sum(values) / len(values) if values else None
 
     # --- battery ------------------------------------------------------------
 
@@ -373,6 +441,38 @@ class LoadModel:
                                        if at_start is not None else None),
         }
 
+    def capacity_ah(self):
+        """Pack capacity in Ah, from the monitor's own Ah-remaining vs SOC."""
+        rows = self.conn.execute(
+            "SELECT batt_ah_remaining, batt_soc FROM samples "
+            "WHERE batt_ah_remaining IS NOT NULL AND batt_soc > 5 "
+            "ORDER BY ts DESC LIMIT 2000").fetchall()
+        est = [r["batt_ah_remaining"] / (r["batt_soc"] / 100.0)
+               for r in rows if r["batt_soc"]]
+        if len(est) < 10:
+            return None
+        return round(_median(est))
+
+    def volts_for_soc(self, target_soc):
+        """The inverse of the learned curve: the voltage at a given SOC."""
+        curve = self.voltage_soc_curve()
+        if not curve:
+            return None
+        volts = [v for v, _, _ in curve]
+        socs = [s for _, s, _ in curve]
+        if target_soc <= socs[0]:
+            return volts[0]
+        if target_soc >= socs[-1]:
+            return volts[-1]
+        for i in range(1, len(socs)):
+            if socs[i] >= target_soc:
+                s0, s1 = socs[i - 1], socs[i]
+                v0, v1 = volts[i - 1], volts[i]
+                if s1 == s0:
+                    return v1
+                return v0 + (v1 - v0) * (target_soc - s0) / (s1 - s0)
+        return volts[-1]
+
     def capacity_wh(self):
         """Usable pack size, from the Battery Monitor's own Ah-remaining vs SOC."""
         rows = self.conn.execute(
@@ -461,6 +561,92 @@ class LoadModel:
         return {"reached": None, "reason": f"not reached within {hours} h",
                 "soc_now": sample["batt_soc"], "soc_target": round(soc_target, 1),
                 "available_wh": round(available_wh)}
+
+    # --- what a generator can do in a run window ----------------------------
+
+    def _rate_for(self, gen, solo, now):
+        """The best-evidenced rate for this generator, solo history first."""
+        rate = self.charge_rate(gen, solo=solo, now=now)
+        if rate is None:
+            rate = self.charge_rate(gen, solo=None, now=now)
+        return rate
+
+    def hours_to_target(self, from_v, target_v, rate, soc_now=None):
+        """Hours for `rate` to lift the pack from from_v to target_v.
+
+        Amps become a state-of-charge rate against the learned capacity, and
+        the learned curve says what SOC the target voltage corresponds to.
+        That curve is built from resting discharge readings, so a charging
+        pack shows the target voltage at a lower SOC than it names and reaches
+        it sooner. The answer is therefore an over-estimate, which is the safe
+        direction for a run window.
+        """
+        if not rate or not rate.get("soc_per_h"):
+            return None
+        soc_target = self.soc_for_voltage(target_v)
+        if soc_target is None:
+            return None
+        if soc_now is None:
+            soc_now = self.soc_for_voltage(from_v)
+        if soc_now is None:
+            return None
+        if soc_target <= soc_now:
+            return 0.0
+        return (soc_target - soc_now) / rate["soc_per_h"]
+
+    def reach(self, gen, from_v, target_v, window_h, solo=None, soc_now=None,
+              now=None):
+        """Whether `gen` can lift the pack to target_v inside window_h.
+
+        One place, so the guard's refusal and the POLICY detail can never
+        quote different arithmetic for the same question.
+        """
+        rate = self._rate_for(gen, solo, now)
+        if rate is None or not rate.get("soc_per_h"):
+            missing = ("no observed charge rate" if rate is None
+                       else "the pack capacity is not learned")
+            return {"ok": False, "rate": rate, "hours": None, "gen": gen,
+                    "window_h": window_h, "target_v": target_v,
+                    "why": f"{missing} for {gen}, so {target_v:.1f} V cannot be "
+                           f"shown to be reachable"}
+        hours = self.hours_to_target(from_v, target_v, rate, soc_now=soc_now)
+        if hours is None:
+            return {"ok": False, "rate": rate, "hours": None, "gen": gen,
+                    "window_h": window_h, "target_v": target_v,
+                    "why": f"the learned voltage/SOC curve does not reach "
+                           f"{target_v:.1f} V, so it cannot be shown to be "
+                           f"reachable"}
+        ok = hours <= window_h + 1e-9
+        return {"ok": ok, "rate": rate, "hours": hours, "gen": gen,
+                "window_h": window_h, "target_v": target_v,
+                "why": (f"{target_v:.1f} reachable in {hours:.1f} h at "
+                        f"{rate_phrase(rate)}" if ok else
+                        f"{target_v:.1f} needs {hours:.1f} h at "
+                        f"{rate_phrase(rate)} but the run window is "
+                        f"{window_h:.1f} h")}
+
+    def voltage_after(self, from_v, hours, rate, soc_now=None):
+        """The voltage the pack reaches after `hours` at this rate."""
+        if not rate or not rate.get("soc_per_h"):
+            return None
+        soc = soc_now if soc_now is not None else self.soc_for_voltage(from_v)
+        if soc is None:
+            return None
+        return self.volts_for_soc(min(100.0, soc + rate["soc_per_h"] * hours))
+
+    def best_reachable_target(self, gen, from_v, window_h, ceiling, floor,
+                              step=0.5, solo=None, soc_now=None, now=None):
+        """The highest stop voltage reachable in the window, rounded down.
+
+        None when even `floor` is out of reach, so a caller cannot end up
+        proposing a target that is not worth running for.
+        """
+        rate = self._rate_for(gen, solo, now)
+        v = self.voltage_after(from_v, window_h, rate, soc_now=soc_now)
+        if v is None:
+            return None
+        v = math.floor(min(v, ceiling) / step) * step
+        return round(v, 2) if v >= floor - 1e-9 else None
 
     def _at_label(self, reached, now):
         """How a projected time is written. Never "?"."""

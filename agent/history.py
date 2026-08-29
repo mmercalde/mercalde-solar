@@ -99,7 +99,17 @@ CREATE TABLE IF NOT EXISTS gen_runs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   gen TEXT NOT NULL, start_ts INTEGER NOT NULL, stop_ts INTEGER,
   duration_min REAL, start_v REAL, stop_v REAL,
-  rate_v_per_h REAL, rate_a REAL, solo INTEGER, kind TEXT
+  -- rate_v_per_h is what the pack's terminal voltage did, which is the
+  -- generator minus whatever the house was drawing. It is recorded because it
+  -- happened, and is not used to plan: see rate_a and load_w.
+  rate_v_per_h REAL,
+  -- Mean net shunt current over the run, in A. This is Ah/h into the pack and
+  -- is what actually moves the state of charge.
+  rate_a REAL,
+  -- Mean house AC load over the run, in W, so a run taken under an
+  -- exceptional load can be left out of the learned rate.
+  load_w REAL,
+  solo INTEGER, kind TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS gen_runs_key ON gen_runs (gen, start_ts);
 
@@ -132,11 +142,26 @@ CREATE INDEX IF NOT EXISTS actions_ts ON actions (ts);
 """
 
 
+# Columns added after a table shipped. CREATE TABLE IF NOT EXISTS leaves an
+# existing table alone, so a live database only gains them here.
+MIGRATIONS = [("gen_runs", "load_w", "REAL")]
+
+
+def migrate(conn):
+    for table, column, decl in MIGRATIONS:
+        have = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+        if column not in have:
+            log.info("adding %s.%s to an existing database", table, column)
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+    conn.commit()
+
+
 def connect(path=None):
     conn = sqlite3.connect(path or config.DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript(SCHEMA)
+    migrate(conn)
     return conn
 
 
@@ -326,7 +351,8 @@ def derive_gen_runs(conn, cfg, since=None):
             start_from = (row["t"] or 0) + 1
         rows = conn.execute(
             f"SELECT ts, {col} AS act, {other_col} AS other, {mode_col} AS mode, "
-            "battery_v, batt_current FROM samples WHERE ts >= ? ORDER BY ts",
+            "battery_v, batt_current, ac_power1, ac_power2 "
+            "FROM samples WHERE ts >= ? ORDER BY ts",
             (start_from,)).fetchall()
 
         open_run = None
@@ -335,12 +361,18 @@ def derive_gen_runs(conn, cfg, since=None):
             if running:
                 if open_run is None:
                     open_run = {"start_ts": r["ts"], "start_v": r["battery_v"],
-                                "mode": r["mode"], "solo": True, "currents": []}
+                                "mode": r["mode"], "solo": True,
+                                "currents": [], "loads": []}
                 if r["other"] == GEN_RUNNING:
                     open_run["solo"] = False
                 # Only samples taken while this gen was running describe its charge rate.
                 if r["batt_current"] is not None:
                     open_run["currents"].append(r["batt_current"])
+                # REG_AC_POWER is the inverters' AC load power, which is the
+                # house whether the generator or the battery is feeding it.
+                if r["ac_power1"] is not None or r["ac_power2"] is not None:
+                    open_run["loads"].append((r["ac_power1"] or 0)
+                                             + (r["ac_power2"] or 0))
             elif open_run is not None:
                 added += _close_run(conn, cfg, gen, open_run, r)
                 open_run = None
@@ -357,14 +389,18 @@ def _close_run(conn, cfg, gen, run, stop_row):
     rate_v_per_h = None
     if start_v is not None and stop_v is not None and duration_min > 0:
         rate_v_per_h = (stop_v - start_v) / (duration_min / 60.0)
+    # The mean is over the whole run, not over the charging samples only: a
+    # moment the pack gave current back to a load is charge it does not keep,
+    # so the net is what moved the state of charge.
     rate_a = sum(run["currents"]) / len(run["currents"]) if run["currents"] else None
+    load_w = sum(run["loads"]) / len(run["loads"]) if run["loads"] else None
     kind = _classify(conn, gen, run["start_ts"], duration_min, run["mode"], cfg)
     cur = conn.execute(
         "INSERT OR IGNORE INTO gen_runs "
-        "(gen, start_ts, stop_ts, duration_min, start_v, stop_v, rate_v_per_h, rate_a, solo, kind) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?)",
+        "(gen, start_ts, stop_ts, duration_min, start_v, stop_v, rate_v_per_h, "
+        "rate_a, load_w, solo, kind) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
         (gen, run["start_ts"], stop_row["ts"], round(duration_min, 2), start_v, stop_v,
-         rate_v_per_h, rate_a, int(run["solo"]), kind))
+         rate_v_per_h, rate_a, load_w, int(run["solo"]), kind))
     return cur.rowcount
 
 

@@ -10,6 +10,7 @@ import pytest
 import agent as agentmod
 import history
 import policy
+from stubs import StubModel
 
 
 @pytest.fixture
@@ -26,7 +27,7 @@ def a(cfg, conn, monkeypatch, tmp_path):
     return inst
 
 
-def base_facts(cfg, gate_open=False):
+def base_facts(cfg, gate_open=False, model=None):
     now = int(datetime(2026, 8, 28, 16, 0,
                        tzinfo=history.tzinfo(cfg)).timestamp())
     f = {
@@ -51,8 +52,10 @@ def base_facts(cfg, gate_open=False):
                        "kub_start": 52.0, "kub_stop": 56.0},
         "charge_rates": {"mep": {"v_per_h": 1.6}, "kubota": {"v_per_h": 1.0}},
         "run_window_h": {"mep": 2.0, "kubota": 2.0},
+        "charge_rates": {},
     }
-    f["policy"] = policy.evaluate(cfg, f)
+    f["soc"] = 84
+    f["policy"] = policy.evaluate(cfg, f, model or StubModel())
     return f
 
 
@@ -76,8 +79,9 @@ def test_plan_record_matches_the_spec_shape(a, cfg):
                         "2.4 h before sunrise 6:31 am (window 2.0 h))")
     assert lines[7] == ("POLICY 4 solo top-up: FIRES (peak 55.8 < 57.0; 52 V "
                         "projected 4:10 am before sunrise 6:31 am; V 55.8 > "
-                        "55.0 → Kubota; 57.0 reachable in 1.2 h at 1.0 V/h; the "
-                        "run begins when the pack falls to 55.0)")
+                        "55.0 → Kubota; 57.0 reachable in 0.6 h at 60 A into "
+                        "the pack (10.0% SOC/h); the run begins when the pack "
+                        "falls to 55.0)")
     assert lines[8].startswith("recommend: Kubota solo")
     assert lines[9] == "applied: no (learning phase)"
 
@@ -85,7 +89,7 @@ def test_plan_record_matches_the_spec_shape(a, cfg):
 def test_the_plan_record_shows_a_rule_that_does_not_fire_and_why(a, cfg):
     f = base_facts(cfg)
     f["peak_today"] = 57.4
-    f["policy"] = policy.evaluate(cfg, f)
+    f["policy"] = policy.evaluate(cfg, f, StubModel())
     lines = a.plan_record(f, "no change", "no (dry run)").splitlines()
     assert "POLICY 4 solo top-up: no (peak 57.4 ≥ 57.0)" in lines
 
@@ -101,7 +105,7 @@ def test_plan_record_says_what_it_has_not_learned(a, cfg):
     f["drawdown"] = None
     f["projection"] = {"reached": None, "reason": "pack capacity not learned"}
     f["est_solar"] = None
-    f["policy"] = policy.evaluate(cfg, f)
+    f["policy"] = policy.evaluate(cfg, f, StubModel())
     lines = a.plan_record(f, "no change", "no (learning phase)").splitlines()
     assert lines[2].endswith("not learned yet")
     assert "not projected (pack capacity not learned)" in lines[3]
@@ -456,7 +460,7 @@ def prompt_facts(cfg, **over):
                           "gen_minutes": {"mep": 0, "kubota": 0}},
              weather={"tomorrow": {"max_temp_c": 26.0}})
     f.update(over)
-    f["policy"] = policy.evaluate(cfg, f)
+    f["policy"] = policy.evaluate(cfg, f, StubModel())
     return f
 
 
@@ -549,7 +553,8 @@ def test_the_tick_prompt_omits_the_line_when_the_curve_is_unlearned(a, cfg):
                           "solar_wh": 31000, "load_wh": 32000,
                           "gen_minutes": {"mep": 0, "kubota": 0}},
              weather={"tomorrow": {"max_temp_c": 26.0}})
-    assert "SOC" not in a.tick_prompt(f).split("learned:")[0].split("FORECAST")[1]
+    forecast = a.tick_prompt(f).split("POLICY EVALUATION")[0].split("FORECAST")[1]
+    assert "SOC" not in forecast.split("learned:")[0]
 
 
 # --- the owner reads a 12-hour clock ----------------------------------------
