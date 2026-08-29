@@ -18,6 +18,30 @@ ESP8266_STOPGEN_URL = "http://10.8.0.2:8080/stopgen"  # NEW V1.4.29 endpoint
 ESP8266_EVENTS_URL = "http://10.8.0.2:8080/events"
 ESP8266_AUTOGEN_URL = "http://10.8.0.2:8080/autogen"
 
+# Solar agent on the KAMRUI, reached over WireGuard through the Pi5.
+AGENT_ASK_URL = "http://192.168.3.152:8090/ask"
+AGENT_TIMEOUT = 8
+
+AGENT_FALLBACK = {
+    "en": "The solar agent is not answering right now.",
+    "es": "El agente solar no responde en este momento.",
+}
+
+
+def ask_agent(query, lang):
+    """Put a free-form question to the solar agent. Returns speech text."""
+    try:
+        resp = requests.post(AGENT_ASK_URL, json={"text": query, "lang": lang},
+                             timeout=AGENT_TIMEOUT)
+        if resp.status_code != 200:
+            print(f"ERROR ask_agent: HTTP {resp.status_code}")
+            return AGENT_FALLBACK[lang]
+        reply = (resp.text or "").strip()
+        return reply or AGENT_FALLBACK[lang]
+    except Exception as e:
+        print(f"ERROR ask_agent: {e}")
+        return AGENT_FALLBACK[lang]
+
 def get_solar_data():
     try:
         resp = requests.get(ESP8266_DATA_URL, timeout=5)
@@ -582,11 +606,23 @@ def alexa_handler():
                         speech = f"Failed to disable auto control. Current state: {actual_state or 'unknown'}."
                 return build_response(speech)
             
+            elif intent == 'AskAgentIntent':
+                slots = data['request']['intent'].get('slots') or {}
+                query = (slots.get('query') or {}).get('value') or ''
+                query = query.strip()
+                if not query:
+                    speech = ("No entendi la pregunta." if spanish
+                              else "I didn't catch the question.")
+                    return build_response(speech, end_session=False)
+                print(f"DEBUG AskAgentIntent: {query}")
+                speech = ask_agent(query, 'es' if spanish else 'en')
+                return build_response(speech)
+
             elif intent == 'AMAZON.HelpIntent':
                 if spanish:
-                    speech = "Puedes decir: estado de bateria, produccion solar, estado de generadores, que paso, activar control automatico, o desactivar control automatico. Para controlar generadores di: prende el Kubota, apaga el MEP, o pon los generadores en automatico."
+                    speech = "Puedes decir: estado de bateria, produccion solar, estado de generadores, que paso, activar control automatico, o desactivar control automatico. Para controlar generadores di: prende el Kubota, apaga el MEP, o pon los generadores en automatico. Tambien puedes preguntarle al agente, por ejemplo: pregunta al agente cual es el plan de esta noche."
                 else:
-                    speech = "You can say: battery status, solar production, generator status, what happened, enable auto control, or disable auto control. To control generators say: start the Kubota, stop the MEP, or put generators on auto."
+                    speech = "You can say: battery status, solar production, generator status, what happened, enable auto control, or disable auto control. To control generators say: start the Kubota, stop the MEP, or put generators on auto. You can also ask the agent, for example: ask the agent what the plan is tonight."
                 return build_response(speech, end_session=False)
             
             elif intent in ['AMAZON.CancelIntent', 'AMAZON.StopIntent']:
