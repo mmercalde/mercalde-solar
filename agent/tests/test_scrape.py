@@ -1,29 +1,57 @@
-"""Parsing and downsampling of InsightLocal chartdata CSV.
+"""Parsing of InsightLocal chartdata CSV, against the real header formats.
 
-The HTTP side needs live credentials; these cover everything that does not.
+Fixtures use the exact column names the gateway returned on 2026-08-27, from
+agent/data/gateway_api.json. The HTTP side needs live credentials; these
+cover everything that does not.
 """
+
+import pytest
 
 import history
 import scrape_gateway as sg
 
-# Shaped like a Battery Summary minute export: comment banner, header, one row
-# per minute. Column names follow SPEC section 5.
-CSV = """\
+HOURS_HEADER = (
+    "TIME,/SYS/DC_IN/ENERGY_HOUR(kwh),/SYS/DC_OUT/ENERGY_HOUR(kwh),"
+    "/SYS/GRID_IN/ENERGY_HOUR(kwh),/SYS/GRID_OUT/ENERGY_HOUR(kwh),"
+    "/SYS/LOAD/ENERGY_HOUR(kwh),/SYS/GEN/ENERGY_HOUR(kwh),"
+    "/SYS/PV/ENERGY_HOUR(kwh),/SYS/BATT_CHG/ENERGY_HOUR(kwh),"
+    "/SYS/BATT_INV/ENERGY_HOUR(kwh),/SYS/PV_TOTAL/ENERGY_HOUR(kwh)")
+
+HOURS_CSV = f"""\
 # Conext Gateway
-# Battery 1
-Date,Volts(V),Current(A),Temperature(C),State Of Charge(%)
-2026-08-27 00:00:00,52.50,-20.0,24.1,71
-2026-08-27 00:01:00,52.40,-20.0,24.1,71
-2026-08-27 00:02:00,52.30,-20.0,24.1,70
-2026-08-27 01:00:00,54.00,60.0,25.0,80
-2026-08-27 01:01:00,54.20,60.0,25.0,81
+{HOURS_HEADER}
+2026-08-27 00:00:00,1303,0,0,0,1269,0,0,0,1304,0
+2026-08-27 01:00:00,1194,0,0,0,1194,0,0,0,1200,0
+2026-08-27 12:00:00,0,0,0,0,1500,500,4000,3800,0,4000
+"""
+
+MINUTES_HEADER = (
+    "TIME,/SYS/LOAD/P(W),/SYS/GEN/P(W),/SYS/PV_TOTAL/P(W),"
+    "/SYS/BATT1/V(V),/SYS/BATT1/I(A),/SYS/BATT1/T(degC),/SYS/BATT1/SOC(%),"
+    "/SYS/BATT2/V(V),/SYS/BATT2/I(A),/SYS/BATT2/T(degC),/SYS/BATT2/SOC(%)")
+
+MINUTES_CSV = f"""\
+# Conext Gateway
+{MINUTES_HEADER}
+2026-08-27 00:00:00,1246,0,0,53400,-23960,29500,81,0,0,0,0
+2026-08-27 00:01:00,1246,0,0,52460,-24000,29500,81,0,0,0,0
+2026-08-27 00:02:00,1246,0,0,55250,-24040,29500,80,0,0,0,0
+2026-08-27 01:00:00,1194,0,0,54000,60000,29500,85,0,0,0,0
 """
 
 
+def hour_of(cfg, hh):
+    return history.hour_floor(int(
+        __import__("datetime").datetime.strptime(
+            f"2026-08-27 {hh}:00:00", "%Y-%m-%d %H:%M:%S")
+        .replace(tzinfo=history.tzinfo(cfg)).timestamp()))
+
+
+# --- generic CSV ------------------------------------------------------------
+
 def test_comments_and_blanks_are_dropped():
-    header, rows = sg.parse_chart_csv(CSV)
-    assert header[0] == "Date"
-    assert len(rows) == 5
+    header, rows = sg.parse_chart_csv(HOURS_CSV)
+    assert header[0] == "TIME" and len(rows) == 3
 
 
 def test_empty_response_is_not_an_error():
@@ -31,58 +59,164 @@ def test_empty_response_is_not_an_error():
     assert sg.parse_chart_csv("# nothing here\n\n") == ([], [])
 
 
-def test_column_map_finds_quantities():
-    header, _ = sg.parse_chart_csv(CSV)
+def test_column_map_ignores_the_unit_suffix():
+    header, _ = sg.parse_chart_csv(HOURS_CSV)
     cols = sg.column_map(header)
-    assert cols == {"v": 1, "a": 2, "temp": 3, "soc": 4}
+    assert "/SYS/LOAD/ENERGY_HOUR" in cols
+    assert "/SYS/LOAD/ENERGY_HOUR(kwh)" not in cols
 
 
-def test_column_map_tolerates_spacing_and_case():
-    cols = sg.column_map(["Date", "VOLTS (V)", "current (A)", "State of Charge (%)"])
-    assert cols["v"] == 1 and cols["a"] == 2 and cols["soc"] == 3
+# --- hourly energy (the primary source) -------------------------------------
+
+def test_hours_give_energy_per_device(cfg):
+    header, rows = sg.parse_chart_csv(HOURS_CSV)
+    e = sg.hours_to_energy(header, rows, cfg)
+    midnight = e[hour_of(cfg, "00")]
+    assert midnight["load"]["wh_out"] == 1269
+    assert midnight["battery"]["wh_out"] == 1304
+    assert midnight["battery"]["wh_in"] == 0
+    noon = e[hour_of(cfg, "12")]
+    assert noon["solar"]["wh_in"] == 4000
+    assert noon["gen"]["wh_in"] == 500
+    assert noon["battery"]["wh_in"] == 3800
 
 
-def test_downsample_to_hourly(cfg):
-    header, rows = sg.parse_chart_csv(CSV)
-    hourly = sg.rows_to_hourly(header, rows, cfg)
-    assert len(hourly) == 2, "two distinct hours in the fixture"
-
-    h0 = hourly[min(hourly)]
-    assert h0["n"] == 3
-    assert round(h0["mean_v"], 3) == 52.4
-    assert h0["min_v"] == 52.3 and h0["max_v"] == 52.5
-    assert h0["mean_a"] == -20.0
-    # Discharging: three minutes at about 52.4 V * 20 A / 60 min.
-    assert h0["wh_in"] == 0
-    assert round(h0["wh_out"], 1) == 52.4
-
-    h1 = hourly[max(hourly)]
-    assert h1["n"] == 2 and h1["wh_out"] == 0
-    assert round(h1["wh_in"], 1) == round((54.0 + 54.2) * 60 / 60.0, 1)
+def test_energy_values_are_watt_hours_despite_the_kwh_label(cfg):
+    """Verified live: the hourly column and integrated minute power agree
+    only if the raw integer is Wh."""
+    header, rows = sg.parse_chart_csv(HOURS_CSV)
+    e = sg.hours_to_energy(header, rows, cfg)
+    assert e[hour_of(cfg, "00")]["load"]["wh_out"] == 1269  # not 1_269_000
 
 
-def test_rows_without_voltage_are_skipped(cfg):
+def test_pv_total_is_preferred_over_pv(cfg):
+    """Both columns exist and carry the same numbers; only one is read."""
+    header, rows = sg.parse_chart_csv(HOURS_CSV)
+    e = sg.hours_to_energy(header, rows, cfg)
+    # /SYS/PV is 0 at noon in the fixture while /SYS/PV_TOTAL is 4000.
+    assert e[hour_of(cfg, "12")]["solar"]["wh_in"] == 4000
+
+
+def test_unknown_columns_are_ignored(cfg):
     header, rows = sg.parse_chart_csv(
-        "Date,Volts(V),Current(A)\n"
-        "2026-08-27 00:00:00,,-20.0\n"
-        "2026-08-27 00:01:00,52.0,-20.0\n"
-        "bad row\n")
-    hourly = sg.rows_to_hourly(header, rows, cfg)
-    assert sum(h["n"] for h in hourly.values()) == 1
+        "TIME,/SYS/SOMETHING_NEW/ENERGY_HOUR(kwh)\n2026-08-27 00:00:00,42\n")
+    assert sg.hours_to_energy(header, rows, cfg) == {}
+
+
+# --- minute voltage (peak and minimum only) ---------------------------------
+
+def test_minutes_give_voltage_statistics(cfg):
+    header, rows = sg.parse_chart_csv(MINUTES_CSV)
+    v = sg.minutes_to_voltage(header, rows, cfg)
+    h0 = v[hour_of(cfg, "00")]
+    assert h0["n"] == 3
+    assert h0["min_v"] == pytest.approx(52.46)
+    assert h0["max_v"] == pytest.approx(55.25)
+    assert h0["mean_v"] == pytest.approx((53.400 + 52.460 + 55.250) / 3)
+    assert h0["mean_a"] == pytest.approx(-24.0, abs=0.05)
+
+
+def test_volts_and_amps_are_scaled_by_a_thousand(cfg):
+    header, rows = sg.parse_chart_csv(MINUTES_CSV)
+    v = sg.minutes_to_voltage(header, rows, cfg)
+    assert 50 < v[hour_of(cfg, "01")]["mean_v"] < 60
+    assert v[hour_of(cfg, "01")]["mean_a"] == pytest.approx(60.0)
+
+
+def test_an_unused_battery_bank_is_skipped(cfg):
+    """BATT2..BATT5 are always in the header and always zero."""
+    header, rows = sg.parse_chart_csv(MINUTES_CSV)
+    vi, ai, scale = sg._battery_columns(header, rows)
+    assert header[vi] == "/SYS/BATT1/V(V)"
+    assert header[ai] == "/SYS/BATT1/I(A)"
+    assert scale == sg.MILLI
+
+
+def test_a_later_bank_is_used_when_the_first_is_empty(cfg):
+    csv = (MINUTES_HEADER + "\n"
+           "2026-08-27 00:00:00,1246,0,0,0,0,0,0,53400,-23960,29500,81\n")
+    header, rows = sg.parse_chart_csv(csv)
+    vi, _, _ = sg._battery_columns(header, rows)
+    assert header[vi] == "/SYS/BATT2/V(V)"
+
+
+def test_friendly_labels_still_parse(cfg):
+    """SPEC section 5's column names, in case another device's chart uses them."""
+    csv = ("Date,Volts(V),Current(A)\n"
+           "2026-08-27 00:00:00,52.5,-20.0\n"
+           "2026-08-27 00:01:00,52.3,-20.0\n")
+    header, rows = sg.parse_chart_csv(csv)
+    v = sg.minutes_to_voltage(header, rows, cfg)
+    h = v[hour_of(cfg, "00")]
+    assert h["min_v"] == pytest.approx(52.3) and h["max_v"] == pytest.approx(52.5)
 
 
 def test_no_voltage_column_yields_nothing(cfg):
-    header, rows = sg.parse_chart_csv("Date,Frequency(Hz)\n2026-08-27 00:00:00,60.0\n")
-    assert sg.rows_to_hourly(header, rows, cfg) == {}
+    header, rows = sg.parse_chart_csv(
+        "TIME,/SYS/LOAD/P(W)\n2026-08-27 00:00:00,1000\n")
+    assert sg.minutes_to_voltage(header, rows, cfg) == {}
 
 
 def test_hours_are_local_to_the_configured_timezone(cfg):
-    """The export carries local wall-clock times; hour keys must honour cfg['tz']."""
     header, rows = sg.parse_chart_csv(
-        "Date,Volts(V),Current(A)\n2026-08-27 13:30:00,54.0,10.0\n")
-    hourly = sg.rows_to_hourly(header, rows, cfg)
-    hour_ts = next(iter(hourly))
-    assert history.local(hour_ts, cfg).hour == 13
+        MINUTES_HEADER + "\n2026-08-27 13:30:00,0,0,0,54000,10000,29500,80,0,0,0,0\n")
+    v = sg.minutes_to_voltage(header, rows, cfg)
+    assert history.local(next(iter(v)), cfg).hour == 13
+
+
+# --- empty days -------------------------------------------------------------
+
+def test_a_day_of_all_zeros_counts_as_empty(cfg):
+    header, rows = sg.parse_chart_csv(
+        HOURS_HEADER + "\n2026-08-27 00:00:00,0,0,0,0,0,0,0,0,0,0\n")
+    assert sg.day_is_empty(sg.hours_to_energy(header, rows, cfg))
+
+
+def test_no_rows_counts_as_empty(cfg):
+    assert sg.day_is_empty({})
+
+
+def test_a_day_with_load_is_not_empty(cfg):
+    header, rows = sg.parse_chart_csv(HOURS_CSV)
+    assert not sg.day_is_empty(sg.hours_to_energy(header, rows, cfg))
+
+
+# --- writing ----------------------------------------------------------------
+
+def test_scrape_day_merges_energy_and_voltage(conn, cfg):
+    class FakeGateway:
+        def chartdata(self, device, instance, day, resolution="minutes"):
+            return HOURS_CSV if resolution == "hours" else MINUTES_CSV
+
+    import datetime as dt
+    written = sg.scrape_day(FakeGateway(), conn, cfg, dt.date(2026, 8, 27))
+    assert written > 0
+
+    row = conn.execute(
+        "SELECT * FROM hourly WHERE device='battery' AND hour_ts=?",
+        (hour_of(cfg, "00"),)).fetchone()
+    assert row["wh_out"] == 1304, "energy from the hours endpoint"
+    assert row["min_v"] == pytest.approx(52.46), "voltage from the minutes endpoint"
+    assert row["max_v"] == pytest.approx(55.25)
+    assert row["source"] == "insightlocal"
+
+    load = conn.execute(
+        "SELECT * FROM hourly WHERE device='load' AND hour_ts=?",
+        (hour_of(cfg, "00"),)).fetchone()
+    assert load["wh_out"] == 1269 and load["mean_v"] is None
+
+
+def test_scrape_day_skips_the_minute_fetch_on_an_empty_day(conn, cfg):
+    calls = []
+
+    class FakeGateway:
+        def chartdata(self, device, instance, day, resolution="minutes"):
+            calls.append(resolution)
+            return HOURS_HEADER + "\n2026-08-27 00:00:00,0,0,0,0,0,0,0,0,0,0\n"
+
+    import datetime as dt
+    assert sg.scrape_day(FakeGateway(), conn, cfg, dt.date(2026, 8, 27)) == 0
+    assert calls == ["hours"], "a second request would be wasted"
 
 
 def test_scraped_rows_do_not_overwrite_live_rows(conn, cfg):
@@ -98,3 +232,40 @@ def test_scraped_rows_fill_hours_live_sampling_missed(conn, cfg):
                               51, 53, 60, "insightlocal") == 1
     row = conn.execute("SELECT * FROM hourly").fetchone()
     assert row["source"] == "insightlocal" and row["mean_v"] == 52.0
+
+
+# --- 429 handling -----------------------------------------------------------
+
+class Resp:
+    def __init__(self, status):
+        self.status_code = status
+
+
+def make_gateway(cfg, slept):
+    gw = sg.Gateway(cfg, sleep=slept.append)
+    return gw
+
+
+def test_a_429_is_waited_out_and_retried(cfg):
+    slept = []
+    gw = make_gateway(cfg, slept)
+    seq = [Resp(429), Resp(429), Resp(200)]
+    out = gw._retry_429("test", lambda: seq.pop(0))
+    assert out.status_code == 200
+    assert slept == [sg.RATE_LIMIT_SLEEP, sg.RATE_LIMIT_SLEEP]
+
+
+def test_429_gives_up_after_six_attempts(cfg):
+    slept = []
+    gw = make_gateway(cfg, slept)
+    with pytest.raises(sg.GatewayError) as e:
+        gw._retry_429("test", lambda: Resp(429))
+    assert "429" in str(e.value)
+    assert len(slept) == sg.RATE_LIMIT_RETRIES - 1, "no sleep after the last try"
+
+
+def test_a_non_429_response_is_returned_immediately(cfg):
+    slept = []
+    gw = make_gateway(cfg, slept)
+    assert gw._retry_429("test", lambda: Resp(500)).status_code == 500
+    assert slept == []

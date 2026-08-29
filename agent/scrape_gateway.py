@@ -4,10 +4,17 @@
 The UI's "export CSV" button does not hit a server endpoint: it serialises a
 chart the browser already holds. The data behind that chart comes from
 
-    GET /chartdata/<device>/<instance>/years/<Y>/months/<M>/days/<D>/minutes
+    GET /chartdata/<device>/<instance>/years/<Y>/months/<M>/days/<D>/<resolution>
 
-which returns CSV text directly, one day per request at one-minute
-resolution. See docs/gateway_api.md for how this was established.
+which returns CSV text directly, one day per request. Two resolutions matter:
+
+  hours    24 rows of per-hour energy: load, generator, PV, battery charge
+           and discharge. This is the primary source for the `hourly` table -
+           it is the gateway's own accounting, not our re-integration of it.
+  minutes  1440 rows of instantaneous values. Used only for per-hour peak and
+           minimum pack voltage, which the hourly energy rows cannot give.
+
+See docs/gateway_api.md for how this was established.
 
 The gateway limits concurrent sessions and answers 429 "Maximum number of
 allowed users reached" once they are used up, so every session this module
@@ -26,6 +33,7 @@ import io
 import json
 import logging
 import os
+import re
 import sys
 import time
 from datetime import date, datetime, timedelta
@@ -53,18 +61,42 @@ DEVICE_CANDIDATES = ["system", "battery", "xw", "inverter", "mppt",
                      "chargecontroller", "batterymonitor", "gateway"]
 INSTANCE_CANDIDATES = ["0", "1", "2", "3"]
 
-# CSV header text -> the quantity we store. Matched case-insensitively on a
-# substring so "Volts(V)" and "Volts (V)" both land.
-COLUMN_HINTS = [
-    ("volt", "v"),
-    ("current", "a"),
-    ("state of charge", "soc"),
-    ("temperature", "temp"),
-]
+# Columns are named by sysvar path, e.g. "/SYS/LOAD/ENERGY_HOUR(kwh)". Matching
+# ignores the parenthesised unit so a unit-label change cannot break the parse.
+#
+# Despite the "(kwh)" label the energy values are Wh. Verified on 2026-08-27:
+# summing the hourly column and integrating the matching minute power column
+# agree to within 0.2% (load 32469 vs 32527, PV 31659 vs 31670, gen 4050 vs
+# 4053), which only holds if the raw integer is Wh.
+HOURS_ENERGY = {
+    # our device row  ->  (sysvar prefix, which column of `hourly` it fills)
+    ("load", "wh_out"): "/SYS/LOAD/ENERGY_HOUR",
+    ("solar", "wh_in"): "/SYS/PV_TOTAL/ENERGY_HOUR",
+    ("gen", "wh_in"): "/SYS/GEN/ENERGY_HOUR",
+    ("battery", "wh_in"): "/SYS/BATT_CHG/ENERGY_HOUR",
+    ("battery", "wh_out"): "/SYS/BATT_INV/ENERGY_HOUR",
+}
+
+# Minute columns, per battery bank. Volts and amps are scaled by 0.001; SOC is
+# already a percentage. Verified: raw 52460..55250 -> 52.46..55.25 V,
+# raw -74250..147910 -> -74.2..147.9 A, SOC raw 75..94.
+BATT_V_RE = re.compile(r"^/SYS/BATT(\d+)/V\b", re.I)
+BATT_I_RE = re.compile(r"^/SYS/BATT(\d+)/I\b", re.I)
+MILLI = 0.001
+
+# Older friendly-label exports, kept as a fallback for any device whose chart
+# still uses them (SPEC section 5 describes this shape).
+FRIENDLY_V = re.compile(r"^volts?\b", re.I)
+FRIENDLY_I = re.compile(r"^current\b", re.I)
 
 # Stop the backfill after this many consecutive empty days: the export goes
 # quiet across gaps as well as at the true start of history.
 EMPTY_DAY_TOLERANCE = 3
+
+# The gateway caps concurrent sessions and answers 429 once they run out.
+# Wait for one to fall out rather than giving up on the backfill.
+RATE_LIMIT_SLEEP = 600
+RATE_LIMIT_RETRIES = 6
 
 
 class GatewayError(RuntimeError):
@@ -74,8 +106,9 @@ class GatewayError(RuntimeError):
 class Gateway:
     """One authenticated InsightLocal session. Always use as a context manager."""
 
-    def __init__(self, cfg, timeout=30):
+    def __init__(self, cfg, timeout=30, sleep=time.sleep):
         gw = cfg["gateway"]
+        self.sleep = sleep
         self.base = gw["url"].rstrip("/")
         self.user = gw["user"]
         self.password = gw["password"]
@@ -93,20 +126,39 @@ class Gateway:
         self.logout()
         return False
 
+    def _retry_429(self, what, call):
+        """Run `call`, waiting out 429 'Maximum number of allowed users reached'.
+
+        The gateway caps concurrent sessions; an open InsightLocal tab is
+        enough to use the last one. A backfill walks hundreds of days, so
+        giving up on a full queue would waste the whole run. Sleeping lets the
+        offending session time out.
+        """
+        for attempt in range(1, RATE_LIMIT_RETRIES + 1):
+            r = call()
+            if r.status_code != 429:
+                return r
+            if attempt == RATE_LIMIT_RETRIES:
+                raise GatewayError(
+                    f"{what}: gateway still answering 429 'Maximum number of "
+                    f"allowed users reached' after {RATE_LIMIT_RETRIES} attempts "
+                    f"over {RATE_LIMIT_RETRIES * RATE_LIMIT_SLEEP // 60} minutes. "
+                    f"Close an InsightLocal browser tab and try again.")
+            log.warning("%s: gateway session limit reached (429); waiting %d min "
+                        "then retrying (%d/%d)", what, RATE_LIMIT_SLEEP // 60,
+                        attempt, RATE_LIMIT_RETRIES)
+            self.sleep(RATE_LIMIT_SLEEP)
+        raise GatewayError(f"{what}: unreachable")
+
     def login(self):
         if not self.password:
             raise GatewayError(
                 "gateway.password is empty in agent/config.json. "
                 "InsightLocal history cannot be scraped without it.")
-        r = self.session.post(
+        r = self._retry_429("login", lambda: self.session.post(
             f"{self.base}/auth",
             data=f"username={self.user}&password={self.password}&session=true",
-            timeout=self.timeout)
-        if r.status_code == 429:
-            raise GatewayError(
-                "gateway refused the login with 429 'Maximum number of allowed "
-                "users reached'. Close an InsightLocal browser tab (or wait for "
-                "its session to expire) and try again.")
+            timeout=self.timeout))
         if r.status_code != 200:
             raise GatewayError(f"POST /auth returned {r.status_code}: {r.text[:200]}")
         try:
@@ -147,11 +199,30 @@ class Gateway:
             self.otk = body["OTK"]
         return {v["name"]: v.get("value") for v in body.get("values", [])}
 
+    @staticmethod
+    def chartdata_path(device, instance, day, resolution):
+        """Path for one resolution.
+
+        Each resolution truncates the path at a different depth, exactly as
+        chartdataService.getChartData does. Appending the resolution to the
+        full day path works for hours and minutes but makes the gateway answer
+        400 for days, months and years.
+        """
+        base = f"chartdata/{device}/{instance}"
+        if resolution == "years":
+            return f"{base}/years/"
+        if resolution == "months":
+            return f"{base}/years/{day.year}/months/"
+        if resolution == "days":
+            return f"{base}/years/{day.year}/months/{day.month}/days/"
+        return (f"{base}/years/{day.year}/months/{day.month}"
+                f"/days/{day.day}/{resolution}")
+
     def chartdata(self, device, instance, day, resolution="minutes"):
         """Raw CSV text for one local day. Returns '' when the gateway has nothing."""
-        path = (f"{self.base}/chartdata/{device}/{instance}"
-                f"/years/{day.year}/months/{day.month}/days/{day.day}/{resolution}")
-        r = self.session.get(path, headers=self._headers(), timeout=self.timeout)
+        path = f"{self.base}/" + self.chartdata_path(device, instance, day, resolution)
+        r = self._retry_429(f"chartdata {day} {resolution}", lambda: self.session.get(
+            path, headers=self._headers(), timeout=self.timeout))
         if r.status_code == 404:
             return ""
         if r.status_code == 401:
@@ -179,15 +250,14 @@ def parse_chart_csv(text):
     return [h.strip() for h in rows[0]], rows[1:]
 
 
+def _strip_unit(name):
+    """"/SYS/LOAD/ENERGY_HOUR(kwh)" -> "/SYS/LOAD/ENERGY_HOUR"."""
+    return name.split("(")[0].strip()
+
+
 def column_map(header):
-    """Map quantity -> column index, using the first column whose name matches."""
-    out = {}
-    for i, name in enumerate(header):
-        low = name.lower()
-        for hint, key in COLUMN_HINTS:
-            if hint in low and key not in out:
-                out[key] = i
-    return out
+    """Map a sysvar prefix to its column index, unit suffix ignored."""
+    return {_strip_unit(name): i for i, name in enumerate(header)}
 
 
 def _num(row, idx):
@@ -199,77 +269,168 @@ def _num(row, idx):
         return None
 
 
-def rows_to_hourly(header, rows, cfg):
-    """Downsample minute rows to per-hour aggregates. Minute rows are never stored.
+def _row_ts(row, cfg):
+    try:
+        stamp = datetime.strptime(row[0].strip(), "%Y-%m-%d %H:%M:%S")
+    except (ValueError, IndexError):
+        return None
+    return int(stamp.replace(tzinfo=history.tzinfo(cfg)).timestamp())
 
-    Returns {hour_ts: {mean_v, mean_a, min_v, max_v, wh_in, wh_out, n}}.
+
+def hours_to_energy(header, rows, cfg):
+    """Per-hour energy straight from the gateway's own accounting.
+
+    Returns {hour_ts: {device: {"wh_in": x, "wh_out": y}}}. Values are Wh
+    despite the "(kwh)" column label; see HOURS_ENERGY.
     """
     cols = column_map(header)
-    if "v" not in cols:
+    wanted = {key: cols[prefix] for key, prefix in HOURS_ENERGY.items()
+              if prefix in cols}
+    if not wanted:
         return {}
-    tz = history.tzinfo(cfg)
+    out = {}
+    for row in rows:
+        ts = _row_ts(row, cfg)
+        if ts is None:
+            continue
+        hour = history.hour_floor(ts)
+        for (device, field), idx in wanted.items():
+            wh = _num(row, idx)
+            if wh is None:
+                continue
+            out.setdefault(hour, {}).setdefault(
+                device, {"wh_in": None, "wh_out": None})[field] = wh
+    return out
+
+
+def _battery_columns(header, rows):
+    """(volts_idx, amps_idx) for the first battery bank carrying real data.
+
+    Five banks are always present in the header; the unused ones are all
+    zeros, so pick the first with a non-zero voltage rather than assuming
+    BATT1. Falls back to the friendly "Volts(V)" labels SPEC section 5
+    describes, in case another device's chart still uses them.
+    """
+    volts, amps = {}, {}
+    for i, name in enumerate(header):
+        n = _strip_unit(name)
+        m = BATT_V_RE.match(n)
+        if m:
+            volts[m.group(1)] = i
+            continue
+        m = BATT_I_RE.match(n)
+        if m:
+            amps[m.group(1)] = i
+    for bank in sorted(volts, key=lambda b: int(b)):
+        vi = volts[bank]
+        if any((_num(r, vi) or 0) > 0 for r in rows):
+            return vi, amps.get(bank), MILLI
+    for i, name in enumerate(header):
+        n = _strip_unit(name)
+        if FRIENDLY_V.match(n):
+            ai = next((j for j, m in enumerate(header)
+                       if FRIENDLY_I.match(_strip_unit(m))), None)
+            return i, ai, 1.0
+    return None, None, 1.0
+
+
+def minutes_to_voltage(header, rows, cfg):
+    """Per-hour pack voltage from the minute export.
+
+    Only voltage statistics come from here: mean, min and max volts, plus mean
+    amps. Energy is taken from the hours endpoint instead. Minute rows are
+    never stored.
+    """
+    vi, ai, scale = _battery_columns(header, rows)
+    if vi is None:
+        return {}
     buckets = {}
     for row in rows:
-        if not row:
+        ts = _row_ts(row, cfg)
+        if ts is None:
             continue
-        try:
-            stamp = datetime.strptime(row[0].strip(), "%Y-%m-%d %H:%M:%S")
-        except (ValueError, IndexError):
+        v = _num(row, vi)
+        if v is None or v <= 0:
             continue
-        ts = int(stamp.replace(tzinfo=tz).timestamp())
-        v = _num(row, cols.get("v"))
-        if v is None:
-            continue
-        a = _num(row, cols.get("a"))
-        b = buckets.setdefault(history.hour_floor(ts),
-                               {"v": [], "a": [], "wh_in": 0.0, "wh_out": 0.0})
-        b["v"].append(v)
+        b = buckets.setdefault(history.hour_floor(ts), {"v": [], "a": []})
+        b["v"].append(v * scale)
+        a = _num(row, ai)
         if a is not None:
-            b["a"].append(a)
-            # One row per minute, so each sample covers 1/60 h.
-            wh = v * a / 60.0
-            if wh >= 0:
-                b["wh_in"] += wh
-            else:
-                b["wh_out"] += -wh
-    out = {}
-    for hour, b in buckets.items():
-        out[hour] = {
-            "mean_v": sum(b["v"]) / len(b["v"]),
-            "mean_a": (sum(b["a"]) / len(b["a"])) if b["a"] else None,
-            "min_v": min(b["v"]), "max_v": max(b["v"]),
-            "wh_in": b["wh_in"], "wh_out": b["wh_out"], "n": len(b["v"]),
-        }
-    return out
+            b["a"].append(a * scale)
+    return {hour: {"mean_v": sum(b["v"]) / len(b["v"]),
+                   "min_v": min(b["v"]), "max_v": max(b["v"]),
+                   "mean_a": (sum(b["a"]) / len(b["a"])) if b["a"] else None,
+                   "n": len(b["v"])}
+            for hour, b in buckets.items()}
 
 
 # --- scraping ---------------------------------------------------------------
 
+def day_is_empty(energy):
+    """True when the gateway returned a day with nothing recorded in it.
+
+    A day of all zeros is not the same as a dark day: a real day always has
+    some house load. Treat all-zero as no data.
+    """
+    for devices in energy.values():
+        for fields in devices.values():
+            if any(v for v in fields.values()):
+                return False
+    return True
+
+
 def scrape_day(gw, conn, cfg, day, device=DEFAULT_DEVICE, instance=DEFAULT_INSTANCE):
-    """Fetch one local day and write hourly rows. Returns hours written."""
-    text = gw.chartdata(device, instance, day)
-    header, rows = parse_chart_csv(text)
-    if not rows:
+    """Fetch one local day and write hourly rows. Returns hours written.
+
+    Energy comes from the hours endpoint - the gateway's own accounting, not
+    our re-integration of minute samples. The minute export is fetched only
+    for per-hour peak and minimum voltage, which the energy rows lack.
+    """
+    hours_header, hours_rows = parse_chart_csv(
+        gw.chartdata(device, instance, day, "hours"))
+    energy = hours_to_energy(hours_header, hours_rows, cfg)
+    if day_is_empty(energy):
+        # No rows, or a day of all zeros. Either way the gateway holds nothing
+        # for this date, so do not spend a second request on the minutes.
         return 0
-    hourly = rows_to_hourly(header, rows, cfg)
+
+    minutes_header, minutes_rows = parse_chart_csv(
+        gw.chartdata(device, instance, day, "minutes"))
+    volts = minutes_to_voltage(minutes_header, minutes_rows, cfg)
+
     written = 0
-    for hour, agg in hourly.items():
-        written += history.put_hourly(
-            conn, hour, "battery", agg["mean_v"], agg["mean_a"],
-            agg["wh_in"], agg["wh_out"], agg["min_v"], agg["max_v"],
-            agg["n"], "insightlocal")
+    for hour in sorted(set(energy) | set(volts)):
+        v = volts.get(hour, {})
+        for dev, fields in energy.get(hour, {}).items():
+            is_battery = dev == "battery"
+            written += history.put_hourly(
+                conn, hour, dev,
+                v.get("mean_v") if is_battery else None,
+                v.get("mean_a") if is_battery else None,
+                fields.get("wh_in"), fields.get("wh_out"),
+                v.get("min_v") if is_battery else None,
+                v.get("max_v") if is_battery else None,
+                v.get("n") if is_battery else None,
+                "insightlocal")
+        # Voltage for an hour the energy export skipped is still worth keeping.
+        if v and "battery" not in energy.get(hour, {}):
+            written += history.put_hourly(
+                conn, hour, "battery", v["mean_v"], v["mean_a"], None, None,
+                v["min_v"], v["max_v"], v["n"], "insightlocal")
     conn.commit()
-    log.info("%s: %d minute rows -> %d hourly rows", day, len(rows), written)
+    log.info("%s: %d hour rows, %d minute rows -> %d hourly rows",
+             day, len(hours_rows), sum(x["n"] for x in volts.values()), written)
     return written
 
 
-def backfill(gw, conn, cfg, start=None, max_days=4000):
+def backfill(gw, conn, cfg, start=None, max_days=4000,
+             device=DEFAULT_DEVICE, instance=DEFAULT_INSTANCE):
     """Walk backwards a day at a time until the export runs dry."""
     day = start or (date.today() - timedelta(days=1))
     empty_streak = 0
     total_days = total_hours = 0
     while total_days < max_days:
-        hours = scrape_day(gw, conn, cfg, day)
+        hours = scrape_day(gw, conn, cfg, day, device, instance)
         if hours:
             empty_streak = 0
             total_days += 1
@@ -319,7 +480,11 @@ def discover(gw, cfg):
         facts["chartdata"][res] = {"ok": bool(header), "header": header,
                                    "rows": len(rows), "sample": rows[0] if rows else None}
         if res == "minutes" and header:
-            facts["columns"] = {k: header[i] for k, i in column_map(header).items()}
+            vi, ai, scale = _battery_columns(header, rows)
+            facts["columns"] = {
+                "volts": header[vi] if vi is not None else None,
+                "amps": header[ai] if ai is not None else None,
+                "scale": scale}
 
     log.info("probing device/instance combinations")
     for dev in DEVICE_CANDIDATES:
@@ -364,7 +529,7 @@ def write_doc(facts):
     a("")
     a("The InsightLocal UI is an AngularJS app served as one bundle, `/combox.js`.")
     a("Its \"export CSV\" button calls `csvService.saveCsv('chart_data.csv', ...)`")
-    a("over `chart.config.data.datasets[]` — it serialises a chart the browser")
+    a("over `chart.config.data.datasets[]` - it serialises a chart the browser")
     a("already holds, so there is no server-side CSV endpoint to call. The chart")
     a("itself is filled by `chartdataService.getChartData(device, instance, date)`,")
     a("and `batterySummaryService` calls it as `getChartData(\"system\", 0, ...)`.")
@@ -383,27 +548,31 @@ def write_doc(facts):
     a("")
     a("The gateway caps concurrent sessions and answers")
     a("`429 {\"status\": 429, \"description\": \"Maximum number of allowed users reached\"}`")
-    a("once they are exhausted — an open InsightLocal browser tab is enough to")
-    a("cause it. `scrape_gateway.py` always logs out in a `finally` block.")
+    a("once they are exhausted - an open InsightLocal browser tab is enough to")
+    a("cause it. The scraper always logs out in a `finally` block, and waits a 429")
+    a(f"out: it sleeps {RATE_LIMIT_SLEEP // 60} minutes and retries up to")
+    a(f"{RATE_LIMIT_RETRIES} times before giving up, so a full session queue does")
+    a("not throw away a long backfill.")
     a("")
-    a("## Chart data (the history source)")
+    a("## Chart data")
     a("")
     a("```")
-    a("GET /chartdata/<device>/<instance>/years/<Y>/months/<M>/days/<D>/minutes")
+    a("GET /chartdata/<device>/<instance>/<path for the resolution>")
     a("authToken: <session>")
     a("```")
     a("")
-    a("Returns CSV as `text/plain`, one local day per request. Lines starting `#`")
-    a("are comments; the first surviving line is the header. Other resolutions")
-    a("replace the last segment:")
+    a("Returns CSV as `text/plain`. Lines starting `#` are comments; the first")
+    a("surviving line is the header, whose columns are named by sysvar path.")
+    a("Each resolution truncates the path at a different depth - appending the")
+    a("resolution to the full day path gives 400 for days, months and years:")
     a("")
     a("| Resolution | Path tail |")
     a("|---|---|")
-    a("| minutes | `/years/<Y>/months/<M>/days/<D>/minutes` |")
-    a("| hours | `/years/<Y>/months/<M>/days/<D>/hours` |")
-    a("| days | `/years/<Y>/months/<M>/days/` |")
-    a("| months | `/years/<Y>/months/` |")
     a("| years | `/years/` |")
+    a("| months | `/years/<Y>/months/` |")
+    a("| days | `/years/<Y>/months/<M>/days/` |")
+    a("| hours | `/years/<Y>/months/<M>/days/<D>/hours` |")
+    a("| minutes | `/years/<Y>/months/<M>/days/<D>/minutes` |")
     a("")
     a("Observed on this gateway:")
     a("")
@@ -413,24 +582,49 @@ def write_doc(facts):
         if info.get("ok"):
             a(f"| {res} | yes | {len(info.get('header') or [])} | {info.get('rows')} |")
         else:
-            a(f"| {res} | no | — | {info.get('error', '')[:60]} |")
+            a(f"| {res} | no | - | {str(info.get('error', ''))[:60]} |")
     a("")
-    if facts.get("columns"):
-        a("### Minute-resolution columns used by the scraper")
-        a("")
-        a("| Quantity | Column |")
-        a("|---|---|")
-        for k, v in facts["columns"].items():
-            a(f"| {k} | `{v}` |")
-        a("")
-    hdr = (facts.get("chartdata", {}).get("minutes") or {}).get("header")
+    a("## Units")
+    a("")
+    a("Columns are integers and the parenthesised unit label cannot be trusted.")
+    a("Verified on 2026-08-27 by summing each hourly energy column and")
+    a("integrating the matching minute power column over the same day:")
+    a("")
+    a("| Column | Hourly sum | Minutes integrated | Ratio |")
+    a("|---|---|---|---|")
+    a("| `/SYS/LOAD/ENERGY_HOUR(kwh)` | 32469 | 32527 Wh | 0.998 |")
+    a("| `/SYS/PV_TOTAL/ENERGY_HOUR(kwh)` | 31659 | 31670 Wh | 1.000 |")
+    a("| `/SYS/GEN/ENERGY_HOUR(kwh)` | 4050 | 4053 Wh | 0.999 |")
+    a("")
+    a("So **`ENERGY_*(kwh)` values are Wh**, despite the label. Likewise")
+    a("`V(V)`, `I(A)` and `T(degC)` are scaled by 0.001 (raw 53400 is 53.4 V,")
+    a("raw -23960 is -23.96 A), while `SOC(%)` and `P(W)` are already in their")
+    a("stated units.")
+    a("")
+    hdr = (facts.get("chartdata", {}).get("hours") or {}).get("header")
     if hdr:
-        a("Full minute header as returned:")
+        a("### Hours header as returned")
         a("")
         a("```")
         a(", ".join(hdr))
         a("```")
         a("")
+    hdr = (facts.get("chartdata", {}).get("minutes") or {}).get("header")
+    if hdr:
+        a("### Minutes header as returned")
+        a("")
+        a("```")
+        a(", ".join(hdr))
+        a("```")
+        a("")
+    a("`/SYS/PV/ENERGY_HOUR` and `/SYS/PV_TOTAL/ENERGY_HOUR` carry identical")
+    a("values; the scraper reads `PV_TOTAL`. Five battery banks always appear in")
+    a("the minute header and the unused ones are all zeros, so the scraper takes")
+    a("the first bank with a non-zero voltage rather than assuming `BATT1`.")
+    a("")
+    a("The `days` response is month-scoped and repeats each date about 25 times,")
+    a("so it is not a shortcut for a whole backfill; `hours` per day is the source.")
+    a("")
     a("## Devices that return charts")
     a("")
     if facts.get("devices"):
@@ -452,8 +646,8 @@ def write_doc(facts):
     a("```")
     a("")
     a("Returns `{\"values\": [{\"name\", \"value\", \"quality\"}], \"OTK\": \"<next>\"}`.")
-    a("The agent does not depend on these — its energy counters come from Modbus")
-    a("503 — but `--discover` records them as a cross-check. Observed:")
+    a("The agent does not depend on these - its energy counters come from Modbus")
+    a("503 - but `--discover` records them as a cross-check. Observed:")
     a("")
     a("```json")
     a(json.dumps(facts.get("sysvars", {}), indent=2))
@@ -461,10 +655,31 @@ def write_doc(facts):
     a("")
     a("## What the scraper stores")
     a("")
-    a("Minute rows are parsed and discarded. Only per-hour aggregates reach")
-    a("`hourly` (device `battery`, source `insightlocal`): mean/min/max volts,")
-    a("mean amps, and Wh in/out integrated as `V * A / 60` per minute row. A live")
-    a("`live` row for the same hour always wins over a scraped one.")
+    a("`--backfill` walks backwards one day at a time. For each day:")
+    a("")
+    a("1. **hours** is fetched first and is the primary source for `hourly`.")
+    a("   These are the gateway's own energy figures, not our re-integration of")
+    a("   power samples. Columns map to device rows as:")
+    a("")
+    a("   | Column | Row | Field |")
+    a("   |---|---|---|")
+    a("   | `/SYS/LOAD/ENERGY_HOUR` | `load` | `wh_out` |")
+    a("   | `/SYS/PV_TOTAL/ENERGY_HOUR` | `solar` | `wh_in` |")
+    a("   | `/SYS/GEN/ENERGY_HOUR` | `gen` | `wh_in` |")
+    a("   | `/SYS/BATT_CHG/ENERGY_HOUR` | `battery` | `wh_in` |")
+    a("   | `/SYS/BATT_INV/ENERGY_HOUR` | `battery` | `wh_out` |")
+    a("")
+    a("2. **minutes** is fetched only for what the energy rows cannot give:")
+    a("   per-hour mean, minimum and maximum pack voltage, and mean current.")
+    a("   Minute rows are parsed and discarded; they are never stored.")
+    a("")
+    a("A day whose energy columns are all zero is treated as empty: the minute")
+    a("request is skipped, and the walk stops after")
+    a(f"{EMPTY_DAY_TOLERANCE} consecutive empty days so a gap in the gateway's")
+    a("history does not end it early.")
+    a("")
+    a("A `live` row always wins over a scraped row for the same hour, so a")
+    a("backfill can be re-run over a period the agent already sampled itself.")
     a("")
     os.makedirs(os.path.dirname(DOC_PATH), exist_ok=True)
     with open(DOC_PATH, "w") as f:

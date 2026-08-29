@@ -87,6 +87,11 @@ The guard refuses **every** write until two conditions hold (rule 6):
   this is what `scrape_gateway.py --backfill` is for
 - `samples` covers at least `learning_live_days` (7) consecutive days
 
+The gateway's `years` endpoint lists 2025 and 2026, so a full backfill reaches
+far enough back to satisfy the first condition. `--backfill` takes its hourly
+energy from the gateway's own per-hour accounting and uses the minute export
+only for per-hour peak and minimum voltage; see `docs/gateway_api.md`.
+
 Everything else runs meanwhile: the agent samples, forecasts, plans, and says
 what it would have done. The plan record ends `applied: no (learning phase)`.
 
