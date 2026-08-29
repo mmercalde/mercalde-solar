@@ -83,9 +83,9 @@ class Agent:
     def conn(self):
         return self.connection()
 
-    def tools(self):
+    def tools(self, policy=None):
         return toolsmod.Tools(self.connection, self.cfg, guard=self.guard,
-                              dry_run=self.dry_run)
+                              dry_run=self.dry_run, policy=policy)
 
     # --- facts the plan record is built from --------------------------------
 
@@ -155,6 +155,7 @@ class Agent:
             "summary_24h": history.summary(self.conn, 24, now=now),
             "thresholds": toolsmod.thresholds_from_config(live),
             "intended": self.guard.intended(),
+            "owner_baseline": self.guard.owner_baseline(),
             "charge_rates": charge_rates, "run_window_h": run_window_h,
         }
         facts["policy"] = policymod.evaluate(self.cfg, facts)
@@ -271,6 +272,11 @@ class Agent:
             f"  Kubota start {th['kub_start']} stop {th['kub_stop']}"
             f" (max runtime {f['config']['kubota']['maxRuntime']} min)",
             f"  defaults are {self.cfg['default_start']} / {self.cfg['default_stop']}",
+            *([f"  The owner set MEP {ob['mep_start']}/{ob['mep_stop']}, Kubota "
+               f"{ob['kub_start']}/{ob['kub_stop']} by hand. Those are the "
+               f"baseline and the values to return to, not the config "
+               f"defaults. Only a POLICY rule that fires may move them."]
+              if (ob := f.get("owner_baseline")) else []),
             "",
             "LAST 24 HOURS",
             f"  voltage min {_fmt(s['min_v'], 2)} max {_fmt(s['max_v'], 2)} "
@@ -393,7 +399,7 @@ class Agent:
         except Exception as e:                       # noqa: BLE001
             log.warning("store update failed, continuing: %s", e)
 
-        tools = self.tools()
+        tools = self.tools(policy=facts["policy"])
         try:
             text, write_result = self.run_model(
                 prompts.system_prompt(), self.tick_prompt(facts), tools)

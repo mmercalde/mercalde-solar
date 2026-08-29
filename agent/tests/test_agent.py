@@ -355,6 +355,18 @@ def test_an_overruled_rule_is_not_audited_as_a_miss(a, cfg, conn):
     assert policy.misses(f["policy"], text, None) == []
 
 
+def test_the_prompt_names_the_owners_baseline_when_there_is_one(a, cfg):
+    f = prompt_facts(cfg, owner_baseline={"mep_start": 52.0, "mep_stop": 55.0,
+                                          "kub_start": 52.0, "kub_stop": 55.0})
+    prompt = a.tick_prompt(f)
+    assert "The owner set MEP 52.0/55.0, Kubota 52.0/55.0 by hand" in prompt
+    assert "not the config defaults" in prompt
+
+
+def test_the_prompt_says_nothing_about_a_baseline_that_does_not_exist(a, cfg):
+    assert "by hand" not in a.tick_prompt(prompt_facts(cfg))
+
+
 # --- the learned voltage/SOC curve reaches the model ------------------------
 
 def test_the_tick_prompt_states_soc_at_the_start_threshold(a, cfg):

@@ -145,11 +145,14 @@ class Tools:
     Passing None refuses every write, which is the safe default.
     """
 
-    def __init__(self, conn, cfg, guard=None, dry_run=False):
+    def __init__(self, conn, cfg, guard=None, dry_run=False, policy=None):
         self._conn = conn
         self.cfg = cfg
         self.guard = guard
         self.dry_run = dry_run
+        # This tick's POLICY evaluation, so the guard can tell a rule-driven
+        # change from a drift back to config defaults. None outside a tick.
+        self.policy = policy
         self.model = loadmodel.LoadModel(conn, cfg)
         self.calls = []
 
@@ -284,7 +287,7 @@ class Tools:
             return {"applied": False,
                     "reason": "no guard is attached, so no write is permitted"}
         values = {k: v for k, v in args.items() if k != "reason"}
-        allowed, why = self.guard.check(**args)
+        allowed, why = self.guard.check(policy=self.policy, **args)
         if not allowed:
             # The values go back too: a refusal is the guard's decision, not a
             # failure to propose, and the plan record scores those separately.

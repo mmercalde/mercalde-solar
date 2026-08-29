@@ -15,12 +15,14 @@ which carries the meaning the rule intends. `lastUpdate` is still recorded.
 import json
 import logging
 import os
+import re
 import time
 from datetime import datetime, timedelta
 
 import config
 import history
 import loadmodel
+import policy as policymod
 
 log = logging.getLogger(__name__)
 
@@ -33,6 +35,12 @@ EPS = 0.05
 
 GEN_KEYS = (("mep", "mep_start", "mep_stop", "mep803a"),
             ("kubota", "kub_start", "kub_stop", "kubota"))
+
+# "Returned to default" and its cousins. A reason that says only this explains
+# nothing: it names a destination, not a cause.
+RESTORE_DEFAULT_RE = re.compile(
+    r"\b(return(?:ing|ed|s)?|restor(?:e|es|ing|ed)|revert(?:ing|ed|s)?|back)\b"
+    r"[^.;]{0,40}?\bdefaults?\b", re.IGNORECASE)
 
 
 class Guard:
@@ -55,7 +63,8 @@ class Guard:
                 return json.load(f)
         except (OSError, ValueError):
             return {"intended": None, "last_write_ts": 0,
-                    "override_until": 0, "override_adopted": None}
+                    "override_until": 0, "override_adopted": None,
+                    "owner_baseline": None}
 
     def _save_state(self):
         os.makedirs(os.path.dirname(self.state_path), exist_ok=True)
@@ -78,10 +87,30 @@ class Guard:
         """Thresholds the agent means to be in force; defaults until it writes."""
         if self.state.get("intended"):
             return dict(self.state["intended"])
+        return self._config_defaults()
+
+    def _config_defaults(self):
         return {"mep_start": self.cfg["default_start"],
                 "mep_stop": self.cfg["default_stop"],
                 "kub_start": self.cfg["default_start"],
                 "kub_stop": self.cfg["default_stop"]}
+
+    def owner_baseline(self):
+        """The thresholds the owner last set by hand, if they ever have."""
+        b = self.state.get("owner_baseline")
+        return dict(b) if b else None
+
+    def baseline(self):
+        """The values a change returns to once its reason has passed.
+
+        POLICY 6 says to return to default. Once the owner has set the
+        thresholds themselves, theirs are the default; config's are not. The
+        6-hour stand-down expiring does not repeal the owner's decision, it
+        only ends the pause - which is what went wrong at 04:10 on the first
+        live night, when the agent wrote the owner's 55.0 stops back to 56.0
+        with the reason "returned to default".
+        """
+        return self.owner_baseline() or self._config_defaults()
 
     # --- helpers ------------------------------------------------------------
 
@@ -123,8 +152,13 @@ class Guard:
     # --- the rules ----------------------------------------------------------
 
     def check(self, mep_start, mep_stop, kub_start, kub_stop, reason,
-              now=None, status=None):
-        """Return (allowed, reason). Always audited, pass or refuse."""
+              now=None, status=None, policy=None):
+        """Return (allowed, reason). Always audited, pass or refuse.
+
+        `policy` is this tick's rule evaluation from policy.py. Rule 8 needs
+        it to tell a rule-driven change from a drift back to config defaults.
+        None means no rule is known to fire, which is the safe reading.
+        """
         now = int(now or time.time())
         want = {"mep_start": float(mep_start), "mep_stop": float(mep_stop),
                 "kub_start": float(kub_start), "kub_stop": float(kub_stop)}
@@ -138,10 +172,10 @@ class Guard:
         v = data.get("batteryVoltage")
         soc = data.get("battSocBM")
 
-        allowed, why = self._evaluate(want, data, live, v, now)
+        allowed, why = self._evaluate(want, data, live, v, now, reason, policy)
         return self._audit(args, allowed, why, v, soc, now)
 
-    def _evaluate(self, want, data, live, v, now):
+    def _evaluate(self, want, data, live, v, now, reason="", policy=None):
         # Rule 7: stale data. Nothing below can be trusted without this.
         if not data.get("battMonitorOnline"):
             return False, ("battery monitor is offline, so state of charge and "
@@ -171,6 +205,7 @@ class Guard:
         if self.state.get("intended") and not self._same(live_now, self.state["intended"]):
             self.state["override_until"] = now + OWNER_OVERRIDE_SECONDS
             self.state["override_adopted"] = live_now
+            self.state["owner_baseline"] = dict(live_now)
             self.state["intended"] = dict(live_now)
             self._save_state()
             log.warning("owner changed thresholds by hand; adopting %s and "
@@ -184,6 +219,31 @@ class Guard:
             mins = int((self.state["override_until"] - now) / 60)
             return False, (f"standing down after an owner threshold change; "
                            f"{mins} minutes left")
+
+        # Rule 8, second half: the owner's values are the baseline once they
+        # have set them. The stand-down expiring ends the pause, not their
+        # decision. Only a computed POLICY rule may move off that baseline,
+        # and when its reason has passed the return is to the baseline, not to
+        # config's defaults.
+        fired = policymod.firing(policy or [])
+        owner = self.owner_baseline()
+        if RESTORE_DEFAULT_RE.search(reason or "") and not fired:
+            back_to = self.baseline()
+            if not self._same(want, back_to):
+                return False, (
+                    f"\"restore default\" is not a reason on its own, and "
+                    f"{want['mep_start']}/{want['mep_stop']}, "
+                    f"{want['kub_start']}/{want['kub_stop']} are not the values "
+                    f"to return to; those are MEP {back_to['mep_start']}/"
+                    f"{back_to['mep_stop']}, Kubota {back_to['kub_start']}/"
+                    f"{back_to['kub_stop']}")
+        if owner and not self._same(want, owner) and not fired:
+            return False, (
+                f"the owner set MEP {owner['mep_start']}/{owner['mep_stop']}, "
+                f"Kubota {owner['kub_start']}/{owner['kub_stop']} by hand, and "
+                f"those are the baseline. Only a POLICY rule that fires may "
+                f"move them, and none fires; the agent may always return to "
+                f"them")
 
         # Rule 1: bounds.
         smin, smax = self.cfg["start_voltage_min"], self.cfg["start_voltage_max"]

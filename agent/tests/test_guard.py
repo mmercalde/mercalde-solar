@@ -9,6 +9,7 @@ import pytest
 import config as cfgmod
 import guard as guardmod
 import history
+import policy
 
 
 def ts_at(cfg, day, hour, minute=0):
@@ -366,6 +367,123 @@ def test_the_agents_own_write_is_not_an_owner_edit(ready, cfg, now):
     st = make_status(cfg, now, mep_stop=56.0, kub_stop=56.0)
     ok, why = ready.check(52.0, 57.0, 52.0, 57.0, "x", now=now, status=st)
     assert ok, why
+
+
+# --- rule 8: the owner's values are the baseline ----------------------------
+
+OWNER = {"mep_start": 52.0, "mep_stop": 55.0,
+         "kub_start": 52.0, "kub_stop": 55.0}
+
+
+@pytest.fixture
+def after_owner_edit(ready, now):
+    """The owner set 55.0 stops by hand; the 6 h stand-down has just expired."""
+    ready.state.update(intended=dict(OWNER), owner_baseline=dict(OWNER),
+                       override_until=now - 60, last_write_ts=now - 8 * 3600)
+    return ready
+
+
+def owner_status(cfg, now):
+    return make_status(cfg, now, mep_stop=55.0, kub_stop=55.0)
+
+
+def a_firing_rule(cfg, now):
+    """A real evaluation in which POLICY 4 fires and nothing else does."""
+    return policy.evaluate(cfg, {
+        "voltage": 54.0, "peak_today": 55.0, "sunrise_ts": now + 8 * 3600,
+        "projection": {"reached": now + 4 * 3600}, "tomorrow_cloud": 20,
+        "thresholds": dict(OWNER),
+        "charge_rates": {"mep": {"v_per_h": 1.6}, "kubota": {"v_per_h": 1.0}},
+        "run_window_h": {"mep": 2.0, "kubota": 2.0}})
+
+
+def test_an_owner_edit_is_remembered_as_the_baseline(ready, cfg, now):
+    ready.note_write({"mep_start": 52.0, "mep_stop": 56.0,
+                      "kub_start": 52.0, "kub_stop": 56.0}, now=now - 7200)
+    ready.check(52.0, 57.0, 52.0, 57.0, "x", now=now,
+                status=make_status(cfg, now, mep_stop=55.0, kub_stop=55.0))
+    assert ready.owner_baseline() == OWNER
+    assert ready.baseline() == OWNER, "not the config defaults"
+
+
+def test_no_owner_edit_means_the_baseline_is_config(ready, cfg):
+    assert ready.owner_baseline() is None
+    assert ready.baseline() == {"mep_start": cfg["default_start"],
+                                "mep_stop": cfg["default_stop"],
+                                "kub_start": cfg["default_start"],
+                                "kub_stop": cfg["default_stop"]}
+
+
+def test_the_stand_down_expiring_does_not_repeal_the_owners_change(after_owner_edit,
+                                                                   cfg, now):
+    """04:10 on the first live night, exactly: the stand-down ended and the
+    agent wrote the owner's 55.0 stops back to 56.0 with no rule firing."""
+    ok, why = after_owner_edit.check(52.0, 56.0, 52.0, 56.0, "returned to default",
+                                     now=now, status=owner_status(cfg, now))
+    assert not ok
+    assert "not a reason on its own" in why
+    assert "MEP 52.0/55.0" in why, "it must say what the values to return to are"
+
+
+def test_moving_off_the_baseline_needs_a_firing_rule(after_owner_edit, cfg, now):
+    ok, why = after_owner_edit.check(52.0, 56.0, 52.0, 56.0, "seems better",
+                                     now=now, status=owner_status(cfg, now))
+    assert not ok
+    assert "the owner set MEP 52.0/55.0, Kubota 52.0/55.0 by hand" in why
+    assert "none fires" in why
+
+
+def test_a_firing_rule_may_move_off_the_baseline(after_owner_edit, cfg, now):
+    ok, why = after_owner_edit.check(
+        55.0, 57.0, 52.0, 56.0, "POLICY 4 solo top-up", now=now,
+        status=owner_status(cfg, now), policy=a_firing_rule(cfg, now))
+    assert ok, why
+
+
+def test_the_return_is_to_the_owners_values_not_the_config_defaults(after_owner_edit,
+                                                                    cfg, now):
+    """The rule-driven change is over; POLICY 6's "default" is the owner's."""
+    st = make_status(cfg, now, mep_start=55.0, mep_stop=57.0, kub_stop=56.0)
+    after_owner_edit.state["intended"] = {"mep_start": 55.0, "mep_stop": 57.0,
+                                          "kub_start": 52.0, "kub_stop": 56.0}
+    ok, why = after_owner_edit.check(52.0, 55.0, 52.0, 55.0,
+                                     "the top-up is done, back to default",
+                                     now=now, status=st)
+    assert ok, why
+
+
+def test_restore_default_is_never_a_reason_on_its_own(ready, cfg, now):
+    """With no owner edit at all, it still may not name a destination as a
+    cause when that destination is not the values to return to."""
+    ok, why = ready.check(52.0, 54.5, 52.0, 54.5, "restoring the defaults",
+                          now=now, status=make_status(cfg, now, mep_stop=56.0,
+                                                      kub_stop=56.0))
+    assert not ok and "not a reason on its own" in why
+
+
+def test_a_genuine_return_to_the_config_defaults_is_allowed(ready, cfg, now):
+    ok, why = ready.check(52.0, 56.0, 52.0, 56.0, "the storm has passed; "
+                          "returning to the defaults", now=now,
+                          status=make_status(cfg, now, mep_stop=57.0, kub_stop=57.0))
+    assert ok, why
+
+
+def test_a_firing_rule_outranks_the_restore_default_wording(after_owner_edit, cfg,
+                                                            now):
+    ok, why = after_owner_edit.check(
+        55.0, 57.0, 52.0, 56.0, "POLICY 4 top-up; the other returns to default",
+        now=now, status=owner_status(cfg, now), policy=a_firing_rule(cfg, now))
+    assert ok, why
+
+
+def test_the_owner_baseline_survives_a_restart(conn, cfg, ready, now, tmp_path,
+                                               monkeypatch):
+    monkeypatch.undo()       # let this guard actually persist its state
+    g = guardmod.Guard(conn, cfg, state_path=str(tmp_path / "state2.json"))
+    g.state.update(owner_baseline=dict(OWNER))
+    g._save_state()
+    reborn = guardmod.Guard(conn, cfg, state_path=str(tmp_path / "state2.json"))
+    assert reborn.baseline() == OWNER
 
 
 # --- rule 9: audit ----------------------------------------------------------
