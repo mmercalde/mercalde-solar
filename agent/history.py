@@ -358,20 +358,20 @@ def rollup_hourly(conn, cfg, since=None):
         mean_a = sum(b["a"]) / len(b["a"]) if b["a"] else None
         min_v = min(b["v"]) if b["v"] else None
         max_v = max(b["v"]) if b["v"] else None
-        written += _put_hourly(conn, h, "battery", mean_v, mean_a,
+        written += put_hourly(conn, h, "battery", mean_v, mean_a,
                                b["batt_in"], b["batt_out"], min_v, max_v, b["n"], "live")
-        written += _put_hourly(conn, h, "load", None, None, None, b["load"],
+        written += put_hourly(conn, h, "load", None, None, None, b["load"],
                                None, None, b["n"], "live")
-        written += _put_hourly(conn, h, "solar", None, None, b["solar"], None,
+        written += put_hourly(conn, h, "solar", None, None, b["solar"], None,
                                None, None, b["n"], "live")
         for dev, _ in POWER_DEVICES:
-            written += _put_hourly(conn, h, dev, None, None, b[dev], None,
+            written += put_hourly(conn, h, dev, None, None, b[dev], None,
                                    None, None, b["n"], "live")
     conn.commit()
     return written
 
 
-def _put_hourly(conn, hour_ts, device, mean_v, mean_a, wh_in, wh_out,
+def put_hourly(conn, hour_ts, device, mean_v, mean_a, wh_in, wh_out,
                 min_v, max_v, n, source):
     existing = conn.execute(
         "SELECT source FROM hourly WHERE hour_ts=? AND device=?",
