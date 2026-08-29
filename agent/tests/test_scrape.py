@@ -126,9 +126,10 @@ def test_volts_and_amps_are_scaled_by_a_thousand(cfg):
 def test_an_unused_battery_bank_is_skipped(cfg):
     """BATT2..BATT5 are always in the header and always zero."""
     header, rows = sg.parse_chart_csv(MINUTES_CSV)
-    vi, ai, scale = sg._battery_columns(header, rows)
+    vi, ai, si, scale = sg._battery_columns(header, rows)
     assert header[vi] == "/SYS/BATT1/V(V)"
     assert header[ai] == "/SYS/BATT1/I(A)"
+    assert header[si] == "/SYS/BATT1/SOC(%)"
     assert scale == sg.MILLI
 
 
@@ -136,8 +137,9 @@ def test_a_later_bank_is_used_when_the_first_is_empty(cfg):
     csv = (MINUTES_HEADER + "\n"
            "2026-08-27 00:00:00,1246,0,0,0,0,0,0,53400,-23960,29500,81\n")
     header, rows = sg.parse_chart_csv(csv)
-    vi, _, _ = sg._battery_columns(header, rows)
+    vi, _, si, _ = sg._battery_columns(header, rows)
     assert header[vi] == "/SYS/BATT2/V(V)"
+    assert header[si] == "/SYS/BATT2/SOC(%)"
 
 
 def test_friendly_labels_still_parse(cfg):
@@ -269,3 +271,75 @@ def test_a_non_429_response_is_returned_immediately(cfg):
     gw = make_gateway(cfg, slept)
     assert gw._retry_429("test", lambda: Resp(500)).status_code == 500
     assert slept == []
+
+
+# --- voltage/SOC histogram --------------------------------------------------
+
+SOC_CSV = f"""\
+{MINUTES_HEADER}
+2026-08-27 00:00:00,1246,0,0,52000,-24000,29500,40,0,0,0,0
+2026-08-27 00:01:00,1246,0,0,52000,-24000,29500,40,0,0,0,0
+2026-08-27 00:02:00,1246,0,0,52020,-24000,29500,41,0,0,0,0
+2026-08-27 00:03:00,1246,0,0,55000,60000,29500,90,0,0,0,0
+2026-08-27 00:04:00,1246,4000,0,52000,-24000,29500,99,0,0,0,0
+"""
+
+
+def test_soc_counts_bin_by_voltage(cfg):
+    header, rows = sg.parse_chart_csv(SOC_CSV)
+    counts = sg.minutes_to_soc_counts(header, rows)
+    # 52.000 and 52.020 fall in the same 0.05 V bin.
+    assert counts == {(history.soc_bin(52.0), 40): 2,
+                      (history.soc_bin(52.02), 41): 1}
+
+
+def test_charging_minutes_are_excluded(cfg):
+    """A charging pack sits above its resting voltage."""
+    header, rows = sg.parse_chart_csv(SOC_CSV)
+    counts = sg.minutes_to_soc_counts(header, rows)
+    assert not any(soc == 90 for _, soc in counts), "the charging row at 55 V"
+
+
+def test_generator_minutes_are_excluded(cfg):
+    header, rows = sg.parse_chart_csv(SOC_CSV)
+    counts = sg.minutes_to_soc_counts(header, rows)
+    assert not any(soc == 99 for _, soc in counts), "the row with GEN/P > 0"
+
+
+def test_no_soc_column_yields_nothing(cfg):
+    header, rows = sg.parse_chart_csv(
+        "TIME,/SYS/BATT1/V(V),/SYS/BATT1/I(A)\n2026-08-27 00:00:00,52000,-24000\n")
+    assert sg.minutes_to_soc_counts(header, rows) == {}
+
+
+def test_recording_a_day_twice_does_not_double_count(conn, cfg):
+    header, rows = sg.parse_chart_csv(SOC_CSV)
+    counts = sg.minutes_to_soc_counts(header, rows)
+    for _ in range(3):
+        history.record_soc_observations(conn, "2026-08-27", counts)
+    total = conn.execute("SELECT SUM(n) n FROM soc_curve").fetchone()["n"]
+    assert total == 3, "two at 52.00 plus one at 52.02, however often rescraped"
+
+
+def test_scrape_day_fills_the_soc_curve(conn, cfg):
+    class FakeGateway:
+        def chartdata(self, device, instance, day, resolution="minutes"):
+            return HOURS_CSV if resolution == "hours" else SOC_CSV
+
+    import datetime as dt
+    sg.scrape_day(FakeGateway(), conn, cfg, dt.date(2026, 8, 27))
+    span = history.soc_curve_span(conn)
+    assert span is not None and span[2] == 3
+
+
+def test_soc_only_skips_the_hours_request(conn, cfg):
+    calls = []
+
+    class FakeGateway:
+        def chartdata(self, device, instance, day, resolution="minutes"):
+            calls.append(resolution)
+            return SOC_CSV
+
+    import datetime as dt
+    n = sg.scrape_soc_only(FakeGateway(), conn, cfg, dt.date(2026, 8, 27))
+    assert calls == ["minutes"] and n == 3

@@ -167,6 +167,116 @@ def test_soc_for_voltage_needs_enough_observations(conn, cfg, lm):
     assert lm.soc_for_voltage(52.0) is None
 
 
+# --- the curve learned from backfilled history ------------------------------
+
+def scraped(conn, points, day="2025-08-01"):
+    """points: {volts: (soc, n)} written as the scraper would."""
+    counts = {(history.soc_bin(v), soc): n for v, (soc, n) in points.items()}
+    history.record_soc_observations(conn, day, counts)
+
+
+def test_the_curve_is_learned_from_the_backfill_alone(conn, cfg, lm):
+    """The live table is empty; the projection must still know SOC at 52 V."""
+    scraped(conn, {52.0: (40, 500), 53.0: (60, 500), 54.0: (80, 500)})
+    assert lm.soc_for_voltage(52.0) == 40
+    assert conn.execute("SELECT COUNT(*) c FROM samples").fetchone()["c"] == 0
+
+
+def test_soc_at_the_start_threshold_is_available_from_day_one(conn, cfg, lm):
+    scraped(conn, {51.8: (36, 300), 52.2: (44, 300), 53.0: (60, 300)})
+    soc = lm.soc_for_voltage(cfg["default_start"])
+    assert soc == pytest.approx(40.0, abs=0.5), "interpolated between 51.8 and 52.2"
+    status = lm.soc_curve_status()
+    assert status["start_threshold_v"] == cfg["default_start"]
+    assert status["soc_at_start_threshold"] == pytest.approx(40.0, abs=0.5)
+
+
+def test_the_curve_interpolates_between_observed_bins(conn, cfg, lm):
+    scraped(conn, {52.0: (40, 200), 54.0: (80, 200)})
+    assert lm.soc_for_voltage(53.0) == pytest.approx(60.0, abs=0.5)
+
+
+def test_the_curve_will_not_extrapolate_beyond_what_it_saw(conn, cfg, lm):
+    scraped(conn, {53.0: (60, 200), 54.0: (80, 200)})
+    assert lm.soc_for_voltage(50.0) is None
+    assert lm.soc_for_voltage(57.0) is None
+    # Within the half-bin rounding margin the endpoint still stands.
+    assert lm.soc_for_voltage(52.98) == 60
+
+
+def test_live_and_scraped_observations_are_pooled(conn, cfg, lm):
+    """Both are the same shunt, so they weigh the same."""
+    scraped(conn, {52.0: (40, 8)})
+    assert lm.soc_for_voltage(52.0) is None, "8 observations is under the floor"
+    base = ts_at(cfg, "2026-08-20", 2)
+    for i in range(4):
+        add_sample(conn, cfg, base + i * 60, 52.0, 40, -1200)
+    assert lm.soc_for_voltage(52.0) == 40, "12 pooled observations clears it"
+
+
+def test_a_thin_bin_is_dropped_from_the_curve(conn, cfg, lm):
+    scraped(conn, {52.0: (40, 500), 53.0: (99, 2), 54.0: (80, 500)})
+    volts = [v for v, _, _ in lm.voltage_soc_curve()]
+    assert 53.0 not in [round(v, 2) for v in volts]
+    # and the outlier does not bend the interpolation
+    assert lm.soc_for_voltage(53.0) == pytest.approx(60.0, abs=0.5)
+
+
+def test_the_median_resists_an_outlier_within_a_bin(conn, cfg, lm):
+    counts = {(history.soc_bin(52.0), 40): 500, (history.soc_bin(52.0), 5): 40}
+    history.record_soc_observations(conn, "2025-08-01", counts)
+    assert lm.soc_for_voltage(52.0) == 40
+
+
+def test_curve_status_reports_its_span(conn, cfg, lm):
+    scraped(conn, {52.0: (40, 100), 55.0: (90, 100)})
+    st = lm.soc_curve_status()
+    assert st["points"] == 2
+    assert st["volts_low"] == 52.0 and st["volts_high"] == 55.0
+    assert st["observations"] == 200 and st["scraped_observations"] == 200
+
+
+def test_no_history_reports_no_curve(lm):
+    st = lm.soc_curve_status()
+    assert st["points"] == 0 and st["soc_at_start_threshold"] is None
+
+
+def test_projection_works_from_backfill_without_live_soc(conn, cfg, lm, monkeypatch):
+    """The reported bug: 483 days of history, yet no SOC at 52.0 V."""
+    monkeypatch.setattr(weather, "hourly", lambda *a, **k: [])
+    build_load_history(conn, cfg, days=30, start="2026-08-01", night_wh=1000)
+    scraped(conn, {52.0: (50, 900), 54.0: (75, 900)})
+    base = ts_at(cfg, "2026-08-20", 22)
+    # Live samples supply only the present state and the pack size.
+    for i in range(20):
+        add_sample(conn, cfg, base + i * 60, 54.0, 60, -1000, ah=1200)
+    p = lm.project_voltage(52.0, now=base + 1300)
+    assert p["reached"] is not None, p.get("reason")
+    assert p["soc_target"] == 50
+
+
+def test_the_projection_says_when_the_curve_is_too_narrow(conn, cfg, lm, monkeypatch):
+    monkeypatch.setattr(weather, "hourly", lambda *a, **k: [])
+    scraped(conn, {55.0: (85, 400), 56.0: (95, 400)})
+    base = ts_at(cfg, "2026-08-20", 22)
+    for i in range(20):
+        add_sample(conn, cfg, base + i * 60, 55.5, 90, -1000, ah=1200)
+    p = lm.project_voltage(52.0, now=base)
+    assert p["reached"] is None
+    assert "only covers 55.0-56.0 V" in p["reason"]
+
+
+def test_with_no_curve_at_all_the_projection_points_at_the_backfill(conn, cfg, lm,
+                                                                    monkeypatch):
+    monkeypatch.setattr(weather, "hourly", lambda *a, **k: [])
+    base = ts_at(cfg, "2026-08-20", 22)
+    # Too few readings for any bin to qualify, so there is no curve at all.
+    for i in range(4):
+        add_sample(conn, cfg, base + i * 60, 54.0, 60, -1000, ah=1200)
+    p = lm.project_voltage(52.0, now=base)
+    assert p["reached"] is None and "--backfill" in p["reason"]
+
+
 def test_capacity_from_ah_remaining(conn, cfg, lm):
     base = ts_at(cfg, "2026-08-20", 2)
     for i in range(20):
@@ -285,3 +395,35 @@ def test_gate_opens_when_both_conditions_hold(conn, cfg, lm):
     for d in range(1, 9):
         add_sample(conn, cfg, ts_at(cfg, f"2026-08-{d:02d}", 12), 54.0, 80, -1000)
     assert lm.learning_status(now=now)["open"]
+
+
+# --- the curve must not turn back on itself ---------------------------------
+
+def test_the_curve_is_forced_monotonic(conn, cfg, lm):
+    """Observed live: surface charge put 54.1 V at 88% and 55.6 V at 82%.
+    SOC cannot fall as voltage rises."""
+    scraped(conn, {54.1: (88, 5795), 54.85: (84, 2326),
+                   55.6: (82, 2320), 56.35: (85, 1574), 57.1: (88, 2093)})
+    curve = lm.voltage_soc_curve()
+    socs = [s for _, s, _ in curve]
+    assert socs == sorted(socs), f"not monotonic: {socs}"
+
+
+def test_an_already_monotonic_curve_is_left_alone(conn, cfg, lm):
+    scraped(conn, {52.0: (40, 100), 53.0: (60, 100), 54.0: (80, 100)})
+    assert [round(s) for _, s, _ in lm.voltage_soc_curve()] == [40, 60, 80]
+
+
+def test_pooling_is_weighted_by_observations(conn, cfg, lm):
+    """A bin with far more observations should dominate the merged value."""
+    scraped(conn, {53.0: (90, 1000), 54.0: (10, 10)})
+    socs = [s for _, s, _ in lm.voltage_soc_curve()]
+    assert socs[0] == socs[1], "the inversion is pooled into one level"
+    assert socs[0] > 80, f"the 1000-observation bin should dominate: {socs[0]}"
+
+
+def test_monotonicity_does_not_disturb_the_low_end(conn, cfg, lm):
+    """The dip is above 54 V; the start threshold must keep its own value."""
+    scraped(conn, {51.85: (77, 2164), 52.6: (80, 3197), 53.35: (83, 4934),
+                   54.1: (88, 5795), 54.85: (84, 2326), 55.6: (82, 2320)})
+    assert lm.soc_for_voltage(52.0) == pytest.approx(77.4, abs=0.5)

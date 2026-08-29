@@ -115,6 +115,7 @@ class Agent:
         projection = self.model.project_voltage(52.0, now=now)
         drawdown = self.model.overnight_drawdown(now=now)
         gate = self.model.learning_status(now=now)
+        soc_curve = self.model.soc_curve_status()
 
         tomorrow_cloud = None
         est_solar = None
@@ -134,7 +135,7 @@ class Agent:
             "peak_today": peak_today,
             "weather": wx, "sunrise_ts": sunrise_ts,
             "forecast": forecast, "projection": projection,
-            "drawdown": drawdown, "gate": gate,
+            "drawdown": drawdown, "gate": gate, "soc_curve": soc_curve,
             "tomorrow_cloud": tomorrow_cloud, "est_solar": est_solar,
             "summary_24h": history.summary(self.conn, 24, now=now),
             "thresholds": toolsmod.thresholds_from_config(live),
@@ -268,6 +269,10 @@ class Agent:
         else:
             parts.append(f"  pack reaches 52.0 V: not projected "
                          f"({proj.get('reason', 'unknown')})")
+        sc = f["soc_curve"]
+        if sc.get("soc_at_start_threshold") is not None:
+            parts.append(f"  learned: {sc['start_threshold_v']} V is about "
+                         f"{sc['soc_at_start_threshold']}% SOC")
         if wx.get("tomorrow"):
             parts.append(f"  tomorrow: {f['tomorrow_cloud']}% daylight cloud, "
                          f"max {wx['tomorrow']['max_temp_c']} C")
@@ -367,6 +372,7 @@ class Agent:
             "thresholds": facts["thresholds"],
             "gate_open": facts["gate"]["open"],
             "projection": facts["projection"],
+            "soc_curve": facts["soc_curve"],
             "write": write_result,
             "dry_run": self.dry_run,
         }, ts=facts["now"])

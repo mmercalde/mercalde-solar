@@ -38,6 +38,10 @@ def base_facts(cfg, gate_open=False):
         "projection": {"reached": now + 43800, "at": "04:10", "hours": 12.2},
         "drawdown": {"wh": 10800, "month": 8, "nights": 12},
         "gate": {"open": gate_open},
+        "soc_curve": {"points": 12, "soc_at_start_threshold": 41.0,
+                      "start_threshold_v": 52.0, "volts_low": 51.8,
+                      "volts_high": 55.4, "observations": 9000,
+                      "scraped_observations": 9000},
         "tomorrow_cloud": 20,
         "est_solar": {"wh": 61000, "clear_day_wh": 68000},
         "summary_24h": {}, "thresholds": {}, "intended": {},
@@ -254,3 +258,38 @@ def test_an_anomaly_refires_after_the_cooldown(quiet, monkeypatch):
     fire(quiet, monkeypatch, mepAgsOnline=False)
     quiet.anomaly_last["ags_mepAgsOnline"] -= agentmod.ANOMALY_COOLDOWN + 1
     assert "ags_mepAgsOnline" in fire(quiet, monkeypatch, mepAgsOnline=False)
+
+
+# --- the learned voltage/SOC curve reaches the model ------------------------
+
+def test_the_tick_prompt_states_soc_at_the_start_threshold(a, cfg):
+    f = base_facts(cfg)
+    f.update(data={}, config={"mep803a": {"maxRuntime": 120},
+                              "kubota": {"maxRuntime": 120}},
+             thresholds={"mep_start": 52.0, "mep_stop": 56.0,
+                         "kub_start": 52.0, "kub_stop": 56.0},
+             intended={"mep_start": 52.0, "mep_stop": 56.0,
+                       "kub_start": 52.0, "kub_stop": 56.0},
+             summary_24h={"min_v": 52.4, "max_v": 55.1, "avg_v": 53.8,
+                          "solar_wh": 31000, "load_wh": 32000,
+                          "gen_minutes": {"mep": 0, "kubota": 0}},
+             weather={"tomorrow": {"max_temp_c": 26.0}})
+    prompt = a.tick_prompt(f)
+    assert "52.0 V is about 41.0% SOC" in prompt
+
+
+def test_the_tick_prompt_omits_the_line_when_the_curve_is_unlearned(a, cfg):
+    f = base_facts(cfg)
+    f["soc_curve"] = {"points": 0, "soc_at_start_threshold": None,
+                      "start_threshold_v": 52.0}
+    f.update(data={}, config={"mep803a": {"maxRuntime": 120},
+                              "kubota": {"maxRuntime": 120}},
+             thresholds={"mep_start": 52.0, "mep_stop": 56.0,
+                         "kub_start": 52.0, "kub_stop": 56.0},
+             intended={"mep_start": 52.0, "mep_stop": 56.0,
+                       "kub_start": 52.0, "kub_stop": 56.0},
+             summary_24h={"min_v": 52.4, "max_v": 55.1, "avg_v": 53.8,
+                          "solar_wh": 31000, "load_wh": 32000,
+                          "gen_minutes": {"mep": 0, "kubota": 0}},
+             weather={"tomorrow": {"max_temp_c": 26.0}})
+    assert "SOC" not in a.tick_prompt(f).split("learned:")[0].split("FORECAST")[1]

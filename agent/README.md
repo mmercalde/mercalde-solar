@@ -90,7 +90,29 @@ The guard refuses **every** write until two conditions hold (rule 6):
 The gateway's `years` endpoint lists 2025 and 2026, so a full backfill reaches
 far enough back to satisfy the first condition. `--backfill` takes its hourly
 energy from the gateway's own per-hour accounting and uses the minute export
-only for per-hour peak and minimum voltage; see `docs/gateway_api.md`.
+for per-hour peak and minimum voltage and for the voltage-to-SOC curve; see
+`docs/gateway_api.md`.
+
+### The voltage-to-SOC curve
+
+The 52 V projection needs to know what state of charge the start threshold
+corresponds to. Live sampling passes through that voltage rarely, so on live
+data alone the plan record says "no observed SOC at 52.0 V yet" for weeks.
+The backfill learns it instead, from years of minute-resolution SOC:
+
+```bash
+agent/venv/bin/python agent/scrape_gateway.py --soc-only
+```
+
+`--backfill` fills the curve too; `--soc-only` refills just the curve without
+re-reading energy already stored, which halves the requests to a gateway that
+caps concurrent sessions. Check what it learned:
+
+```bash
+agent/venv/bin/python -c "import sys; sys.path.insert(0,'agent'); \
+  import config, history, loadmodel, json; c = config.load(); \
+  print(json.dumps(loadmodel.LoadModel(history.connect(), c).soc_curve_status(), indent=1))"
+```
 
 Everything else runs meanwhile: the agent samples, forecasts, plans, and says
 what it would have done. The plan record ends `applied: no (learning phase)`.

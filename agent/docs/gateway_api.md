@@ -149,9 +149,27 @@ The agent does not depend on these - its energy counters come from Modbus
    | `/SYS/BATT_CHG/ENERGY_HOUR` | `battery` | `wh_in` |
    | `/SYS/BATT_INV/ENERGY_HOUR` | `battery` | `wh_out` |
 
-2. **minutes** is fetched only for what the energy rows cannot give:
-   per-hour mean, minimum and maximum pack voltage, and mean current.
-   Minute rows are parsed and discarded; they are never stored.
+2. **minutes** is fetched for what the energy rows cannot give:
+   per-hour mean, minimum and maximum pack voltage and mean current,
+   and the voltage-to-SOC histogram. Minute rows are parsed and
+   discarded; they are never stored.
+
+### The voltage-to-SOC curve
+
+`/SYS/BATT<n>/SOC(%)` is the only place the pack's charge curve can be
+learned from years of history. Live sampling reaches the start threshold
+so rarely that the 52 V projection would stay unavailable for weeks.
+
+Minutes where the pack was discharging (`I` below zero) with no
+generator running (`/SYS/GEN/P` at zero) are counted into a histogram of
+(voltage bin, SOC) pairs in the `soc_curve` table - counts, not rows, so
+SPEC section 5's rule against storing minute data still holds while the
+distribution survives exactly. Charging minutes are excluded because a
+charging pack sits well above its resting voltage.
+
+`day` is part of the key, so re-scraping a day replaces its contribution
+rather than double-counting it. `--soc-only` refills just this curve,
+skipping the hours request for a history already backfilled.
 
 A day whose energy columns are all zero is treated as empty: the minute
 request is skipped, and the walk stops after

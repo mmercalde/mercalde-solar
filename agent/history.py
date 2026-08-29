@@ -103,6 +103,23 @@ CREATE TABLE IF NOT EXISTS gen_runs (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS gen_runs_key ON gen_runs (gen, start_ts);
 
+-- Voltage-to-SOC observations, as a histogram rather than minute rows.
+-- The backfill sees SOC at one-minute resolution but SPEC section 5 forbids
+-- storing minute rows, and an hourly mean would blur exactly the curve we are
+-- trying to learn. Counting (voltage bin, SOC) pairs keeps the distribution,
+-- so the median at a given voltage stays exact, in a few tens of thousands of
+-- rows for years of history. `day` is in the key so re-scraping a day
+-- replaces its contribution instead of double-counting it.
+CREATE TABLE IF NOT EXISTS soc_curve (
+  day TEXT NOT NULL,
+  v_bin INTEGER NOT NULL,
+  soc INTEGER NOT NULL,
+  source TEXT NOT NULL,
+  n INTEGER NOT NULL,
+  PRIMARY KEY (day, v_bin, soc, source)
+);
+CREATE INDEX IF NOT EXISTS soc_curve_bin ON soc_curve (v_bin);
+
 CREATE TABLE IF NOT EXISTS plans (
   ts INTEGER PRIMARY KEY, text TEXT NOT NULL, data TEXT
 );
@@ -537,6 +554,50 @@ def record_plan(conn, text, data=None, ts=None):
 
 def latest_plan(conn):
     return conn.execute("SELECT * FROM plans ORDER BY ts DESC LIMIT 1").fetchone()
+
+
+# Voltage bin width for the learned voltage-to-SOC curve, in volts. Shared by
+# the scraper (which fills soc_curve) and the load model (which reads it).
+SOC_BIN_V = 0.05
+
+
+def soc_bin(volts):
+    return int(round(volts / SOC_BIN_V))
+
+
+def soc_bin_volts(v_bin):
+    return v_bin * SOC_BIN_V
+
+
+def record_soc_observations(conn, day, counts, source="insightlocal"):
+    """Replace one day's contribution to the voltage-to-SOC histogram.
+
+    `counts` maps (v_bin, soc) -> number of observations.
+    """
+    conn.execute("DELETE FROM soc_curve WHERE day=? AND source=?", (day, source))
+    if counts:
+        conn.executemany(
+            "INSERT INTO soc_curve (day, v_bin, soc, source, n) VALUES (?,?,?,?,?)",
+            [(day, v_bin, soc, source, n) for (v_bin, soc), n in counts.items()])
+    conn.commit()
+    return len(counts)
+
+
+def soc_histogram(conn, v_bin_lo, v_bin_hi):
+    """[(v_bin, soc, n)] from the scraped histogram, over a bin range."""
+    return conn.execute(
+        "SELECT v_bin, soc, SUM(n) AS n FROM soc_curve "
+        "WHERE v_bin BETWEEN ? AND ? GROUP BY v_bin, soc",
+        (v_bin_lo, v_bin_hi)).fetchall()
+
+
+def soc_curve_span(conn):
+    """(lowest volts, highest volts, total observations) in the histogram."""
+    row = conn.execute(
+        "SELECT MIN(v_bin) lo, MAX(v_bin) hi, SUM(n) n FROM soc_curve").fetchone()
+    if not row or row["lo"] is None:
+        return None
+    return soc_bin_volts(row["lo"]), soc_bin_volts(row["hi"]), row["n"]
 
 
 def record_action(conn, tool, args, allowed, reason, voltage, soc, result, ts=None):

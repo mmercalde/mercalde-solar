@@ -25,12 +25,59 @@ log = logging.getLogger(__name__)
 # A profile cell needs this many observations before it is worth quoting.
 MIN_SAMPLES_PER_HOUR = 3
 MIN_DAYS_FOR_SOLAR_FIT = 8
-# Voltage bin width for the empirical V->SOC curve.
-SOC_BIN_V = 0.25
+# A voltage bin of the learned curve needs this many observations before it
+# is treated as a point. The backfill supplies thousands per bin; live
+# sampling alone can take weeks to reach it at the start threshold.
+MIN_SOC_OBSERVATIONS = 10
+# The window the curve is built over. Wider than any plausible pack voltage,
+# so the query never has to guess at the range it will find data in.
+CURVE_V_LOW, CURVE_V_HIGH = 40.0, 70.0
 
 
 def _median(values):
     return statistics.median(values) if values else None
+
+
+def _isotonic(points):
+    """Force a (volts, soc, weight) curve to be non-decreasing in voltage.
+
+    State of charge cannot fall as voltage rises, but the raw observations say
+    otherwise between about 54 and 56 V: during and just after a generator run
+    the terminal voltage is elevated while the shunt's SOC still lags, so those
+    minutes land at a high voltage with a mid-range SOC. Pool-adjacent-
+    violators merges exactly those runs, weighted by how many observations
+    each bin carries, and leaves an already-monotonic stretch untouched.
+    """
+    blocks = []                       # [sum(soc*w), sum(w), [indices]]
+    for _, soc, w in points:
+        blocks.append([soc * w, w, 1])
+        while len(blocks) > 1 and blocks[-2][0] / blocks[-2][1] > blocks[-1][0] / blocks[-1][1]:
+            a = blocks.pop()
+            b = blocks.pop()
+            blocks.append([a[0] + b[0], a[1] + b[1], a[2] + b[2]])
+    out, i = [], 0
+    for total, weight, count in blocks:
+        value = total / weight
+        for _ in range(count):
+            volts, _soc, w = points[i]
+            out.append((volts, value, w))
+            i += 1
+    return out
+
+
+def _weighted_median(pairs):
+    """Median of [(value, weight)] without expanding the weights."""
+    pairs = sorted(pairs)
+    total = sum(w for _, w in pairs)
+    if total <= 0:
+        return None
+    half = total / 2.0
+    seen = 0
+    for value, weight in pairs:
+        seen += weight
+        if seen >= half:
+            return value
+    return pairs[-1][0]
 
 
 class LoadModel:
@@ -221,22 +268,106 @@ class LoadModel:
 
     # --- battery ------------------------------------------------------------
 
-    def soc_for_voltage(self, target_v):
-        """Median SOC observed at a given resting-discharge voltage.
-
-        Only samples with no generator running and the pack discharging are
-        used: a charging pack sits well above its resting voltage.
-        """
-        lo, hi = target_v - SOC_BIN_V, target_v + SOC_BIN_V
+    def _live_soc_counts(self, v_bin_lo, v_bin_hi):
+        """{(v_bin, soc): n} from live samples, filtered as before."""
+        lo = history.soc_bin_volts(v_bin_lo) - history.SOC_BIN_V / 2
+        hi = history.soc_bin_volts(v_bin_hi) + history.SOC_BIN_V / 2
         rows = self.conn.execute(
-            "SELECT batt_soc FROM samples WHERE battery_v BETWEEN ? AND ? "
+            "SELECT battery_v, batt_soc FROM samples WHERE battery_v BETWEEN ? AND ? "
             "AND batt_soc IS NOT NULL AND batt_power < 0 "
             "AND mep_action != ? AND kub_action != ?",
             (lo, hi, history.GEN_RUNNING, history.GEN_RUNNING)).fetchall()
-        vals = [r["batt_soc"] for r in rows]
-        if len(vals) < 10:
+        counts = {}
+        for r in rows:
+            key = (history.soc_bin(r["battery_v"]), int(round(r["batt_soc"])))
+            counts[key] = counts.get(key, 0) + 1
+        return counts
+
+    def soc_observations(self, v_bin_lo, v_bin_hi):
+        """{(v_bin, soc): n} over a bin range, from both sources.
+
+        Live samples and the backfilled histogram are pooled: they are the
+        same measurement from the same shunt, so weighting them equally is
+        right, and the backfill is what makes a rarely-seen voltage like the
+        start threshold learnable at all.
+        """
+        counts = dict(self._live_soc_counts(v_bin_lo, v_bin_hi))
+        for r in history.soc_histogram(self.conn, v_bin_lo, v_bin_hi):
+            key = (r["v_bin"], r["soc"])
+            counts[key] = counts.get(key, 0) + r["n"]
+        return counts
+
+    def voltage_soc_curve(self, min_observations=MIN_SOC_OBSERVATIONS):
+        """The learned mapping, as [(volts, soc, observations)] by voltage.
+
+        One point per voltage bin that has enough observations, each the
+        weighted median SOC seen at that voltage, then forced non-decreasing
+        so surface charge cannot make the curve turn back on itself.
+        """
+        counts = self.soc_observations(history.soc_bin(CURVE_V_LOW),
+                                       history.soc_bin(CURVE_V_HIGH))
+        by_bin = {}
+        for (v_bin, soc), n in counts.items():
+            by_bin.setdefault(v_bin, []).append((soc, n))
+        out = []
+        for v_bin in sorted(by_bin):
+            pairs = by_bin[v_bin]
+            total = sum(n for _, n in pairs)
+            if total < min_observations:
+                continue
+            out.append((history.soc_bin_volts(v_bin),
+                        _weighted_median(pairs), total))
+        return _isotonic(out)
+
+    def soc_for_voltage(self, target_v, min_observations=MIN_SOC_OBSERVATIONS):
+        """SOC at a given resting-discharge voltage.
+
+        Only readings with the pack discharging and no generator running are
+        used: a charging pack sits well above its resting voltage.
+
+        The exact voltage is often thinly observed - the pack passes through
+        the start threshold rarely - so this reads the whole learned curve and
+        interpolates, rather than requiring enough samples in one narrow bin.
+        """
+        return self._interpolate(self.voltage_soc_curve(min_observations), target_v)
+
+    @staticmethod
+    def _interpolate(curve, target_v):
+        if not curve:
             return None
-        return _median(vals)
+        volts = [v for v, _, _ in curve]
+        socs = [s for _, s, _ in curve]
+        if target_v <= volts[0]:
+            # Extrapolating below the lowest voltage ever seen would be a
+            # guess; allow only the half-bin rounding margin.
+            return socs[0] if volts[0] - target_v <= history.SOC_BIN_V else None
+        if target_v >= volts[-1]:
+            return socs[-1] if target_v - volts[-1] <= history.SOC_BIN_V else None
+        for i in range(1, len(volts)):
+            if volts[i] >= target_v:
+                v0, v1 = volts[i - 1], volts[i]
+                s0, s1 = socs[i - 1], socs[i]
+                if v1 == v0:
+                    return s1
+                return s0 + (s1 - s0) * (target_v - v0) / (v1 - v0)
+        return socs[-1]
+
+    def soc_curve_status(self):
+        """What the curve knows, for the plan record and diagnostics."""
+        span = history.soc_curve_span(self.conn)
+        curve = self.voltage_soc_curve()
+        start_v = self.cfg["default_start"]
+        at_start = self._interpolate(curve, start_v)
+        return {
+            "points": len(curve),
+            "volts_low": round(curve[0][0], 2) if curve else None,
+            "volts_high": round(curve[-1][0], 2) if curve else None,
+            "observations": sum(n for _, _, n in curve),
+            "scraped_observations": span[2] if span else 0,
+            "start_threshold_v": start_v,
+            "soc_at_start_threshold": (round(at_start, 1)
+                                       if at_start is not None else None),
+        }
 
     def capacity_wh(self):
         """Usable pack size, from the Battery Monitor's own Ah-remaining vs SOC."""
@@ -264,8 +395,15 @@ class LoadModel:
 
         soc_target = self.soc_for_voltage(target_v)
         if soc_target is None:
-            return {"reached": None,
-                    "reason": f"no observed SOC at {target_v} V yet"}
+            status = self.soc_curve_status()
+            if status["points"]:
+                reason = (f"the learned voltage/SOC curve only covers "
+                          f"{status['volts_low']}-{status['volts_high']} V, "
+                          f"so {target_v} V is off the end of it")
+            else:
+                reason = (f"no voltage/SOC history yet, so SOC at {target_v} V "
+                          f"is unknown; run scrape_gateway.py --backfill")
+            return {"reached": None, "reason": reason}
         capacity = self.capacity_wh()
         if capacity is None:
             return {"reached": None, "reason": "pack capacity not learned"}

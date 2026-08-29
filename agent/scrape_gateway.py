@@ -82,12 +82,17 @@ HOURS_ENERGY = {
 # raw -74250..147910 -> -74.2..147.9 A, SOC raw 75..94.
 BATT_V_RE = re.compile(r"^/SYS/BATT(\d+)/V\b", re.I)
 BATT_I_RE = re.compile(r"^/SYS/BATT(\d+)/I\b", re.I)
+BATT_SOC_RE = re.compile(r"^/SYS/BATT(\d+)/SOC\b", re.I)
 MILLI = 0.001
+
+# Generator power, used to drop minutes when a generator was feeding the pack.
+GEN_POWER_COL = "/SYS/GEN/P"
 
 # Older friendly-label exports, kept as a fallback for any device whose chart
 # still uses them (SPEC section 5 describes this shape).
 FRIENDLY_V = re.compile(r"^volts?\b", re.I)
 FRIENDLY_I = re.compile(r"^current\b", re.I)
+FRIENDLY_SOC = re.compile(r"^state ?of ?charge\b", re.I)
 
 # Stop the backfill after this many consecutive empty days: the export goes
 # quiet across gaps as well as at the true start of history.
@@ -311,27 +316,27 @@ def _battery_columns(header, rows):
     BATT1. Falls back to the friendly "Volts(V)" labels SPEC section 5
     describes, in case another device's chart still uses them.
     """
-    volts, amps = {}, {}
+    volts, amps, socs = {}, {}, {}
     for i, name in enumerate(header):
         n = _strip_unit(name)
-        m = BATT_V_RE.match(n)
-        if m:
-            volts[m.group(1)] = i
-            continue
-        m = BATT_I_RE.match(n)
-        if m:
-            amps[m.group(1)] = i
+        for rx, into in ((BATT_V_RE, volts), (BATT_I_RE, amps), (BATT_SOC_RE, socs)):
+            m = rx.match(n)
+            if m:
+                into[m.group(1)] = i
+                break
     for bank in sorted(volts, key=lambda b: int(b)):
         vi = volts[bank]
         if any((_num(r, vi) or 0) > 0 for r in rows):
-            return vi, amps.get(bank), MILLI
+            return vi, amps.get(bank), socs.get(bank), MILLI
     for i, name in enumerate(header):
         n = _strip_unit(name)
         if FRIENDLY_V.match(n):
             ai = next((j for j, m in enumerate(header)
                        if FRIENDLY_I.match(_strip_unit(m))), None)
-            return i, ai, 1.0
-    return None, None, 1.0
+            si = next((j for j, m in enumerate(header)
+                       if FRIENDLY_SOC.match(_strip_unit(m))), None)
+            return i, ai, si, 1.0
+    return None, None, None, 1.0
 
 
 def minutes_to_voltage(header, rows, cfg):
@@ -341,7 +346,7 @@ def minutes_to_voltage(header, rows, cfg):
     amps. Energy is taken from the hours endpoint instead. Minute rows are
     never stored.
     """
-    vi, ai, scale = _battery_columns(header, rows)
+    vi, ai, _si, scale = _battery_columns(header, rows)
     if vi is None:
         return {}
     buckets = {}
@@ -366,6 +371,34 @@ def minutes_to_voltage(header, rows, cfg):
 
 # --- scraping ---------------------------------------------------------------
 
+def minutes_to_soc_counts(header, rows):
+    """{(voltage bin, SOC): count} for one day of minute rows.
+
+    Only minutes where the pack was discharging with no generator running,
+    matching the filter the live path applies to `samples`: a charging pack
+    sits well above its resting voltage, so those readings would skew the
+    curve. Returns counts, not rows - the minute data itself is discarded.
+    """
+    vi, ai, si, scale = _battery_columns(header, rows)
+    if vi is None or si is None:
+        return {}
+    gi = column_map(header).get(GEN_POWER_COL)
+    counts = {}
+    for row in rows:
+        v = _num(row, vi)
+        soc = _num(row, si)
+        if v is None or soc is None or v <= 0:
+            continue
+        amps = _num(row, ai)
+        if amps is None or amps >= 0:      # not discharging
+            continue
+        if gi is not None and (_num(row, gi) or 0) > 0:
+            continue                        # a generator was running
+        key = (history.soc_bin(v * scale), int(round(soc)))
+        counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
 def day_is_empty(energy):
     """True when the gateway returned a day with nothing recorded in it.
 
@@ -379,12 +412,30 @@ def day_is_empty(energy):
     return True
 
 
+def scrape_soc_only(gw, conn, cfg, day, device=DEFAULT_DEVICE,
+                    instance=DEFAULT_INSTANCE):
+    """Refill one day's voltage-to-SOC histogram without re-reading energy.
+
+    Used by --soc-only, so a history already backfilled for `hourly` does not
+    have to pay a second full pass of hours requests.
+    """
+    header, rows = parse_chart_csv(gw.chartdata(device, instance, day, "minutes"))
+    if not rows:
+        return 0
+    counts = minutes_to_soc_counts(header, rows)
+    history.record_soc_observations(conn, day.strftime("%Y-%m-%d"), counts)
+    log.info("%s: %d minute rows -> %d voltage/SOC pairs",
+             day, len(rows), len(counts))
+    return sum(counts.values())
+
+
 def scrape_day(gw, conn, cfg, day, device=DEFAULT_DEVICE, instance=DEFAULT_INSTANCE):
     """Fetch one local day and write hourly rows. Returns hours written.
 
     Energy comes from the hours endpoint - the gateway's own accounting, not
-    our re-integration of minute samples. The minute export is fetched only
-    for per-hour peak and minimum voltage, which the energy rows lack.
+    our re-integration of minute samples. The minute export supplies per-hour
+    peak and minimum voltage, which the energy rows lack, and the
+    voltage-to-SOC histogram the projection needs.
     """
     hours_header, hours_rows = parse_chart_csv(
         gw.chartdata(device, instance, day, "hours"))
@@ -397,6 +448,9 @@ def scrape_day(gw, conn, cfg, day, device=DEFAULT_DEVICE, instance=DEFAULT_INSTA
     minutes_header, minutes_rows = parse_chart_csv(
         gw.chartdata(device, instance, day, "minutes"))
     volts = minutes_to_voltage(minutes_header, minutes_rows, cfg)
+    history.record_soc_observations(
+        conn, day.strftime("%Y-%m-%d"),
+        minutes_to_soc_counts(minutes_header, minutes_rows))
 
     written = 0
     for hour in sorted(set(energy) | set(volts)):
@@ -424,13 +478,14 @@ def scrape_day(gw, conn, cfg, day, device=DEFAULT_DEVICE, instance=DEFAULT_INSTA
 
 
 def backfill(gw, conn, cfg, start=None, max_days=4000,
-             device=DEFAULT_DEVICE, instance=DEFAULT_INSTANCE):
+             device=DEFAULT_DEVICE, instance=DEFAULT_INSTANCE, soc_only=False):
     """Walk backwards a day at a time until the export runs dry."""
     day = start or (date.today() - timedelta(days=1))
     empty_streak = 0
     total_days = total_hours = 0
     while total_days < max_days:
-        hours = scrape_day(gw, conn, cfg, day, device, instance)
+        hours = (scrape_soc_only(gw, conn, cfg, day, device, instance) if soc_only
+                 else scrape_day(gw, conn, cfg, day, device, instance))
         if hours:
             empty_streak = 0
             total_days += 1
@@ -442,9 +497,14 @@ def backfill(gw, conn, cfg, start=None, max_days=4000,
                 break
         day -= timedelta(days=1)
         time.sleep(0.2)  # the gateway is a small embedded box; do not hammer it
-    history.rollup_daily(conn, cfg)
-    log.info("backfill complete: %d days, %d hourly rows, back to %s",
-             total_days, total_hours, day)
+    if not soc_only:
+        history.rollup_daily(conn, cfg)
+    span = history.soc_curve_span(conn)
+    if span:
+        log.info("voltage/SOC curve now spans %.2f-%.2f V from %d observations",
+                 span[0], span[1], span[2])
+    log.info("backfill complete: %d days, %d %s, back to %s", total_days,
+             total_hours, "SOC observations" if soc_only else "hourly rows", day)
     return total_days, total_hours
 
 
@@ -669,9 +729,27 @@ def write_doc(facts):
     a("   | `/SYS/BATT_CHG/ENERGY_HOUR` | `battery` | `wh_in` |")
     a("   | `/SYS/BATT_INV/ENERGY_HOUR` | `battery` | `wh_out` |")
     a("")
-    a("2. **minutes** is fetched only for what the energy rows cannot give:")
-    a("   per-hour mean, minimum and maximum pack voltage, and mean current.")
-    a("   Minute rows are parsed and discarded; they are never stored.")
+    a("2. **minutes** is fetched for what the energy rows cannot give:")
+    a("   per-hour mean, minimum and maximum pack voltage and mean current,")
+    a("   and the voltage-to-SOC histogram. Minute rows are parsed and")
+    a("   discarded; they are never stored.")
+    a("")
+    a("### The voltage-to-SOC curve")
+    a("")
+    a("`/SYS/BATT<n>/SOC(%)` is the only place the pack's charge curve can be")
+    a("learned from years of history. Live sampling reaches the start threshold")
+    a("so rarely that the 52 V projection would stay unavailable for weeks.")
+    a("")
+    a("Minutes where the pack was discharging (`I` below zero) with no")
+    a("generator running (`/SYS/GEN/P` at zero) are counted into a histogram of")
+    a("(voltage bin, SOC) pairs in the `soc_curve` table - counts, not rows, so")
+    a("SPEC section 5's rule against storing minute data still holds while the")
+    a("distribution survives exactly. Charging minutes are excluded because a")
+    a("charging pack sits well above its resting voltage.")
+    a("")
+    a("`day` is part of the key, so re-scraping a day replaces its contribution")
+    a("rather than double-counting it. `--soc-only` refills just this curve,")
+    a("skipping the hours request for a history already backfilled.")
     a("")
     a("A day whose energy columns are all zero is treated as empty: the minute")
     a("request is skipped, and the walk stops after")
@@ -696,6 +774,9 @@ def main():
                    help="probe the API once and rewrite docs/gateway_api.md")
     g.add_argument("--backfill", action="store_true",
                    help="walk backwards until the export runs dry")
+    g.add_argument("--soc-only", action="store_true",
+                   help="refill only the voltage-to-SOC curve, skipping the "
+                        "hourly energy already stored")
     g.add_argument("--nightly", action="store_true", help="yesterday only")
     g.add_argument("--day", help="one local day, YYYY-MM-DD")
     ap.add_argument("--device", default=DEFAULT_DEVICE)
@@ -711,8 +792,8 @@ def main():
                 discover(gw, cfg)
                 return 0
             conn = history.connect()
-            if args.backfill:
-                backfill(gw, conn, cfg)
+            if args.backfill or args.soc_only:
+                backfill(gw, conn, cfg, soc_only=args.soc_only)
             elif args.nightly:
                 day = date.today() - timedelta(days=1)
                 scrape_day(gw, conn, cfg, day, args.device, args.instance)
