@@ -99,6 +99,32 @@ def test_no_observed_rate_does_not_fire(cfg, night):
     assert "POLICY 5" in r["detail"]
 
 
+def test_a_target_already_met_is_not_a_reason_to_run(cfg, night):
+    """The record printed "57.0 reachable in 0.0 h" and the rule fired. There
+    is nothing to top up."""
+    model = StubModel(rates={"mep": {"a": 90.0, "soc_per_h": 15.0}})
+    night["voltage"] = 54.2
+    night["soc"] = 95.0                     # already past what 57.0 costs
+    r = policy.solo_top_up(cfg, night, model)
+    assert not r["fires"]
+    assert "57.0 is already met at 54.2 V, so there is nothing to top up" \
+        in r["detail"]
+
+
+def test_a_target_exactly_met_does_not_fire_either(cfg, night):
+    model = StubModel(rates={"mep": {"a": 90.0, "soc_per_h": 15.0}})
+    night["soc"] = 90.0                     # exactly the state of charge 57.0 costs
+    r = policy.solo_top_up(cfg, night, model)
+    assert not r["fires"] and "already met" in r["detail"]
+
+
+def test_a_target_a_whisker_away_still_fires(cfg, night):
+    model = StubModel(rates={"mep": {"a": 90.0, "soc_per_h": 15.0}})
+    night["soc"] = 89.5
+    r = policy.solo_top_up(cfg, night, model)
+    assert r["fires"] and r["target"] == 57.0
+
+
 # --- POLICY 4 when 57.0 is out of reach in the window -----------------------
 
 def test_an_unreachable_target_still_fires_at_the_best_it_can_reach(cfg, night):

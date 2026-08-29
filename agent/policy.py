@@ -191,6 +191,12 @@ def solo_top_up(cfg, f, model):
 
     # POLICY 5: a target is only valid if it is reachable in the run window.
     reach = model.reach(gen, v, target, window, solo=True, soc_now=soc)
+    # "reachable in 0.0 h" is not a reason to run a generator: the pack is
+    # already at or above the target, and there is nothing to top up.
+    if reach["hours"] is not None and reach["hours"] <= 0:
+        return _rule(4, name, False, "; ".join(parts + [
+            f"{target:.1f} is already met at {v:.1f} V, so there is nothing "
+            f"to top up"]))
     if reach["ok"]:
         parts.append(reach["why"])
         start, values = _proposal(cfg, gen, target)
