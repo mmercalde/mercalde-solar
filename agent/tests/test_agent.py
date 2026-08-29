@@ -439,9 +439,15 @@ def test_the_tick_prompt_carries_the_computed_rules(a, cfg):
 
 def test_the_tick_prompt_demands_an_answer_to_a_firing_rule(a, cfg):
     prompt = a.tick_prompt(prompt_facts(cfg))
-    assert "POLICY 4 solo top-up FIRES" in prompt
     assert 'overrule POLICY <n>: <reason>' in prompt
     assert "policy miss" in prompt
+
+
+def test_the_tick_prompt_says_which_values_the_rule_asks_for(a, cfg):
+    """"Set the thresholds it calls for" is not actionable without them."""
+    prompt = a.tick_prompt(prompt_facts(cfg))
+    assert ("POLICY 4 solo top-up FIRES → set MEP 52.0/56.0, Kubota 55.0/57.0"
+            in prompt)
 
 
 def test_the_tick_prompt_says_so_when_nothing_fires(a, cfg):

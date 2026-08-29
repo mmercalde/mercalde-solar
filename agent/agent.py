@@ -333,11 +333,12 @@ class Agent:
             parts += ["  " + ln for ln in policymod.lines(rules)]
             fired = policymod.firing(rules)
             if fired:
-                which = ", ".join(f"POLICY {r['rule']} {r['name']}" for r in fired)
-                parts.append(f"  {which} FIRES. Either set the thresholds it "
-                             f"calls for, or overrule it on its own line: "
-                             f'"overrule POLICY <n>: <reason>". Saying "no '
-                             f'change" without that line is a policy miss.')
+                parts += ["  " + c for c in policymod.call_to_action(fired)]
+                parts.append('  Set exactly those four values with '
+                             'set_gen_thresholds, or overrule the rule on its '
+                             'own line: "overrule POLICY <n>: <reason>". '
+                             'Saying "no change" without that line is a policy '
+                             'miss. Any other values are also a miss.')
             else:
                 parts.append("  No rule fires.")
 

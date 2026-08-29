@@ -71,6 +71,17 @@ def lines(evaluation):
     return [line(r) for r in evaluation]
 
 
+def call_to_action(rules):
+    """What a firing rule asks for, in the values it wants written."""
+    out = []
+    for r in rules:
+        p = r["proposal"]
+        out.append(f"POLICY {r['rule']} {r['name']} FIRES" + (
+            f" → set MEP {p['mep_start']:.1f}/{p['mep_stop']:.1f}, "
+            f"Kubota {p['kub_start']:.1f}/{p['kub_stop']:.1f}" if p else ""))
+    return out
+
+
 # --- POLICY 4: solo top-up --------------------------------------------------
 
 def solo_top_up(cfg, f):
