@@ -89,6 +89,37 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
     }
 
+    # Solar agent. The dashboard proxies both of these to the KAMRUI itself;
+    # nginx only has to decide who may reach them.
+    #
+    # /agent/plan is a read: the latest plan record, the learning gate and the
+    # last few actions, which is what the dashboard badge shows. Open, like
+    # /data, so the page renders for anyone who has the address.
+    location /agent/plan {
+        proxy_pass http://solar_dashboard/agent/plan;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_read_timeout 15s;
+    }
+
+    # /agent/ask is not a read. The agent answers with tools, and a question
+    # can end with it proposing a threshold write for the guard to judge, so
+    # it belongs with /setgen and /config behind the cookie rather than with
+    # /data in front of it.
+    location /agent/ask {
+        if ($solar_locked) { return 403; }
+        proxy_pass http://solar_dashboard/agent/ask;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        # The dashboard allows the agent 90s to think; this has to outlast it
+        # or nginx times the request out first and the owner sees a failure
+        # that did not happen.
+        proxy_read_timeout 120s;
+    }
+
     location /setmpptmode {
         if ($solar_locked) { return 403; }
         proxy_pass http://solar_dashboard/setmpptmode;

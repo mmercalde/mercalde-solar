@@ -953,6 +953,19 @@ body::before{
 @keyframes blink{0%,100%{opacity:1}50%{opacity:.25}}
 .dot.stale{background:var(--warn)}
 .dot.off{background:var(--dim2)}
+.askbox{display:inline-flex;align-items:center;gap:4px}
+.askbox input{width:11rem;background:rgba(255,255,255,.06);color:var(--txt);
+  border:1px solid var(--line,#2a2f3a);border-radius:7px;padding:3px 7px;
+  font:inherit;font-size:.72rem}
+.askbox input::placeholder{color:var(--dim2)}
+.askbox input:focus{outline:none;border-color:var(--batt)}
+/* An answer is a block in the log, not a line: it keeps its own paragraphs. */
+.ask-q{color:var(--batt);padding-top:6px!important;white-space:pre-wrap;
+  word-break:break-word}
+.ask-a{color:var(--txt);white-space:pre-wrap;word-break:break-word;
+  border-left:2px solid var(--line,#2a2f3a);padding-left:8px!important;
+  margin:2px 0 6px}
+.ask-wait{color:var(--dim2);font-style:italic}
 .agentb{cursor:pointer;user-select:none;position:relative}
 .agentb:hover{color:var(--batt)}
 /* The plan popover hangs off the badge; the badge is its positioning parent. */
@@ -1255,6 +1268,13 @@ input[type=range]::-moz-range-thumb{width:14px;height:14px;border-radius:50%;bac
     <span><span class='dot' id='liveDot'></span>&nbsp;<span class='num' id='lastUpdate_value'>--:--:--</span></span>
     <span>Errors <strong class='num' id='pollErrors_value' style='color:var(--txt)'>0</strong></span>
     <span class='agentb' id='agentBadge' onclick='toggleAgentPlan(event)' title='Show the latest agent plan'><span class='dot off' id='agentDot'></span>&nbsp;<span id='agentText'>Agent &hellip;</span><span class='agentpop' id='agentPop' hidden onclick='event.stopPropagation()'></span></span>
+    <span class='askbox'>
+      <input id='askInput' type='text' placeholder='Ask the agent&hellip;' autocomplete='off'
+             onkeydown='if(event.key===\"Enter\"){event.preventDefault();askAgent();}'>
+      <button class='btn s sm' onclick='askAgent()'>Ask</button>
+      <button class='btn s sm' onclick='askAgent(\"plan\")'>Plan</button>
+      <button class='btn s sm' onclick='askAgent(\"what is the system doing right now\")'>Status</button>
+    </span>
     <a href='/registers'>Registers &rarr;</a>
   </div>
 
@@ -1487,7 +1507,7 @@ input[type=range]::-moz-range-thumb{width:14px;height:14px;border-radius:50%;bac
   </div>
 </details>
 
-<details class='acc' open>
+<details class='acc' open id='logPanel'>
   <summary>&#128203; Event &amp; Error Log <span class='caret'>&#10095;</span></summary>
   <div class='acc-body'>
     <div class='log' id='eventLog'><div class='e-info'>Loading...</div></div>
@@ -1809,19 +1829,79 @@ function setIf(id,val,dflt){
   el.value=(val===undefined||val===null)?dflt:val;
 }
 
-function updateEventLog(events){
+/* The event log holds two things now: the dashboard's own events, and the
+   answers the agent has given. The config poll refreshes the events every few
+   seconds, so the answers are kept here and re-rendered with them rather than
+   written into the panel once and wiped by the next poll. */
+let lastEvents=[],askBlocks=[];
+
+function eventLine(e){
+  let cls='e-info';
+  const low=e.toLowerCase();
+  if(e.indexOf('\\u26a0')>=0||low.indexOf('failed')>=0||low.indexOf('offline')>=0||low.indexOf('error')>=0)cls='e-err';
+  else if(e.indexOf('\\u2705')>=0||low.indexOf('started')>=0||low.indexOf('online')>=0||low.indexOf('restored')>=0)cls='e-ok';
+  else if(low.indexOf('warn')>=0||low.indexOf('ramp')>=0)cls='e-warn';
+  const div=document.createElement('div');
+  div.className=cls; div.textContent=e;
+  return div;
+}
+
+function renderEventLog(){
   const log=document.getElementById('eventLog');
-  if(!events||events.length===0){log.innerHTML="<div class='e-info'>No events yet...</div>";return;}
-  log.innerHTML=events.slice().reverse().map(e=>{
-    let cls='e-info';
-    const low=e.toLowerCase();
-    if(e.indexOf('\\u26a0')>=0||low.indexOf('failed')>=0||low.indexOf('offline')>=0||low.indexOf('error')>=0)cls='e-err';
-    else if(e.indexOf('\\u2705')>=0||low.indexOf('started')>=0||low.indexOf('online')>=0||low.indexOf('restored')>=0)cls='e-ok';
-    else if(low.indexOf('warn')>=0||low.indexOf('ramp')>=0)cls='e-warn';
-    const div=document.createElement('div');
-    div.className=cls; div.textContent=e;
-    return div.outerHTML;
-  }).join('');
+  if(!log)return;
+  log.innerHTML='';
+  askBlocks.forEach(function(b,i){
+    const q=document.createElement('div');
+    q.className='ask-q'; q.id='askBlock'+i;
+    q.textContent='\\u276f '+b.q;
+    log.appendChild(q);
+    const a=document.createElement('div');
+    a.className=b.pending?'ask-a ask-wait':'ask-a';
+    a.textContent=b.pending?'thinking\\u2026':b.a;
+    log.appendChild(a);
+  });
+  if(!lastEvents||lastEvents.length===0){
+    if(!askBlocks.length)log.innerHTML="<div class='e-info'>No events yet...</div>";
+    return;
+  }
+  lastEvents.slice().reverse().forEach(e=>log.appendChild(eventLine(e)));
+}
+
+function updateEventLog(events){
+  lastEvents=events||[];
+  renderEventLog();
+}
+
+/* ---- ask the agent ---- */
+function scrollToAsk(i){
+  const panel=document.getElementById('logPanel');
+  if(panel)panel.open=true;
+  const log=document.getElementById('eventLog'),el=document.getElementById('askBlock'+i);
+  if(log&&el)log.scrollTop=Math.max(0,el.offsetTop-log.offsetTop);
+}
+
+async function askAgent(preset){
+  const input=document.getElementById('askInput');
+  const text=(preset||(input?input.value:'')||'').trim();
+  if(!text)return;
+  if(!preset&&input)input.value='';
+  /* Newest first, to match the events below it. */
+  askBlocks.unshift({q:text,a:'',pending:true});
+  if(askBlocks.length>6)askBlocks.pop();
+  renderEventLog();
+  scrollToAsk(0);
+  const block=askBlocks[0];
+  try{
+    const r=await fetch('/agent/ask',{method:'POST',
+      headers:{'Content-Type':'application/json'},body:JSON.stringify({text:text})});
+    const d=r.ok?await r.json():null;
+    block.a=(d&&d.online&&d.reply)?d.reply:'The agent is not answering right now.';
+  }catch(e){
+    block.a='The agent is not answering right now.';
+  }
+  block.pending=false;
+  renderEventLog();
+  scrollToAsk(askBlocks.indexOf(block));
 }
 
 /* ---- AC diagnostic (ported from V2.4) ---- */
@@ -3047,6 +3127,8 @@ def config_endpoint():
 # agent status badge without the browser reaching across the LAN itself.
 AGENT_PLAN_URL = "http://192.168.3.152:8090/plan"
 AGENT_PLAN_TIMEOUT = 3
+AGENT_ASK_URL = "http://192.168.3.152:8090/ask"
+AGENT_ASK_TIMEOUT = 90
 
 
 @app.route('/agent/plan')
@@ -3060,6 +3142,34 @@ def agent_plan_endpoint():
         return jsonify(resp.json())
     except Exception as e:
         logger.debug(f"agent plan unavailable: {e}")
+        return jsonify({"online": False})
+
+
+@app.route('/agent/ask', methods=['POST'])
+def agent_ask_endpoint():
+    """Forward a question to the agent. Never fails hard, same as /agent/plan.
+
+    The agent answers in plain text and may take most of a minute over it: it
+    calls a tool, waits on a local model, and sometimes calls another. Ninety
+    seconds is the model's ceiling, not an expectation.
+
+    A question can end in the agent proposing a threshold write, which the
+    guard then judges, so on the VPS this path sits behind the cookie gate
+    while /agent/plan stays open.
+    """
+    body = request.get_json(silent=True) or {}
+    text = (body.get('text') or '').strip()
+    if not text:
+        return jsonify({"online": True, "reply": ""}), 400
+    try:
+        resp = http_requests.post(AGENT_ASK_URL, json={"text": text},
+                                  timeout=AGENT_ASK_TIMEOUT)
+        if resp.status_code != 200:
+            logger.debug(f"agent ask returned {resp.status_code}")
+            return jsonify({"online": False})
+        return jsonify({"online": True, "reply": resp.text})
+    except Exception as e:
+        logger.debug(f"agent ask unavailable: {e}")
         return jsonify({"online": False})
 
 @app.route('/testtelegram')

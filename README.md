@@ -213,6 +213,32 @@ committed. Copy `pi5/config.example.json` and fill it in.
 | `/acdiag`, `/acdiag/stream`, `/acdiag/log` | Inverter sync diagnostics |
 | `/registers`, `/readreg`, `/writereg` | Raw Modbus access |
 | `/testtelegram` | Send a test alert |
+| `/agent/plan` | The solar agent's latest plan record (proxied from the KAMRUI) |
+| `/agent/ask` | POST `{"text": "..."}`; the agent's answer (proxied, 90 s) |
 
 The AC Diagnostic tool captures phase, voltage and frequency deltas between the
 paralleled XW Pros — built for investigating generator stop transients.
+
+### Asking the agent
+
+The dashboard header carries a text box next to the agent badge, with Ask,
+Plan and Status buttons; Enter submits. Answers land in the Event & Error Log
+as a block under the question asked, newest first, with a "thinking…" line
+while the model works. They survive the log's own refresh, so an answer stays
+readable while events continue to arrive behind it.
+
+`/agent/ask` forwards to the agent's own `POST /ask` on the KAMRUI with a 90 s
+timeout, and answers `{"online": false}` rather than failing when the agent is
+not there. Neither endpoint fails hard: the dashboard renders whether or not
+the agent is running.
+
+The two are gated differently on the VPS, and `vps/nginx/default` says so:
+
+| Path | Cookie gate | Why |
+|---|---|---|
+| `/agent/plan` | open | A read, like `/data`. It is what the badge shows. |
+| `/agent/ask` | `if ($solar_locked) { return 403; }` | Not a read. The agent answers with tools, and a question can end with it proposing a threshold write for the guard to judge, so it belongs with `/setgen` and `/config`. |
+
+`/agent/ask` also needs `proxy_read_timeout 120s` — longer than the
+dashboard's own 90 s ceiling, or nginx times the request out first and the
+owner is shown a failure that did not happen.
