@@ -43,13 +43,27 @@ FORBIDDEN_PARAMS = ("mep.chargeRate", "mep.maxRuntime", "mep.cooldown",
                     "ramp.stepDelay", "ramp.zeroHoldTime")
 
 
-def apply_thresholds(cfg, mep_start, mep_stop, kub_start, kub_stop,
-                     timeout=15, session=None):
+class WriteNotApproved(RuntimeError):
+    """A write was attempted that the guard had not permitted."""
+
+
+def apply_thresholds(cfg, mep_start, mep_stop, kub_start, kub_stop, *,
+                     approval, timeout=15, session=None):
     """Issue the one write the agent is allowed. Returns the live config back.
 
-    Kept separate from the tool so the exact request shape can be tested
-    without a guard, a model or a database.
+    `approval` is the guard's record of the decision that permitted exactly
+    these four values, from Guard.approval(). It is required and it is
+    checked: the heartbeat used to reach the dashboard without passing
+    check(), which is how a stale stored intent was written over the owner's
+    thresholds twice in full sun without the daylight hold or the audit log
+    ever seeing it. There is no unguarded path now.
     """
+    want = {"mep_start": float(mep_start), "mep_stop": float(mep_stop),
+            "kub_start": float(kub_start), "kub_stop": float(kub_stop)}
+    ok = approval.get("values") if isinstance(approval, dict) else None
+    if not ok or any(abs(ok.get(k, -999) - v) > 0.05 for k, v in want.items()):
+        raise WriteNotApproved(
+            f"the guard has not approved {want}; it approved {ok}")
     params = {
         "mep.startVoltage": f"{float(mep_start):.1f}",
         "mep.stopVoltage": f"{float(mep_stop):.1f}",
@@ -393,7 +407,8 @@ class Tools:
             return {"applied": False, "dry_run": True,
                     "would_set": values, "reason": why}
         live = apply_thresholds(self.cfg, write["mep_start"], write["mep_stop"],
-                                write["kub_start"], write["kub_stop"])
+                                write["kub_start"], write["kub_stop"],
+                                approval=self.guard.approval())
         applied = thresholds_from_config(live)
         self.guard.note_write(applied)
         # Every executed write tells the owner, in Python, with the values the

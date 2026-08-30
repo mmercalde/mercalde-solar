@@ -87,6 +87,7 @@ class Agent:
         self.array_low_since = {}
         self.last_poll_errors = None
         self.telegram_offset = None
+        self.adopted = False
         self.stop_event = threading.Event()
 
     def connection(self):
@@ -108,6 +109,12 @@ class Agent:
         now = int(now or time.time())
         data = history.fetch_data(self.cfg)
         live = history.fetch_config(self.cfg)
+        # Before this process writes anything, what is actually in force
+        # becomes the baseline. A previous run's stored intent says nothing
+        # about the present and must never be re-asserted.
+        if not self.adopted:
+            self.guard.adopt_live(toolsmod.thresholds_from_config(live), now=now)
+            self.adopted = True
         today = history.local_day(now, self.cfg)
 
         solar_w = sum(data.get(k) or 0 for k in
@@ -471,7 +478,6 @@ class Agent:
             "dry_run": self.dry_run,
         }, ts=facts["now"])
 
-        self.heartbeat(facts)
         log.info("tick done in %.1fs; %s", time.time() - started, applied)
         return record
 
@@ -524,7 +530,8 @@ class Agent:
             applied = toolsmod.thresholds_from_config(
                 toolsmod.apply_thresholds(self.cfg, want["mep_start"],
                                           want["mep_stop"], want["kub_start"],
-                                          want["kub_stop"]))
+                                          want["kub_stop"],
+                                          approval=self.guard.approval()))
         except requests.RequestException as e:
             log.warning("returning the raised start failed: %s", e)
             return []
@@ -543,26 +550,6 @@ class Agent:
             "AND stop_ts >= ? AND stop_ts <= ? LIMIT 1",
             (gen, since, now)).fetchone()
         return row is not None
-
-    def heartbeat(self, facts):
-        """SPEC section 9: re-send the intended thresholds, hourly."""
-        if self.dry_run:
-            return False
-        send, values, why = self.guard.heartbeat(now=facts["now"])
-        if not send:
-            log.debug("heartbeat withheld: %s", why)
-            return False
-        try:
-            live = toolsmod.apply_thresholds(
-                self.cfg, values["mep_start"], values["mep_stop"],
-                values["kub_start"], values["kub_stop"])
-            self.guard.note_heartbeat(toolsmod.thresholds_from_config(live),
-                                      now=facts["now"])
-            log.debug("heartbeat sent %s", values)
-            return True
-        except requests.RequestException as e:
-            log.warning("heartbeat failed: %s", e)
-            return False
 
     # --- digests ------------------------------------------------------------
 

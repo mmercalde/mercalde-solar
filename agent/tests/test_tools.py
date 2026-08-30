@@ -29,6 +29,13 @@ LIVE_CONFIG = {"config": {
     "autoGenEnabled": True}}
 
 
+def OK(mep_start, mep_stop, kub_start, kub_stop):
+    """A guard approval for exactly these four values."""
+    return {"allowed": True,
+            "values": {"mep_start": mep_start, "mep_stop": mep_stop,
+                       "kub_start": kub_start, "kub_stop": kub_stop}}
+
+
 class RecordingSession:
     """Captures the request instead of making it."""
 
@@ -55,14 +62,16 @@ def session():
 # --- the write --------------------------------------------------------------
 
 def test_write_hits_the_config_endpoint(cfg, session):
-    tools.apply_thresholds(cfg, 52.0, 54.5, 52.0, 54.5, session=session)
+    tools.apply_thresholds(cfg, 52.0, 54.5, 52.0, 54.5,
+                           approval=OK(mep_start=52.0, mep_stop=54.5, kub_start=52.0, kub_stop=54.5), session=session)
     assert session.calls == 1
     assert session.url == cfg["dashboard_url"] + "/config"
     assert urlparse(session.url).path == "/config"
 
 
 def test_write_sends_the_four_threshold_params(cfg, session):
-    tools.apply_thresholds(cfg, 52.0, 54.5, 55.5, 57.0, session=session)
+    tools.apply_thresholds(cfg, 52.0, 54.5, 55.5, 57.0,
+                           approval=OK(mep_start=52.0, mep_stop=54.5, kub_start=55.5, kub_stop=57.0), session=session)
     assert session.params["mep.startVoltage"] == "52.0"
     assert session.params["mep.stopVoltage"] == "54.5"
     assert session.params["kub.startVoltage"] == "55.5"
@@ -72,13 +81,15 @@ def test_write_sends_the_four_threshold_params(cfg, session):
 def test_write_sends_nothing_but_the_thresholds_and_the_marker(cfg, session):
     """SPEC section 4: never chargeRate, maxRuntime or cooldown. The single
     extra parameter is the section 9 access-log marker, which app.py ignores."""
-    tools.apply_thresholds(cfg, 52.0, 54.5, 52.0, 54.5, session=session)
+    tools.apply_thresholds(cfg, 52.0, 54.5, 52.0, 54.5,
+                           approval=OK(mep_start=52.0, mep_stop=54.5, kub_start=52.0, kub_stop=54.5), session=session)
     assert set(session.params) == set(tools.THRESHOLD_PARAMS) | {"src"}
     assert session.params["src"] == "agent"
 
 
 def test_write_never_sends_a_forbidden_parameter(cfg, session):
-    tools.apply_thresholds(cfg, 52.0, 54.5, 52.0, 54.5, session=session)
+    tools.apply_thresholds(cfg, 52.0, 54.5, 52.0, 54.5,
+                           approval=OK(mep_start=52.0, mep_stop=54.5, kub_start=52.0, kub_stop=54.5), session=session)
     for bad in tools.FORBIDDEN_PARAMS:
         assert bad not in session.params
     for bad in ("chargeRate", "maxRuntime", "cooldown", "autoGenEnabled"):
@@ -86,26 +97,30 @@ def test_write_never_sends_a_forbidden_parameter(cfg, session):
 
 
 def test_write_identifies_itself_for_the_watchdog(cfg, session):
-    tools.apply_thresholds(cfg, 52.0, 54.5, 52.0, 54.5, session=session)
+    tools.apply_thresholds(cfg, 52.0, 54.5, 52.0, 54.5,
+                           approval=OK(mep_start=52.0, mep_stop=54.5, kub_start=52.0, kub_stop=54.5), session=session)
     assert session.headers["X-Agent"] == "solar-agent"
 
 
 def test_write_formats_one_decimal(cfg, session):
-    tools.apply_thresholds(cfg, 52, 54.53, 52.0, 57, session=session)
+    tools.apply_thresholds(cfg, 52, 54.53, 52.0, 57,
+                           approval=OK(mep_start=52, mep_stop=54.53, kub_start=52.0, kub_stop=57), session=session)
     assert session.params["mep.startVoltage"] == "52.0"
     assert session.params["mep.stopVoltage"] == "54.5"
     assert session.params["kub.stopVoltage"] == "57.0"
 
 
 def test_write_returns_the_live_config(cfg, session):
-    live = tools.apply_thresholds(cfg, 52.0, 54.5, 52.0, 54.5, session=session)
+    live = tools.apply_thresholds(cfg, 52.0, 54.5, 52.0, 54.5,
+                                  approval=OK(mep_start=52.0, mep_stop=54.5, kub_start=52.0, kub_stop=54.5), session=session)
     assert tools.thresholds_from_config(live) == {
         "mep_start": 55.5, "mep_stop": 57.0, "kub_start": 52.0, "kub_stop": 54.5}
 
 
 def test_the_request_line_carries_only_expected_parameters(cfg, session):
     """What the Pi5 access log will actually show."""
-    tools.apply_thresholds(cfg, 52.0, 54.5, 55.5, 57.0, session=session)
+    tools.apply_thresholds(cfg, 52.0, 54.5, 55.5, 57.0,
+                           approval=OK(mep_start=52.0, mep_stop=54.5, kub_start=55.5, kub_stop=57.0), session=session)
     import requests
     query = requests.models.PreparedRequest()
     query.prepare_url(session.url, session.params)
@@ -121,13 +136,20 @@ class StubGuard:
         self.allowed, self.reason = allowed, reason
         self.checked = None
         self.noted = None
+        self.last_check = None
 
     def check(self, **kwargs):
         self.checked = kwargs
         return self.allowed, self.reason
 
-    def note_write(self, applied):
+    def note_write(self, applied, now=None, housekeeping=False):
         self.noted = applied
+
+    def approval(self):
+        vals = (self.last_check or {}).get("values") or self.checked
+        return {"allowed": True,
+                "values": {k: vals[k] for k in ("mep_start", "mep_stop",
+                                                "kub_start", "kub_stop")}}
 
 
 def test_write_tool_refuses_without_a_guard(conn, cfg):
@@ -431,3 +453,30 @@ def test_a_dry_run_shows_the_refusal_rather_than_the_narration(conn, cfg):
     t.set_gen_thresholds(52.0, 54.5, 52.0, 54.5, "x")
     out = t.send_telegram("Adjusted the thresholds.")
     assert "proposed MEP" in out["text"] and "Adjusted" not in out["text"]
+
+
+# --- no write reaches the dashboard without the guard ------------------------
+
+def test_a_write_without_an_approval_is_refused(cfg, session):
+    """The heartbeat reached /config without passing check(). Nothing can."""
+    with pytest.raises(tools.WriteNotApproved):
+        tools.apply_thresholds(cfg, 52.0, 56.0, 52.0, 56.0, approval=None,
+                               session=session)
+    assert session.calls == 0
+
+
+def test_an_approval_for_other_values_does_not_authorise_this_write(cfg, session):
+    with pytest.raises(tools.WriteNotApproved) as e:
+        tools.apply_thresholds(cfg, 53.3, 57.0, 53.3, 57.0,
+                               approval=OK(52.0, 56.0, 52.0, 56.0),
+                               session=session)
+    assert "has not approved" in str(e.value)
+    assert session.calls == 0
+
+
+def test_a_refused_check_leaves_no_approval_to_write_with(conn, cfg, session):
+    guard = StubGuard(allowed=False, reason="daylight hold")
+    guard.approval = lambda: None
+    t = tools.Tools(conn, cfg, guard=guard)
+    out = t.set_gen_thresholds(53.3, 57.0, 53.3, 57.0, "re-asserting intent")
+    assert out["applied"] is False and session.calls == 0

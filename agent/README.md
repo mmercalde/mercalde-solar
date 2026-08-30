@@ -22,7 +22,9 @@ them either.
 Every 15 minutes, day and night:
 
 1. Python gathers the facts — live status, thresholds, the last 24 hours,
-   the load forecast to sunrise, the weather, today's peak voltage.
+   the load forecast to sunrise, the weather, today's peak voltage. On the
+   first gather of a run the live thresholds become the owner's baseline: a
+   previous process's stored intent is a memory, not evidence about now.
 2. `policy.py` computes every POLICY rule whose condition is arithmetic and
    says, with the numbers, whether it fires. Whether a target is reachable is
    `loadmodel.py`'s answer, in amps into the pack against the learned capacity
@@ -40,9 +42,10 @@ Every 15 minutes, day and night:
 5. The plan record is written to the `plans` table. Every line but the
    recommendation is computed in Python, including whether anything was
    applied — the model cannot claim a change it did not make.
-6. Once an hour, if nothing else has sent them, the intended thresholds are
-   re-sent as a heartbeat. The Pi5 watchdog reads liveness from `GET /plan`
-   and resets after six hours of silence, so hourly is finer than it needs.
+6. Nothing is re-sent. Every write the agent makes goes through the guard and
+   the audit log; `apply_thresholds` refuses to send anything the guard has
+   not approved. The Pi5 watchdog reads liveness from `GET /plan`, so there is
+   nothing for a heartbeat to prove.
 
 ## Layout
 
@@ -159,7 +162,8 @@ written to `data/audit.log` and the `actions` table.
 4. **Reachability** — a generator that will fire now must be able to reach
    its stop at its own observed charge rate, inside
    `min(Pi5 maxRuntime, ags_max_run_hours)`. No observed rate means refuse.
-5. **Rate** — at most one write per hour. The heartbeat is exempt.
+5. **Rate** — at most one write per hour, unless it only moves values back
+   toward the owner's baseline.
 6. **Learning gate** — as above.
 7. **Stale data** — refuse if the dashboard poll is over 5 minutes old or the
    Battery Monitor is offline.

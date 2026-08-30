@@ -724,3 +724,82 @@ def test_an_owner_edit_cancels_an_outstanding_raise(a, cfg, conn, monkeypatch):
                       int(datetime(2026, 8, 28, 22, tzinfo=history.tzinfo(cfg))
                           .timestamp()))
     assert a.guard.raised_starts() == {}
+
+
+# --- a restart does not re-assert what a dead process meant ------------------
+#
+# 4:01 am freeze, 8:26 am reboot. The state file still said Kubota 53.3/57.0,
+# the hourly heartbeat re-asserted it over the owner's 52/56 at 8:27 and 9:27,
+# and the Kubota started twice in full sun. The heartbeat reached /config
+# without check(), so neither the daylight hold nor the audit log saw it.
+
+STALE = {"mep_start": 52.0, "mep_stop": 56.0,
+         "kub_start": 53.3, "kub_stop": 57.0}
+OWNERS = {"mep803a": {"startVoltage": 52.0, "stopVoltage": 56.0,
+                      "maxRuntime": 120},
+          "kubota": {"startVoltage": 52.0, "stopVoltage": 56.0,
+                     "maxRuntime": 120}}
+
+
+@pytest.fixture
+def rebooted(a, conn, cfg, monkeypatch):
+    """A fresh process whose state file remembers the run that froze."""
+    writes = []
+    monkeypatch.setattr(agentmod.toolsmod, "apply_thresholds",
+                        lambda *v, **k: writes.append((v, k)) or OWNERS)
+    monkeypatch.setattr(agentmod.history, "fetch_config", lambda *x, **k: OWNERS)
+    monkeypatch.setattr(agentmod.history, "fetch_data", lambda *x, **k: {
+        "batteryVoltage": 55.4, "battSocBM": 88, "battMonitorOnline": True,
+        "clockTime": "08:27:00", "mep803aAction": history.GEN_STOPPED,
+        "kubotaAction": history.GEN_STOPPED, "acPower1": 700, "acPower2": 700,
+        "mppt80PVPower": 4000, "southArrayPVPower": 4000,
+        "westArrayPVPower": 4000})
+    monkeypatch.setattr(agentmod.weather, "summary", lambda *x, **k: {})
+    a.dry_run = False
+    a.guard.state.update(intended=dict(STALE), owner_baseline=None,
+                         raised_starts={"kubota": {"since": 0, "baseline": 52.0,
+                                                   "start": 53.3}})
+    return a, writes
+
+
+def test_a_restart_with_stale_intent_writes_nothing(rebooted, cfg):
+    """The whole of the incident, in one assertion."""
+    a, writes = rebooted
+    a.gather()
+    assert writes == []
+
+
+def test_the_live_values_become_the_baseline_on_the_first_gather(rebooted, cfg):
+    a, _ = rebooted
+    a.gather()
+    assert a.guard.baseline() == {"mep_start": 52.0, "mep_stop": 56.0,
+                                  "kub_start": 52.0, "kub_stop": 56.0}
+    assert a.guard.owner_baseline()["kub_stop"] == 56.0
+
+
+def test_the_stale_intent_is_discarded_not_re_asserted(rebooted):
+    a, _ = rebooted
+    a.gather()
+    assert a.guard.intended()["kub_start"] == 52.0
+    assert a.guard.intended()["kub_stop"] == 56.0
+
+
+def test_a_raise_recorded_before_the_freeze_is_forgotten(rebooted):
+    """It was this process's predecessor that raised it, and the pack has
+    moved on. Nothing outstanding survives a restart."""
+    a, _ = rebooted
+    a.gather()
+    assert a.guard.raised_starts() == {}
+
+
+def test_the_baseline_is_adopted_only_once(rebooted):
+    a, _ = rebooted
+    a.gather()
+    a.guard.state["owner_baseline"] = {"mep_start": 53.0, "mep_stop": 55.0,
+                                       "kub_start": 53.0, "kub_stop": 55.0}
+    a.gather()
+    assert a.guard.baseline()["mep_start"] == 53.0, "not re-adopted every tick"
+
+
+def test_the_agent_has_no_heartbeat_method_left(a):
+    assert not hasattr(a, "heartbeat")

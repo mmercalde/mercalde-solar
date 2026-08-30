@@ -47,10 +47,6 @@ MIN_STOP_MINUS_START = 2.0
 STALE_SECONDS = 300
 RATE_LIMIT_SECONDS = 3600
 OWNER_OVERRIDE_SECONDS = 6 * 3600
-# The Pi5 watchdog reads liveness from GET /plan and resets after 6 hours of
-# silence, so it needs nothing finer than this. At the 15-minute tick the
-# heartbeat wrote "Config updated" to the Pi5 event log 96 times a day.
-HEARTBEAT_SECONDS = 3600
 # Thresholds are written to one decimal, so anything under this is the same value.
 EPS = 0.05
 
@@ -86,7 +82,7 @@ class Guard:
                 return json.load(f)
         except (OSError, ValueError):
             return {"intended": None, "last_write_ts": 0,
-                    "last_heartbeat_ts": 0, "override_until": 0,
+                    "override_until": 0,
                     "override_adopted": None, "owner_baseline": None,
                     "raised_starts": {}}
 
@@ -134,20 +130,34 @@ class Guard:
             self.state["raised_starts"] = raised
             self._save_state()
 
-    def note_heartbeat(self, applied, now=None):
-        """Record a heartbeat re-send.
+    def adopt_live(self, values, now=None):
+        """Take what is actually in force as the owner's baseline.
 
-        Deliberately does not touch last_write_ts. The heartbeat is not a
-        change, and rule 5 measures the time since the agent last actually
-        moved the thresholds. Setting that clock from the heartbeat meant
-        every model write was refused as "last write was N minutes ago" for as
-        long as the heartbeat kept running - which is why the only write of
-        the first live night landed at 04:10, in the one window where the
-        owner stand-down had held the heartbeat back.
+        Called before the agent's first write of a run. Stored intent is a
+        memory of what a previous process meant, not evidence about the
+        present: after the freeze at 4:01 and the reboot at 8:26 the state
+        file still said Kubota 53.3/57.0, and re-asserting it wrote over the
+        owner's 52/56 and started the Kubota twice in full sun. Whatever the
+        dashboard reports at startup is the owner's, because the agent has no
+        standing to claim any of it.
         """
-        self.state["intended"] = dict(applied)
-        self.state["last_heartbeat_ts"] = int(now or time.time())
+        values = dict(values)
+        self.state["owner_baseline"] = dict(values)
+        self.state["intended"] = dict(values)
+        self.state["raised_starts"] = {}
         self._save_state()
+        log.info("adopted the live thresholds as the baseline: %s", values)
+        return values
+
+    def approval(self):
+        """The decision that permits one write, or None.
+
+        apply_thresholds refuses to send anything without this, so there is no
+        path to the dashboard that check() has not seen and rule 9 has not
+        recorded.
+        """
+        decided = self.last_check or {}
+        return dict(decided) if decided.get("allowed") else None
 
     def intended(self):
         """Thresholds the agent means to be in force; defaults until it writes."""
@@ -530,36 +540,6 @@ class Guard:
         """
         return sunmod.daylight(self.cfg, now)
 
-    # --- heartbeat (SPEC section 9) ----------------------------------------
-
-    def heartbeat(self, now=None):
-        """(should_send, thresholds, reason) for the hourly re-send.
-
-        Exempt from the no-op rule, but only once the learning gate is open,
-        never while standing down for the owner, and never sooner than an hour
-        after the thresholds were last sent by anything.
-        """
-        now = int(now or time.time())
-        gate = self.model.learning_status(now=now)
-        if not gate["open"]:
-            return False, None, "learning phase: heartbeat withheld"
-        if now < self.state.get("override_until", 0):
-            return False, None, "standing down after an owner threshold change"
-        last = max(self.state.get("last_write_ts", 0) or 0,
-                   self.state.get("last_heartbeat_ts", 0) or 0)
-        if last and now - last < HEARTBEAT_SECONDS:
-            return False, None, (f"the thresholds were last sent "
-                                 f"{int((now - last) / 60)} minutes ago; the "
-                                 f"heartbeat is hourly")
-        values = self.intended()
-        # The heartbeat is a write too. Values adopted from an owner edit are
-        # whatever the dashboard had, which may be outside the hard limits;
-        # the agent records them but will not put them back.
-        ok, why = self.hard_limits(values)
-        if not ok:
-            return False, None, f"heartbeat withheld: {why}"
-        return True, values, "heartbeat"
-
     # --- rule 9: audit ------------------------------------------------------
 
     def _audit_line(self, now, text):
@@ -574,6 +554,9 @@ class Guard:
 
     def _audit(self, args, allowed, why, v, soc, now):
         result = "allowed" if allowed else "refused"
+        if self.last_check is not None:
+            self.last_check["allowed"] = bool(allowed)
+            self.last_check["ts"] = now
         history.record_action(self.conn, "set_gen_thresholds", args,
                               allowed, why, v, soc, result, ts=now)
         self._audit_line(now, f"{result} args={json.dumps(args, sort_keys=True)} "

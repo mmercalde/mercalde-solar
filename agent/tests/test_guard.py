@@ -236,22 +236,15 @@ def test_a_refused_limit_is_audited(ready, conn, cfg, now, tmp_path):
     assert "floor 52.0" in (tmp_path / "audit.log").read_text()
 
 
-def test_the_heartbeat_will_not_re_send_values_outside_the_limits(ready, now):
-    """An owner edit to 51.0 in the dashboard is adopted as observed, and
-    never written back by the hourly re-send."""
-    ready.state["intended"] = {"mep_start": 51.0, "mep_stop": 56.0,
-                               "kub_start": 51.0, "kub_stop": 56.0}
-    send, values, why = ready.heartbeat(now=now)
-    assert not send and values is None
-    assert why == "heartbeat withheld: floor 52.0: mep start 51.0 is below it, " \
-                  "and the floor is absolute"
-
-
-def test_the_heartbeat_sends_values_inside_the_limits(ready, now):
-    ready.state["intended"] = {"mep_start": 52.0, "mep_stop": 57.0,
-                               "kub_start": 52.0, "kub_stop": 57.0}
-    send, values, _ = ready.heartbeat(now=now)
-    assert send and values["mep_stop"] == 57.0
+def test_the_hard_limits_are_checked_on_every_write_there_is(ready, now, cfg):
+    """With the heartbeat gone, check() is the only way to the dashboard, so
+    a stored intent outside the limits cannot be re-asserted by anything."""
+    ready.state["intended"] = {"mep_start": 51.0, "mep_stop": 58.0,
+                               "kub_start": 51.0, "kub_stop": 58.0}
+    ok, why = ready.check(51.0, 58.0, 51.0, 58.0, "re-asserting intent",
+                          now=now, status=make_status(cfg, now))
+    assert not ok and why.startswith("floor 52.0")
+    assert ready.approval() is None
 
 
 # --- rule 1: bounds ---------------------------------------------------------
@@ -977,80 +970,39 @@ def test_an_unreachable_dashboard_is_refused_and_audited(conn, ready, cfg, now,
     assert conn.execute("SELECT COUNT(*) c FROM actions").fetchone()["c"] == 1
 
 
-# --- heartbeat (SPEC section 9) --------------------------------------------
+# --- there is no heartbeat, and no unguarded write --------------------------
 
-def test_the_heartbeat_is_withheld_during_the_learning_phase(g, now):
-    send, values, why = g.heartbeat(now=now)
-    assert not send and values is None and "learning phase" in why
-
-
-def test_the_heartbeat_sends_the_defaults_before_any_write(ready, cfg, now):
-    send, values, why = ready.heartbeat(now=now)
-    assert send
-    assert values == {"mep_start": cfg["default_start"], "mep_stop": cfg["default_stop"],
-                      "kub_start": cfg["default_start"], "kub_stop": cfg["default_stop"]}
+def test_the_guard_has_no_heartbeat_left(g):
+    """It reached the dashboard without passing check(), so it is gone."""
+    assert not hasattr(g, "heartbeat")
+    assert not hasattr(g, "note_heartbeat")
 
 
-def test_the_heartbeat_sends_the_last_intended_values(ready, cfg, now):
-    ready.note_write({"mep_start": 55.0, "mep_stop": 57.0,
-                      "kub_start": 52.0, "kub_stop": 54.5}, now=now - 3700)
-    send, values, _ = ready.heartbeat(now=now)
-    assert send and values["mep_start"] == 55.0
+def test_an_allowed_check_yields_an_approval_for_those_values(ready, cfg, now):
+    ok, _ = ready.check(52.0, 56.0, 52.0, 56.0, "x", now=now,
+                        status=make_status(cfg, now))
+    assert ok
+    approval = ready.approval()
+    assert approval["values"] == {"mep_start": 52.0, "mep_stop": 56.0,
+                                  "kub_start": 52.0, "kub_stop": 56.0}
 
 
-def test_the_heartbeat_ignores_the_no_op_rule(ready, cfg, now):
-    """A real write of these values would be refused as a no-op; the
-    heartbeat exists precisely to re-send what is already in force."""
-    ready.note_write({"mep_start": 52.0, "mep_stop": 54.5,
-                      "kub_start": 52.0, "kub_stop": 54.5}, now=now - 3700)
-    send, values, _ = ready.heartbeat(now=now)
-    assert send and values["mep_start"] == 52.0
+def test_a_refused_check_yields_no_approval(ready, cfg, now):
+    ready.check(51.0, 56.0, 52.0, 56.0, "below the floor", now=now,
+                status=make_status(cfg, now))
+    assert ready.approval() is None
 
 
-def test_the_heartbeat_is_hourly_not_per_tick(ready, cfg, now):
-    """At the 15-minute tick this wrote "Config updated" to the Pi5 event log
-    96 times a day. The watchdog's window is six hours."""
-    ready.note_heartbeat({"mep_start": 52.0, "mep_stop": 56.0,
-                          "kub_start": 52.0, "kub_stop": 56.0}, now=now - 900)
-    send, values, why = ready.heartbeat(now=now)
-    assert not send and values is None
-    assert "15 minutes ago" in why and "hourly" in why
-    send, _, _ = ready.heartbeat(now=now + 2701)
-    assert send, "an hour after the last one it goes out again"
+def test_no_check_at_all_yields_no_approval(g):
+    assert g.approval() is None
 
 
-def test_a_real_write_also_defers_the_heartbeat(ready, cfg, now):
-    """The thresholds have just been sent; re-sending them adds nothing."""
-    ready.note_write({"mep_start": 55.0, "mep_stop": 57.0,
-                      "kub_start": 52.0, "kub_stop": 56.0}, now=now - 600)
-    send, _, why = ready.heartbeat(now=now)
-    assert not send and "10 minutes ago" in why
-
-
-def test_the_heartbeat_is_not_the_rate_limit_clock(ready, cfg, now):
-    """The bug this hid: with the heartbeat setting last_write_ts every tick,
-    rule 5 refused every model write for as long as the agent was alive."""
-    ready.note_heartbeat({"mep_start": 52.0, "mep_stop": 56.0,
-                          "kub_start": 52.0, "kub_stop": 56.0}, now=now - 60)
-    assert ready.state["last_write_ts"] == 0
-    ok, why = ready.check(52.0, 57.0, 52.0, 57.0, "storm tomorrow",
-                          now=now, status=make_status(cfg, now, mep_stop=56.0,
-                                                      kub_stop=56.0))
-    assert ok, why
-
-
-def test_a_heartbeat_still_keeps_the_intended_values_current(ready, now):
-    """It reads back what /config reported, so a Pi5 clamp is not later
-    mistaken for the owner editing by hand."""
-    ready.note_heartbeat({"mep_start": 52.0, "mep_stop": 56.0,
-                          "kub_start": 52.0, "kub_stop": 56.0}, now=now)
-    assert ready.intended()["mep_stop"] == 56.0
-
-
-def test_the_heartbeat_stops_while_standing_down_for_the_owner(ready, now):
-    ready.state["override_until"] = now + 3600
-    send, values, why = ready.heartbeat(now=now)
-    assert not send and "standing down" in why
+def test_the_approval_is_for_what_the_guard_kept_not_what_was_asked(ready, cfg,
+                                                                    now):
+    st = make_status(cfg, now, kub_running=True, kub_start=53.3, kub_stop=56.0,
+                     mep_stop=56.0, voltage=53.1, soc=55)
+    ready.check(52.0, 56.0, 52.0, 54.5, "back to default", now=now, status=st)
+    assert ready.approval()["values"]["kub_stop"] == 56.0
 
 
 # --- state persistence ------------------------------------------------------
