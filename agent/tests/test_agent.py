@@ -22,10 +22,12 @@ def a(cfg, conn, monkeypatch, tmp_path):
     monkeypatch.setattr(agentmod.history, "connect",
                         lambda *a, **k: sqlite3.connect(":memory:"))
     monkeypatch.setattr(agentmod.history, "thread_connection", lambda *a, **k: conn)
+    # DATA_DIR before the Agent is built, not the state path after: the guard
+    # reads its state file in __init__, so redirecting it afterwards leaves
+    # the test holding whatever the last real run left on disk.
+    monkeypatch.setattr(agentmod.config, "DATA_DIR", str(tmp_path))
     monkeypatch.setattr(agentmod.guardmod.Guard, "_save_state", lambda self: None)
-    inst = agentmod.Agent(cfg, dry_run=True)
-    inst.guard.state_path = str(tmp_path / "state.json")
-    return inst
+    return agentmod.Agent(cfg, dry_run=True)
 
 
 def base_facts(cfg, gate_open=False, model=None):

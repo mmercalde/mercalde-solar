@@ -20,5 +20,6 @@
   "ags_max_run_hours": {"mep": 3, "kubota": 3},
   "exercise": {"mep_days": 5, "kubota_days": 3, "start": "09:00", "minutes": 30},
   "learning_live_days": 7,
+  "eval_retention_days": 14,
   "ask_port": 8090
 }

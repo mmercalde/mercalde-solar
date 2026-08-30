@@ -638,6 +638,33 @@ def record_plan(conn, text, data=None, ts=None):
     return ts
 
 
+def purge_plan_prompts(conn, cfg, days=None, now=None):
+    """Drop the recorded prompt and answer from plans older than `days`.
+
+    The plan record itself is small and kept; the prompt beside it is a
+    couple of kilobytes a tick, which is a hundred megabytes a year for
+    something only the last fortnight of replays needs.
+    """
+    now = int(now or time.time())
+    days = cfg.get("eval_retention_days", 14) if days is None else days
+    cutoff = now - days * 86400
+    dropped = 0
+    for row in conn.execute("SELECT ts, data FROM plans WHERE ts < ?", (cutoff,)).fetchall():
+        try:
+            data = json.loads(row["data"] or "{}")
+        except json.JSONDecodeError:
+            continue
+        if "prompt" not in data and "answer" not in data:
+            continue
+        data.pop("prompt", None)
+        data.pop("answer", None)
+        conn.execute("UPDATE plans SET data=? WHERE ts=?",
+                     (json.dumps(data), row["ts"]))
+        dropped += 1
+    conn.commit()
+    return dropped
+
+
 def latest_plan(conn):
     return conn.execute("SELECT * FROM plans ORDER BY ts DESC LIMIT 1").fetchone()
 

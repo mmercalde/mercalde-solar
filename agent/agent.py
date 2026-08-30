@@ -447,9 +447,10 @@ class Agent:
             log.warning("returning a raised start failed: %s", e)
 
         tools = self.tools(policy=facts["policy"])
+        prompt = self.tick_prompt(facts)
         try:
             text, write_result = self.run_model(
-                prompts.system_prompt(), self.tick_prompt(facts), tools)
+                prompts.system_prompt(), prompt, tools)
         except LLMError as e:
             log.error("model unavailable: %s", e)
             text, write_result = "", None
@@ -476,6 +477,12 @@ class Agent:
             "policy_misses": [r["rule"] for r in missed],
             "write": write_result,
             "dry_run": self.dry_run,
+            # What the model was actually asked, and what it actually said.
+            # model_eval.py replays these against a candidate endpoint; a
+            # replay of a reconstructed prompt would score a model on a
+            # question nobody put to it. Pruned after eval_retention_days.
+            "prompt": prompt,
+            "answer": text,
         }, ts=facts["now"])
 
         log.info("tick done in %.1fs; %s", time.time() - started, applied)
@@ -881,8 +888,7 @@ class Agent:
             evening = hour >= 12
             sched.add_job(self.digest, "cron", hour=hour, minute=0,
                           args=[evening], id=f"digest_{hour}")
-        sched.add_job(lambda: history.purge_samples(self.connection()), "cron", hour=3,
-                      minute=30, id="purge")
+        sched.add_job(self.purge, "cron", hour=3, minute=30, id="purge")
         sched.start()
 
         server = ask_server.serve(self.cfg, self.answer, self.latest_plan_json,
@@ -901,6 +907,13 @@ class Agent:
             sched.shutdown(wait=False)
             if server:
                 server.shutdown()
+
+    def purge(self):
+        conn = self.connection()
+        history.purge_samples(conn)
+        n = history.purge_plan_prompts(conn, self.cfg)
+        if n:
+            log.info("dropped the recorded prompt from %s old plans", n)
 
     def shutdown(self, *_):
         self.stop_event.set()

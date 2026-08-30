@@ -65,6 +65,7 @@ Every 15 minutes, day and night:
 | `telegram.py` | send and long-poll |
 | `ask_server.py` | `POST /ask` and `GET /plan` for Alexa |
 | `llm.py`, `llm_probe.py` | llama-server client, and a probe to check it |
+| `model_eval.py` | replay recorded ticks against a candidate model and score it |
 | `config.py` | config loading |
 | `schneider_modbus.py` | copied from `pi5/` |
 
@@ -220,7 +221,67 @@ agent/venv/bin/python agent/agent.py --ask "..."        # one question
 agent/venv/bin/python agent/agent.py --digest evening   # send a digest now
 agent/venv/bin/python agent/llm_probe.py                # check llama-server
 agent/venv/bin/python agent/counters.py                 # dump energy counters
+agent/venv/bin/python agent/model_eval.py -n 20         # score the live model
 ```
+
+## Comparing models
+
+`model_eval.py` replays recorded ticks against a model and marks it on the
+four things that have actually gone wrong in production:
+
+| check | what it catches |
+|---|---|
+| tool calls | a call naming no tool, or arguments that will not bind |
+| numbers | a figure in the answer that was in neither the prompt nor any tool result — POLICY 8, and the failure that put an invented voltage in front of Alexa |
+| rules | a POLICY rule that fired and was answered with "no change" instead of being set or overruled |
+| narration | telling the owner a write happened. Only the write path may say that; at 12:17 am a model said it after the guard had refused |
+
+The prompt and the answer are stored with every plan, so a candidate is asked
+exactly what the live model was asked, on nights that have already happened.
+Ticks whose prompt has been pruned are skipped rather than reconstructed — a
+replay of a rebuilt prompt scores a model on a question nobody put to it.
+`eval_retention_days` (14 by default) decides how long the prompts are kept;
+the plan records themselves are never pruned.
+
+Nothing is written and nothing is sent. The tools are read-only and pinned to
+the tick being replayed: `get_status` comes from the sample recorded that
+minute, the history and forecast tools compute from the database as of then,
+and `set_gen_thresholds` and `send_telegram` are captured for scoring. The
+one exception is `get_weather`, which has no stored history and answers for
+now rather than for then, which is why replays are worth keeping recent.
+
+### A second llama-server for A/B
+
+Run the candidate on another port. It does not touch the agent, which keeps
+talking to whatever `llm_url` in `config.json` points at:
+
+```bash
+# on the KAMRUI, alongside the live server on 8080
+llama-server -m ~/models/qwen3-14b-q4_k_m.gguf \
+  --host 127.0.0.1 --port 8082 --jinja -c 8192 -ngl 99 &
+
+agent/venv/bin/python agent/model_eval.py -n 20 \
+  --candidate http://127.0.0.1:8082/v1/chat/completions=qwen3-14b
+```
+
+The configured endpoint is scored as the incumbent alongside it; `--candidate`
+is repeatable, and `--only-candidates` leaves the live model out. Give a model
+name after `=` when the second server serves a different one.
+
+```
+model                        ticks  clean  calls  invalid  unsourced  fired  missed  narrated
+---------------------------------------------------------------------------------------------
+qwen3 (live)                    20    75%     47        0          3     11       2         0
+qwen3-14b @ 127.0.0.1:8082      20    95%     51        1          0     11       0         0
+```
+
+`clean` is the share of ticks with no fault of any kind. Every fault is
+printed underneath the table with its timestamp, so a number in it can be
+chased back to the tick that produced it. `--json` emits the rows instead.
+
+Both servers want their own weights in RAM. The KAMRUI has enough for an 8B
+and a 14B at Q4 at the same time, but not much else; stop the candidate when
+the comparison is done.
 
 ## Tests
 
