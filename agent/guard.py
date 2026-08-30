@@ -72,6 +72,7 @@ class Guard:
         self.state_path = state_path or os.path.join(config.DATA_DIR, "guard_state.json")
         self.state = self._load_state()
         self.last_seen = None
+        self.last_check = None
 
     @property
     def conn(self):
@@ -233,6 +234,8 @@ class Guard:
         # it back to describe the change to the owner without a second fetch.
         self.last_seen = {"thresholds": self._live_thresholds(live),
                           "voltage": v, "soc": soc, "ts": now}
+        # What check() decided to write, which may be less than was asked for.
+        self.last_check = {"values": dict(want), "refused": [], "requested": dict(want)}
 
         allowed, why = self._evaluate(want, data, live, v, soc, now, reason, policy)
         return self._audit(args, allowed, why, v, soc, now)
@@ -309,6 +312,18 @@ class Guard:
             return False, (f"standing down after an owner threshold change; "
                            f"{mins} minutes left")
 
+        # Rules 1, 3 and 4 are about one generator's own pair of numbers, so a
+        # proposal that breaks them for one generator is trimmed rather than
+        # thrown away whole. Last night's pre-dawn proposal bundled "Kubota
+        # start back to 52" - which was wanted - with "Kubota stop down to
+        # 54.5" mid-run, which is forbidden, and lost both.
+        kept, dropped = self._trim(want, data, live, live_now, v, soc, now)
+        if dropped and kept is None:
+            return False, "; ".join(dropped)
+        if dropped:
+            self.last_check["refused"] = list(dropped)
+            want = kept
+
         # Rule 8, second half: the owner's values are the baseline once they
         # have set them. The stand-down expiring ends the pause, not their
         # decision. Only a computed POLICY rule may move off that baseline,
@@ -355,24 +370,13 @@ class Guard:
                     f"the Pi5's {self.cfg['default_start']} V auto-start runs a "
                     f"generator before sunset")
 
-        # Rule 1: bounds.
-        smin, smax = self.cfg["start_voltage_min"], self.cfg["start_voltage_max"]
-        pmin, pmax = self.cfg["stop_voltage_min"], self.cfg["stop_voltage_max"]
-        for gen, skey, pkey, _ in GEN_KEYS:
-            if not smin - EPS <= want[skey] <= smax + EPS:
-                return False, (f"{gen} start {want[skey]} is outside the permitted "
-                               f"{smin}-{smax} V")
-            if not pmin - EPS <= want[pkey] <= pmax + EPS:
-                return False, (f"{gen} stop {want[pkey]} is outside the permitted "
-                               f"{pmin}-{pmax} V")
-            if want[pkey] - want[skey] < MIN_STOP_MINUS_START - EPS:
-                return False, (f"{gen} stop {want[pkey]} must be at least "
-                               f"{MIN_STOP_MINUS_START} V above its start "
-                               f"{want[skey]}")
-
         # Rule 2: no-op.
         if self._same(want, live_now):
-            return False, "those are already the live thresholds; nothing to change"
+            return False, ("those are already the live thresholds; nothing to "
+                           "change" if not dropped else
+                           "nothing is left to write once "
+                           + "; ".join(dropped))
+        self.last_check["values"] = dict(want)
 
         # Rule 5: rate limit. It exists to stop the agent churning the
         # thresholds upward; a write that only moves them back toward the
@@ -385,7 +389,6 @@ class Guard:
                            f"at most one write per "
                            f"{int(RATE_LIMIT_SECONDS / 60)} minutes")
 
-        # Rule 3: a running generator's stop may rise but never fall.
         for gen, skey, pkey, cfg_key in GEN_KEYS:
             action = data.get("mep803aAction" if gen == "mep" else "kubotaAction")
             if action == history.GEN_RUNNING and want[pkey] < live[cfg_key]["stopVoltage"] - EPS:
@@ -393,33 +396,12 @@ class Guard:
                                f"{live[cfg_key]['stopVoltage']} to {want[pkey]} "
                                f"mid-run (raising is allowed)")
 
-        # Rule 4: reachability for any generator that will fire now. The
-        # arithmetic is the load model's, so this refusal and the POLICY 5
-        # line in the plan record cannot disagree about the same question.
-        firing = [g for g in GEN_KEYS if want[g[1]] > v + EPS]
-        if firing:
-            window_h = min(min(live[cfg_key]["maxRuntime"] / 60.0,
-                               self.cfg["ags_max_run_hours"][gen])
-                           for gen, _, _, cfg_key in firing)
-            # Both engines on one pack is one question, not two. Asking each
-            # alone would refuse a pair for a shortfall neither of them has.
-            solo = len(firing) == 1
-            gen = firing[0][0] if solo else None
-            who = firing[0][0] if solo else "both generators"
-            target = max(want[pkey] for _, _, pkey, _ in firing)
-            reach = self.model.reach(gen, v, target, window_h, solo=solo,
-                                     soc_now=soc, now=now)
-            if reach["hours"] is None:
-                return False, (
-                    f"{reach['why']}. Use the default thresholds "
-                    f"{self.cfg['default_start']} / {self.cfg['default_stop']}")
-            if not reach["ok"]:
-                # The load model's own sentence, so this refusal and the
-                # POLICY line in the plan record cannot read differently.
-                return False, (f"{who} cannot lift the pack from {v} V to "
-                               f"{target} V in its run window: {reach['why']}")
+        ok, why = self._reachable(want, live, v, soc, now)
+        if not ok:
+            return False, why
 
-        return True, "permitted"
+        return True, ("permitted" if not dropped
+                      else "permitted in part; " + "; ".join(dropped))
 
     def toward_baseline(self, want, live):
         """Does every value move toward the owner's baseline, and one reach it?
@@ -438,6 +420,98 @@ class Guard:
             if now_ < was - EPS:
                 closer = True
         return closer
+
+    def _gen_faults(self, gen, pair, want, data, live, live_now, v, soc, now):
+        """Why this generator's proposed pair of numbers cannot stand, if it cannot.
+
+        Only the rules that are about one generator on its own: its bounds,
+        its separation, and lowering the stop of a generator that is running.
+        Reachability is about the set that fires, so it is asked later.
+        """
+        start, stop = pair
+        skey, pkey = (("mep_start", "mep_stop") if gen == "mep"
+                      else ("kub_start", "kub_stop"))
+        cfg_key = "mep803a" if gen == "mep" else "kubota"
+        smin, smax = self.cfg["start_voltage_min"], self.cfg["start_voltage_max"]
+        pmin, pmax = self.cfg["stop_voltage_min"], self.cfg["stop_voltage_max"]
+
+        if not smin - EPS <= start <= smax + EPS:
+            return (f"{gen} start {start} is outside the permitted "
+                    f"{smin}-{smax} V")
+        if not pmin - EPS <= stop <= pmax + EPS:
+            return (f"{gen} stop {stop} is outside the permitted "
+                    f"{pmin}-{pmax} V")
+        if stop - start < MIN_STOP_MINUS_START - EPS:
+            return (f"{gen} stop {stop} must be at least "
+                    f"{MIN_STOP_MINUS_START} V above its start {start}")
+        action = data.get("mep803aAction" if gen == "mep" else "kubotaAction")
+        if action == history.GEN_RUNNING and stop < live[cfg_key]["stopVoltage"] - EPS:
+            return (f"{gen} is running; its stop cannot be lowered from "
+                    f"{live[cfg_key]['stopVoltage']} to {stop} mid-run "
+                    f"(raising is allowed)")
+        return None
+
+    def _trim(self, want, data, live, live_now, v, soc, now):
+        """(values to write, what was dropped and why).
+
+        Each generator's numbers are tried as asked; where that fails, with
+        the stop left where it is, then with the start left where it is. The
+        first combination that stands is taken, so an allowed change is not
+        lost to a forbidden one beside it.
+        """
+        kept, dropped = dict(want), []
+        for gen, skey, pkey, _ in GEN_KEYS:
+            asked = (want[skey], want[pkey])
+            options = ((asked, None),
+                       ((want[skey], live_now[pkey]), f"{gen} stop"),
+                       ((live_now[skey], want[pkey]), f"{gen} start"),
+                       ((live_now[skey], live_now[pkey]), f"{gen} start and stop"))
+            first = None
+            for pair, giving_up in options:
+                fault = self._gen_faults(gen, pair, want, data, live, live_now,
+                                         v, soc, now)
+                if first is None:
+                    first = fault
+                if fault is None:
+                    kept[skey], kept[pkey] = pair
+                    if giving_up and (abs(pair[0] - asked[0]) > EPS
+                                      or abs(pair[1] - asked[1]) > EPS):
+                        dropped.append(f"{first} (left {giving_up} alone)")
+                    break
+            else:
+                return None, [first or f"{gen} cannot be written"]
+
+        return kept, dropped
+
+    def _reachable(self, want, live, v, soc, now):
+        """Rule 4, for whatever will actually fire, after the trim.
+
+        Asked once about the set that will run: both engines on one pack is a
+        single question, and asking each alone would refuse a pair for a
+        shortfall neither of them has.
+        """
+        firing = [g for g in GEN_KEYS if want[g[1]] > v + EPS]
+        if not firing:
+            return True, None
+        window_h = min(min(live[cfg_key]["maxRuntime"] / 60.0,
+                           self.cfg["ags_max_run_hours"][gen])
+                       for gen, _, _, cfg_key in firing)
+        solo = len(firing) == 1
+        gen = firing[0][0] if solo else None
+        who = firing[0][0] if solo else "both generators"
+        target = max(want[pkey] for _, _, pkey, _ in firing)
+        reach = self.model.reach(gen, v, target, window_h, solo=solo,
+                                 soc_now=soc, now=now)
+        if reach["hours"] is None:
+            return False, (f"{reach['why']}. Use the default thresholds "
+                           f"{self.cfg['default_start']} / "
+                           f"{self.cfg['default_stop']}")
+        if not reach["ok"]:
+            # The load model's own sentence, so this refusal and the POLICY
+            # line in the plan record cannot read differently.
+            return False, (f"{who} cannot lift the pack from {v} V to "
+                           f"{target} V in its run window: {reach['why']}")
+        return True, None
 
     def _daylight(self, now):
         """(sunrise, sunset) if `now` is between them, else None.

@@ -273,10 +273,19 @@ def test_start_below_the_configured_minimum_is_refused(conn, cfg, tmp_path,
     assert not ok and "outside the permitted" in why and "mep start" in why
 
 
-def test_start_above_the_ceiling_is_refused(ready, cfg, now):
+def test_start_above_the_ceiling_is_dropped_and_the_rest_stands(ready, cfg, now):
     ok, why = ready.check(52.0, 54.5, 56.5, 57.0, "x",
                           now=now, status=make_status(cfg, now))
-    assert not ok and "kubota start" in why
+    assert ok and "kubota start 56.5 is outside the permitted" in why
+    assert ready.last_check["values"]["kub_start"] == 52.0, "left where it was"
+    assert ready.last_check["values"]["kub_stop"] == 57.0, "the rest still lands"
+
+
+def test_a_generator_whose_every_option_fails_refuses_the_write(ready, cfg, now):
+    """Nothing of that generator can be written, so nothing is."""
+    ok, why = ready.check(52.0, 54.5, 52.0, 54.0, "x", now=now,
+                          status=make_status(cfg, now))
+    assert not ok and "kubota stop 54.0 is outside the permitted" in why
 
 
 def test_stop_below_the_configured_minimum_is_refused(ready, cfg, now):
@@ -343,6 +352,56 @@ def test_a_running_generators_start_is_irrelevant(ready, cfg, now):
     st = make_status(cfg, now, mep_running=True, mep_stop=54.5, voltage=53.0)
     ok, why = ready.check(52.5, 56.0, 52.0, 54.5, "x", now=now, status=st)
     assert ok, why
+
+
+# --- mixed proposals are split, not thrown away ------------------------------
+
+def test_a_forbidden_stop_does_not_lose_the_wanted_start(ready, cfg, now):
+    """Last night's pre-dawn proposal: "Kubota start back to 52" bundled with
+    "Kubota stop down to 54.5" mid-run. One was wanted, one was forbidden,
+    and both were lost."""
+    st = make_status(cfg, now, kub_running=True, kub_start=53.3, kub_stop=56.0,
+                     mep_stop=56.0, voltage=53.1, soc=55)
+    ok, why = ready.check(52.0, 56.0, 52.0, 54.5, "back to default", now=now,
+                          status=st)
+    assert ok, why
+    assert ready.last_check["values"]["kub_start"] == 52.0, "the start goes back"
+    assert ready.last_check["values"]["kub_stop"] == 56.0, "the stop stays put"
+    assert "kubota is running; its stop cannot be lowered" in why
+    assert "left kubota stop alone" in why
+    assert why.startswith("permitted in part")
+
+
+def test_the_refused_part_is_reported_to_the_caller(ready, cfg, now):
+    st = make_status(cfg, now, kub_running=True, kub_start=53.3, kub_stop=56.0,
+                     mep_stop=56.0, voltage=53.1, soc=55)
+    ready.check(52.0, 56.0, 52.0, 54.5, "back to default", now=now, status=st)
+    assert len(ready.last_check["refused"]) == 1
+    assert ready.last_check["requested"]["kub_stop"] == 54.5
+
+
+def test_a_whole_proposal_that_stands_reports_nothing_refused(ready, cfg, now):
+    ok, why = ready.check(52.0, 56.0, 52.0, 56.0, "x", now=now,
+                          status=make_status(cfg, now))
+    assert ok and why == "permitted" and ready.last_check["refused"] == []
+
+
+def test_one_generators_fault_does_not_touch_the_other(ready, cfg, now):
+    st = make_status(cfg, now, kub_running=True, kub_stop=56.0, mep_stop=56.0,
+                     voltage=53.1, soc=55)
+    ready.check(52.5, 56.5, 52.0, 54.5, "mixed", now=now, status=st)
+    assert ready.last_check["values"]["mep_start"] == 52.5
+    assert ready.last_check["values"]["mep_stop"] == 56.5
+
+
+def test_a_trim_that_leaves_nothing_to_write_is_a_refusal(ready, cfg, now):
+    """Only the forbidden half differed, so there is nothing left."""
+    st = make_status(cfg, now, kub_running=True, kub_start=52.0, kub_stop=56.0,
+                     mep_stop=56.0, voltage=53.1, soc=55)
+    ok, why = ready.check(52.0, 56.0, 52.0, 54.5, "lower it mid-run", now=now,
+                          status=st)
+    assert not ok and "nothing is left to write once" in why
+    assert "cannot be lowered" in why
 
 
 # --- rule 4: reachability ---------------------------------------------------

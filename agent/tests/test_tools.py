@@ -345,3 +345,30 @@ def test_a_model_message_is_escaped_too(conn, cfg, monkeypatch):
                         lambda cfg, text, **k: out.append(text) or True)
     tools.Tools(conn, cfg).send_telegram("load < 2 kW & falling")
     assert out == ["load &lt; 2 kW &amp; falling"]
+
+
+def test_a_trimmed_write_applies_the_part_that_stands(conn, cfg, sent):
+    """The guard kept the start change and dropped the stop change."""
+    guard = StubGuard(allowed=True)
+    guard.last_check = {"values": {"mep_start": 52.0, "mep_stop": 56.0,
+                                   "kub_start": 52.0, "kub_stop": 56.0},
+                        "requested": {"mep_start": 52.0, "mep_stop": 56.0,
+                                      "kub_start": 52.0, "kub_stop": 54.5},
+                        "refused": ["kubota is running; its stop cannot be "
+                                    "lowered from 56.0 to 54.5 mid-run"]}
+    t = tools.Tools(conn, cfg, guard=guard)
+    out = t.set_gen_thresholds(52.0, 56.0, 52.0, 54.5, "back to default")
+    assert out["applied"] is True
+    assert out["requested"]["kub_stop"] == 54.5
+    assert len(out["refused_parts"]) == 1
+    assert "Not done: kubota is running" in sent[0]
+
+
+def test_an_untrimmed_write_says_nothing_about_refusals(conn, cfg, sent):
+    guard = StubGuard(allowed=True)
+    guard.last_check = {"values": {"mep_start": 55.5, "mep_stop": 57.0,
+                                   "kub_start": 52.0, "kub_stop": 54.5},
+                        "refused": []}
+    t = tools.Tools(conn, cfg, guard=guard)
+    out = t.set_gen_thresholds(55.5, 57.0, 52.0, 54.5, "solo top-up")
+    assert out["refused_parts"] == [] and "Not done" not in sent[0]

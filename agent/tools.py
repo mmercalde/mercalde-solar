@@ -98,7 +98,8 @@ def describe_write(before, applied, voltage):
     return changes, effects
 
 
-def write_message(applied, reason, before=None, voltage=None, default_start=None):
+def write_message(applied, reason, before=None, voltage=None,
+                  default_start=None, refused=None):
     """What the owner is told about a threshold write.
 
     "Thresholds set" with four numbers reads like the Pi5's own low-voltage
@@ -113,6 +114,8 @@ def write_message(applied, reason, before=None, voltage=None, default_start=None
         if default_start is not None:
             tail += f", not the Pi5's {default_start} V auto-start"
         lines.append(telegram.escape(tail + "."))
+    for part in (refused or []):
+        lines.append(telegram.escape(f"Not done: {part}"))
     lines.append(f"Now MEP {applied['mep_start']} / {applied['mep_stop']}, "
                  f"Kubota {applied['kub_start']} / {applied['kub_stop']}"
                  + (f"; pack {voltage} V" if voltage is not None else ""))
@@ -350,6 +353,10 @@ class Tools:
                     "reason": "no guard is attached, so no write is permitted"}
         values = {k: v for k, v in args.items() if k != "reason"}
         allowed, why = self.guard.check(policy=self.policy, **args)
+        decided = getattr(self.guard, "last_check", None) or {}
+        # The guard may have kept part of the proposal and dropped the rest.
+        write = decided.get("values") or values
+        refused = decided.get("refused") or []
         if not allowed:
             # The values go back too: a refusal is the guard's decision, not a
             # failure to propose, and the plan record scores those separately.
@@ -358,7 +365,8 @@ class Tools:
         if self.dry_run:
             return {"applied": False, "dry_run": True,
                     "would_set": values, "reason": why}
-        live = apply_thresholds(self.cfg, mep_start, mep_stop, kub_start, kub_stop)
+        live = apply_thresholds(self.cfg, write["mep_start"], write["mep_stop"],
+                                write["kub_start"], write["kub_stop"])
         applied = thresholds_from_config(live)
         self.guard.note_write(applied)
         # Every executed write tells the owner, in Python, with the values the
@@ -368,9 +376,10 @@ class Tools:
         seen = getattr(self.guard, "last_seen", None) or {}
         notified = telegram.send(self.cfg, write_message(
             applied, reason, before=seen.get("thresholds"),
-            voltage=seen.get("voltage"),
+            voltage=seen.get("voltage"), refused=refused,
             default_start=self.cfg["default_start"]))
         return {"applied": True, "now": applied, "reason": reason,
+                "requested": values, "refused_parts": refused,
                 "notified": notified}
 
     # --- dispatch -----------------------------------------------------------
