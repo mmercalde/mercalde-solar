@@ -39,7 +39,8 @@ def base_facts(cfg, gate_open=False, model=None):
             2026, 8, 29, 6, 31, tzinfo=history.tzinfo(cfg)).timestamp()),
         "forecast": {"learned": True, "hours": 12, "total_wh": 10800},
         "projection": {"reached": now + 43800, "at": "4:10 am", "hours": 12.2},
-        "drawdown": {"wh": 10800, "month": 8, "nights": 12},
+        "drawdown": {"wh": 10800, "month": 8, "nights": 12,
+                     "source": "last 14 nights"},
         "gate": {"open": gate_open},
         "soc_curve": {"points": 12, "soc_at_start_threshold": 41.0,
                       "start_threshold_v": 52.0, "volts_low": 51.8,
@@ -69,7 +70,8 @@ def test_plan_record_matches_the_spec_shape(a, cfg):
     assert len(lines) == 10
     assert lines[0] == "2026-08-28 4:00 pm  V 55.8  SOC 84%  load 1.1 kW"
     assert lines[1] == "peak today: 55.8 V  (threshold 57.0 -> solar shortfall)"
-    assert lines[2] == "overnight Wh (profile, Aug weekday): 10,800"
+    assert lines[2] == ("overnight Wh: 10,800 — from last 14 nights "
+                        "(12 nights)")
     assert lines[3] == "projected 52.0 V at: 4:10 am   sunrise 6:31 am"
     assert lines[4] == ("forecast tomorrow: 20% cloud, est. solar 61.0 kWh "
                         "(Aug clear-day 68.0)")
@@ -107,7 +109,7 @@ def test_plan_record_says_what_it_has_not_learned(a, cfg):
     f["est_solar"] = None
     f["policy"] = policy.evaluate(cfg, f, StubModel())
     lines = a.plan_record(f, "no change", "no (learning phase)").splitlines()
-    assert lines[2].endswith("not learned yet")
+    assert lines[2] == "overnight Wh: not learned yet"
     assert "not projected (pack capacity not learned)" in lines[3]
     assert lines[4].endswith("not learned yet")
 

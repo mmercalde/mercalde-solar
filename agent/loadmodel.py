@@ -12,6 +12,7 @@ it returns None and says how much it has, so the guard and the plan record can
 say "not yet learned" instead of inventing a number.
 """
 
+import calendar
 import logging
 import math
 import statistics
@@ -26,6 +27,14 @@ log = logging.getLogger(__name__)
 
 # A profile cell needs this many observations before it is worth quoting.
 MIN_SAMPLES_PER_HOUR = 3
+# How the house's own history is preferred, newest first. The first tier with
+# enough evidence in it wins outright, so this year's pattern takes over from
+# last year's the moment there is a fortnight of it - a household changes, and
+# an August from three years ago should not still be arguing with this week.
+RECENT_TIERS = ((14, "last 14 nights"), (60, "last 60 days"))
+MIN_NIGHTS_PER_TIER = 3
+# The cleaned hourly rows are built once and reused until the table changes,
+# rather than once per hour of every forecast walk.
 MIN_DAYS_FOR_SOLAR_FIT = 8
 # A run taken while the house drew more than this multiple of its mean load
 # says more about the load than about the generator, so it is left out of the
@@ -246,41 +255,82 @@ class LoadModel:
         hours say nothing about consumption. Exercise runs are gen runs, so
         this drops them too.
         """
-        rows = self.conn.execute(
-            "SELECT hour_ts, wh_out FROM hourly "
-            "WHERE device='load' AND wh_out IS NOT NULL ORDER BY hour_ts").fetchall()
-        if not rows:
-            return []
-        excluded = history.gen_running_hours(
-            self.conn, rows[0]["hour_ts"], rows[-1]["hour_ts"] + 3600)
+        rows = self._all_load_rows()
         out = []
-        for r in rows:
-            if r["hour_ts"] in excluded:
-                continue
-            t = history.local(r["hour_ts"], self.cfg)
+        for t, wh in rows:
             if month is not None and t.month != month:
                 continue
             if weekend is not None and (t.weekday() >= 5) != weekend:
                 continue
-            out.append((t, r["wh_out"]))
+            out.append((t, wh))
         return out
+
+    def _all_load_rows(self):
+        """Every clean hourly load row, cached until the table changes.
+
+        A forecast walk asks for the profile once an hour of the window, and
+        each ask used to rescan the table and recompute the generator hours.
+        The cache is keyed on how many rows there are and how recent the
+        newest is, so a rollup during a tick is picked up at once rather than
+        waited out.
+        """
+        probe = self.conn.execute(
+            "SELECT COUNT(*) AS n, MAX(hour_ts) AS newest FROM hourly "
+            "WHERE device='load' AND wh_out IS NOT NULL").fetchone()
+        key = (probe["n"], probe["newest"])
+        cached = getattr(self, "_rows_cache", None)
+        if cached and cached[0] == key:
+            return cached[1]
+        rows = self.conn.execute(
+            "SELECT hour_ts, wh_out FROM hourly "
+            "WHERE device='load' AND wh_out IS NOT NULL ORDER BY hour_ts").fetchall()
+        out = []
+        if rows:
+            excluded = history.gen_running_hours(
+                self.conn, rows[0]["hour_ts"], rows[-1]["hour_ts"] + 3600)
+            out = [(history.local(r["hour_ts"], self.cfg), r["wh_out"])
+                   for r in rows if r["hour_ts"] not in excluded]
+        self._rows_cache = (key, out)
+        return out
+
+    def _tiers(self, now, month=None):
+        """(rows, label) in order of preference, newest evidence first."""
+        rows = self._all_load_rows()
+        today = history.local(now, self.cfg).date()
+        month = month or history.local(now, self.cfg).month
+        for days, label in RECENT_TIERS:
+            yield [(t, wh) for t, wh in rows
+                   if 0 <= (today - t.date()).days <= days], label
+        yield ([(t, wh) for t, wh in rows
+                if t.month == month and t.year < today.year],
+               f"{calendar.month_abbr[month]} in prior years")
+        yield rows, "all history"
 
     # --- load profile -------------------------------------------------------
 
-    def load_profile(self, month=None, weekend=None):
-        """{hour_of_day: median Wh}. Falls back to all months, then all days,
-        whenever a narrower slice has too little evidence."""
-        for m, w in ((month, weekend), (month, None), (None, weekend), (None, None)):
-            buckets = {}
-            for t, wh in self._clean_load_rows(m, w):
-                buckets.setdefault(t.hour, []).append(wh)
-            profile = {h: _median(v) for h, v in buckets.items()
-                       if len(v) >= MIN_SAMPLES_PER_HOUR}
-            if len(profile) >= 12:
-                return {"profile": profile, "month": m, "weekend": w,
-                        "hours_covered": len(profile),
-                        "observations": sum(len(v) for v in buckets.values())}
-        return {"profile": {}, "month": None, "weekend": None,
+    def load_profile(self, month=None, weekend=None, now=None):
+        """{hour_of_day: median Wh}, from the newest evidence that covers a day.
+
+        Recency first, then the weekday/weekend split within a tier if there
+        is enough of it. The two recent tiers are already in season, so they
+        are not filtered by month as well; the prior-year tier is the month
+        by definition.
+        """
+        now = int(now or time.time())
+        for rows, label in self._tiers(now, month):
+            for w in (weekend, None):
+                buckets = {}
+                for t, wh in rows:
+                    if w is not None and (t.weekday() >= 5) != w:
+                        continue
+                    buckets.setdefault(t.hour, []).append(wh)
+                profile = {h: _median(v) for h, v in buckets.items()
+                           if len(v) >= MIN_SAMPLES_PER_HOUR}
+                if len(profile) >= 12:
+                    return {"profile": profile, "month": month, "weekend": w,
+                            "source": label, "hours_covered": len(profile),
+                            "observations": sum(len(v) for v in buckets.values())}
+        return {"profile": {}, "month": None, "weekend": None, "source": None,
                 "hours_covered": 0, "observations": 0}
 
     def load_forecast(self, hours, now=None):
@@ -303,8 +353,31 @@ class LoadModel:
                 "by_hour": by_hour, "hours_unknown": missing,
                 "learned": missing == 0 and bool(by_hour)}
 
+    @staticmethod
+    def _whole_nights(rows, sunset_h, sunrise_h):
+        """{night: Wh} for nights with every hour present.
+
+        A night missing hours - to a generator run, or to a sampling gap -
+        would understate the drawdown, so it is left out rather than counted
+        short.
+        """
+        by_night = {}
+        for t, wh in rows:
+            if t.hour >= sunset_h or t.hour < sunrise_h:
+                # Hours after midnight belong to the night that began yesterday.
+                night = (t.date() if t.hour >= sunset_h
+                         else (t - timedelta(days=1)).date())
+                by_night.setdefault(night, []).append(wh)
+        night_hours = 24 - sunset_h + sunrise_h
+        return {n: sum(v) for n, v in by_night.items() if len(v) >= night_hours}
+
     def overnight_drawdown(self, month=None, now=None):
-        """Median Wh consumed between sunset and sunrise, by month."""
+        """Median Wh consumed between sunset and sunrise, newest evidence first.
+
+        Reports which tier it leaned on, because "15,200 Wh" from a fortnight
+        of this year and "15,200 Wh" from three Augusts ago are not the same
+        claim and the plan record should not present them as one.
+        """
         now = int(now or time.time())
         month = month or history.local(now, self.cfg).month
         times = sun.times(self.cfg, now=now)
@@ -312,20 +385,13 @@ class LoadModel:
             return None
         sunset_h = history.local(times[1], self.cfg).hour
         sunrise_h = history.local(times[0], self.cfg).hour
-        by_night = {}
-        for t, wh in self._clean_load_rows(month=month):
-            if t.hour >= sunset_h or t.hour < sunrise_h:
-                # Hours after midnight belong to the night that began yesterday.
-                night = (t.date() if t.hour >= sunset_h
-                         else (t - timedelta(days=1)).date())
-                by_night.setdefault(night, []).append(wh)
-        # Only whole nights count: a night with hours missing (to a generator
-        # run, or to a sampling gap) would understate the drawdown.
-        night_hours = 24 - sunset_h + sunrise_h
-        totals = [sum(v) for v in by_night.values() if len(v) >= night_hours]
-        if not totals:
-            return None
-        return {"month": month, "wh": round(_median(totals)), "nights": len(totals)}
+        for rows, label in self._tiers(now, month):
+            nights = self._whole_nights(rows, sunset_h, sunrise_h)
+            enough = (MIN_NIGHTS_PER_TIER if label != "all history" else 1)
+            if len(nights) >= enough:
+                return {"month": month, "wh": round(_median(list(nights.values()))),
+                        "nights": len(nights), "source": label}
+        return None
 
     # --- solar --------------------------------------------------------------
 

@@ -818,3 +818,89 @@ def test_monotonicity_does_not_disturb_the_low_end(conn, cfg, lm):
     scraped(conn, {51.85: (77, 2164), 52.6: (80, 3197), 53.35: (83, 4934),
                    54.1: (88, 5795), 54.85: (84, 2326), 55.6: (82, 2320)})
     assert lm.soc_for_voltage(52.0) == pytest.approx(77.4, abs=0.5)
+
+
+# --- recency: this year's pattern beats last year's -------------------------
+
+def nights_of(conn, cfg, start, days, wh):
+    """`days` whole nights of a given hourly load, from `start`."""
+    d0 = datetime.strptime(start, "%Y-%m-%d").date()
+    for i in range(days):
+        day = (d0 + timedelta(days=i)).strftime("%Y-%m-%d")
+        for hour in range(24):
+            add_load_hour(conn, cfg, day, hour, wh)
+
+
+@pytest.fixture
+def august(cfg, monkeypatch):
+    """Fixed sun times: a night from 19:00 to 06:00, eleven hours long."""
+    monkeypatch.setattr(loadmodel.sun, "times",
+                        lambda _cfg, day=None, now=None: (
+                            ts_at(cfg, "2026-08-20", 6), ts_at(cfg, "2026-08-20", 19)))
+    return ts_at(cfg, "2026-08-20", 22)
+
+
+def test_the_last_fortnight_wins_outright(conn, cfg, lm, august):
+    """The house changed. Three Augusts of 500 Wh do not get to argue."""
+    nights_of(conn, cfg, "2023-08-01", 31, 500)
+    nights_of(conn, cfg, "2024-08-01", 31, 500)
+    nights_of(conn, cfg, "2026-08-10", 10, 1500)
+    d = lm.overnight_drawdown(now=august)
+    assert d["source"] == "last 14 nights"
+    assert d["wh"] == 1500 * 11, "eleven hours of the new pattern"
+
+
+def test_sixty_days_when_the_fortnight_is_thin(conn, cfg, lm, august):
+    nights_of(conn, cfg, "2026-07-01", 20, 1200)
+    nights_of(conn, cfg, "2024-08-01", 31, 500)
+    d = lm.overnight_drawdown(now=august)
+    assert d["source"] == "last 60 days" and d["wh"] == 1200 * 11
+
+
+def test_prior_years_when_this_year_has_nothing(conn, cfg, lm, august):
+    nights_of(conn, cfg, "2024-08-01", 31, 500)
+    d = lm.overnight_drawdown(now=august)
+    assert d["source"] == "Aug in prior years" and d["wh"] == 500 * 11
+
+
+def test_a_thin_fortnight_does_not_win(conn, cfg, lm, august):
+    """Two nights is not a pattern; the tier is skipped, not trusted."""
+    nights_of(conn, cfg, "2026-08-18", 2, 9000)
+    nights_of(conn, cfg, "2026-07-01", 20, 1200)
+    d = lm.overnight_drawdown(now=august)
+    assert d["source"] == "last 60 days"
+
+
+def test_anything_at_all_beats_nothing(conn, cfg, lm, august):
+    """One night from an odd month is still better than saying nothing."""
+    nights_of(conn, cfg, "2026-02-10", 2, 800)
+    d = lm.overnight_drawdown(now=august)
+    assert d["source"] == "all history" and d["nights"] == 1
+
+
+def test_no_history_at_all_is_still_none(conn, cfg, lm, august):
+    assert lm.overnight_drawdown(now=august) is None
+
+
+def test_the_hourly_profile_follows_the_same_order(conn, cfg, lm):
+    """The deficit walks this profile, so it must lean the same way."""
+    now = ts_at(cfg, "2026-08-20", 22)
+    nights_of(conn, cfg, "2024-08-01", 31, 500)
+    assert lm.load_profile(month=8, now=now)["source"] == "Aug in prior years"
+    nights_of(conn, cfg, "2026-08-10", 10, 1500)
+    p = lm.load_profile(month=8, now=now)
+    assert p["source"] == "last 14 nights" and p["profile"][3] == 1500
+
+
+def test_the_cleaned_rows_are_not_re_read_for_every_hour(conn, cfg, lm,
+                                                         monkeypatch):
+    """A 24 hour walk asks for the profile 24 times."""
+    build_load_history(conn, cfg, days=30, start="2026-08-01")
+    reads = []
+    real = lm.conn.execute
+    monkeypatch.setattr(type(lm), "conn", property(
+        lambda self: type("C", (), {
+            "execute": lambda _s, *a, **k: (reads.append(a[0]), real(*a, **k))[1]})()))
+    lm.load_forecast(12, now=ts_at(cfg, "2026-08-20", 20))
+    built = [q for q in reads if "SELECT hour_ts" in q]
+    assert len(built) == 1, "the rows are built once, not once an hour"

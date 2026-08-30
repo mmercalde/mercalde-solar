@@ -203,14 +203,15 @@ class Agent:
         else:
             lines.append(f"peak today: {peak:.1f} V  (threshold {thresh} -> reached)")
 
-        month = t.strftime("%b")
-        kind = "weekend" if t.weekday() >= 5 else "weekday"
         if facts["drawdown"]:
-            lines.append(f"overnight Wh (profile, {month} {kind}): "
-                         f"{facts['drawdown']['wh']:,}")
+            d = facts["drawdown"]
+            lines.append(f"overnight Wh: {d['wh']:,} — from "
+                         f"{d.get('source') or 'the load profile'} "
+                         f"({d['nights']} night{'' if d['nights'] == 1 else 's'})")
         else:
-            lines.append(f"overnight Wh (profile, {month} {kind}): not learned yet")
+            lines.append("overnight Wh: not learned yet")
 
+        month = t.strftime("%b")
         proj = facts["projection"]
         sunrise = (history.clock(facts["sunrise_ts"], self.cfg)
                    if facts["sunrise_ts"] else "?")
