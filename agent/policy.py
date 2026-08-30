@@ -25,8 +25,9 @@ import re
 
 import history
 
-# Guard rule 1's separation, applied here so a proposal is never born invalid.
-MIN_STOP_MINUS_START = 2.0
+# Guard rule 1's separation lives in the manifest and reaches here through
+# config, so a proposal is never born invalid and there is only one copy of
+# the number.
 # Thresholds are written to one decimal.
 EPS = 0.05
 
@@ -224,7 +225,7 @@ def solo_top_up(cfg, f, model):
             f"but a start above {v:.1f} V would be over the "
             f"{cfg['start_voltage_max']:.1f} V limit, so no run can be started "
             f"now"]))
-    least_stop = round(start + MIN_STOP_MINUS_START, 1)
+    least_stop = round(start + cfg["min_stop_minus_start"], 1)
     if least_stop > ceiling + EPS:
         return _rule(4, name, False, "; ".join(parts + [
             f"but a start above {v:.1f} V would need a stop of "
@@ -248,7 +249,7 @@ def solo_top_up(cfg, f, model):
                 f"{want['volts']:.1f} ({want['basis']})"]
         if target > want["volts"] + EPS:
             note.append(f"raised to {target:.1f} to clear a start above "
-                        f"{v:.1f} V by {MIN_STOP_MINUS_START:.1f} V")
+                        f"{v:.1f} V by {cfg['min_stop_minus_start']:.1f} V")
         reach = model.reach(gen, v, target, _window_for(f, gens), solo=solo,
                             soc_now=soc)
         band = (f"{label} band (deficit ≤ {band_max:,} Wh)" if band_max

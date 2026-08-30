@@ -1,3 +1,4 @@
 requests>=2.31
 apscheduler>=3.10,<4
 pytest>=7.4
+pyyaml>=6

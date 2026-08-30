@@ -25,6 +25,13 @@ def model():
 
 
 @pytest.fixture
+def cfg(cfg):
+    """A 2.0 h pre-dawn window, so these tests do not move when the site is
+    retuned. test_system.py checks the manifest's own value reaches config."""
+    return dict(cfg, predawn_hours=2.0)
+
+
+@pytest.fixture
 def night(cfg):
     """The first live night, as the facts reached the model at 10 pm."""
     now = ts_at(cfg, "2026-08-27", 22)

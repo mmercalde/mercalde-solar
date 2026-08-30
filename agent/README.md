@@ -56,7 +56,9 @@ Every 15 minutes, day and night:
 | `guard.py` | the hard rules; every write passes through it |
 | `tools.py` | the eight read tools and the single write, as OpenAI schemas |
 | `eval_cases.py` | Q&A cases and their graders, for `model_eval.py --exam` |
-| `prompts.py` | MISSION / SYSTEM / POLICY, meant to be edited by hand |
+| `system.yaml` | the system manifest: hardware, network, policy constants |
+| `system.py` | reads the manifest; generates SYSTEM; checks the guard's limits |
+| `prompts.py` | MISSION and POLICY by hand; SYSTEM generated from the manifest |
 | `history.py` | SQLite store, the 60 s sampler, rollups, generator-run derivation |
 | `loadmodel.py` | load profile, solar yield, charge rates, projections, learning gate |
 | `counters.py` | Gateway energy registers over Modbus 503 |
@@ -104,6 +106,29 @@ Start it:
 sudo systemctl enable --now solar-agent
 journalctl -u solar-agent -f
 ```
+
+## The manifest
+
+`agent/system.yaml` is the one description of the site: inverters, generators,
+battery, arrays, network, and the policy constants. Three things read it.
+
+The SYSTEM section of the model's prompt is generated from it, so the prompt
+cannot drift from the hardware. `config.json` keeps only what is secret or
+per-install — the Telegram token, the gateway password, the model endpoint —
+and every key the manifest also names is taken from the manifest, with a
+warning if `config.json` still sets it. And `guard.py` keeps its hard floor
+and ceiling as code constants, because a number that can be edited in a data
+file is not a hard limit, but checks them against `battery.floor_v` and
+`battery.ceiling_v` at import: a manifest that disagreed would be describing a
+system that does not exist.
+
+Where the repository disagreed with itself the manifest records the
+disagreement rather than resolving it by guesswork. The array table in the
+top-level README gives slave IDs that contradict the mapping in
+`docs/energy_registers.md`, which was established by reading each slave with
+both MPPT register tables and seeing which one gave a possible answer; the
+manifest carries the verified mapping and marks the physical array behind each
+controller as unverified.
 
 ## The learning phase
 

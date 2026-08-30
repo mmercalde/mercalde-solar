@@ -236,6 +236,14 @@ def plan_at(a, cfg, day, hour, minute, reached_hour, reached_minute=0):
 
 
 @pytest.fixture
+def cfg(cfg):
+    """A 2.0 h pre-dawn window throughout, so the plan record's shape does not
+    move when the site is retuned. test_system.py checks that the manifest's
+    own value is what reaches config."""
+    return dict(cfg, predawn_hours=2.0)
+
+
+@pytest.fixture
 def morning(cfg):
     """07:00, the hour the overnight report goes out."""
     return int(datetime(2026, 8, 28, 7, 0,

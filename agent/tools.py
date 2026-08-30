@@ -20,8 +20,10 @@ from datetime import datetime, timedelta
 import requests
 
 import counters
+import guard as guardmod
 import history
 import loadmodel
+import system as systemmod
 import telegram
 import weather
 
@@ -295,6 +297,36 @@ SCHEMAS = [
                                          "it was that, or 'YYYY-MM-DD H:MM am'."}},
             "required": ["timestamp"]}}},
     {"type": "function", "function": {
+        "name": "get_system_specs",
+        "description": "The system manifest: inverters, generators, battery, "
+                       "arrays, network and the policy constants, as recorded "
+                       "in system.yaml. Use it for what the hardware is.",
+        "parameters": {"type": "object", "properties": {}, "required": []}}},
+    {"type": "function", "function": {
+        "name": "get_mppt_detail",
+        "description": "Per-controller solar: live watts, volts and amps, plus "
+                       "today's and this month's kWh from the energy counters.",
+        "parameters": {"type": "object", "properties": {}, "required": []}}},
+    {"type": "function", "function": {
+        "name": "get_battery_detail",
+        "description": "The Battery Monitor in full: amp-hours remaining, "
+                       "minutes to discharge, net current, and the learned "
+                       "capacity and voltage/SOC curve.",
+        "parameters": {"type": "object", "properties": {}, "required": []}}},
+    {"type": "function", "function": {
+        "name": "get_guard_state",
+        "description": "What the guard will and will not permit right now: the "
+                       "owner's baseline, the rate-limit clock, the daylight "
+                       "hold, the learning gate and the hard limits.",
+        "parameters": {"type": "object", "properties": {}, "required": []}}},
+    {"type": "function", "function": {
+        "name": "get_recent_actions",
+        "description": "The last N entries from the audit log: every write "
+                       "attempted, whether it was allowed or refused, and why.",
+        "parameters": {"type": "object", "properties": {
+            "n": {"type": "integer", "description": "How many, 1 to 50."}},
+            "required": ["n"]}}},
+    {"type": "function", "function": {
         "name": "get_weather",
         "description": "Cloud cover, solar radiation, temperature and sunrise/sunset "
                        "for the next 48 hours, with the estimated solar yield.",
@@ -327,7 +359,8 @@ SCHEMAS = [
 
 READ_TOOLS = {"get_status", "get_history", "get_load_forecast",
               "get_gen_runtime", "get_voltage_at", "get_weather", "get_ac_diag",
-              "send_telegram"}
+              "get_system_specs", "get_mppt_detail", "get_battery_detail",
+              "get_guard_state", "get_recent_actions", "send_telegram"}
 WRITE_TOOLS = {"set_gen_thresholds"}
 
 
@@ -531,6 +564,123 @@ class Tools:
             w["estimated_solar_wh"] = est["wh"] if est else None
             w["clear_day_wh"] = est["clear_day_wh"] if est else None
         return out
+
+    def get_system_specs(self):
+        """The manifest. What the hardware is, from the one file that says so."""
+        return systemmod.load()
+
+    def get_mppt_detail(self):
+        """Each controller on its own: what it is making now, and today."""
+        data = history.fetch_data(self.cfg)
+        manifest = systemmod.load()
+        today = history.local_day(int(time.time()), self.cfg)
+        out = []
+        for a in manifest["arrays"]["controllers"]:
+            key = a["data_key"].replace("PVPower", "")
+            row = {"name": a["name"], "slave": a["slave"],
+                   "controller": a["controller"],
+                   "watts": data.get(a["data_key"]),
+                   "pv_volts": data.get(key + "PVVoltage"),
+                   "pv_amps": data.get(key + "PVCurrent"),
+                   "charge_status": data.get(key + "ChargeStatus"),
+                   "observed_peak_w": a.get("observed_peak_w")}
+            for period in ("today", "month"):
+                c = self.conn.execute(
+                    "SELECT kwh FROM counters WHERE device=? AND counter=? "
+                    "AND period=? ORDER BY ts DESC LIMIT 1",
+                    (a["name"], "energy_from_pv", period)).fetchone()
+                row[f"kwh_{period}"] = c["kwh"] if c else None
+            out.append(row)
+        return {"as_of": history.stamp(int(time.time()), self.cfg),
+                "day": today, "controllers": out,
+                "total_w": sum(r["watts"] or 0 for r in out),
+                "total_kwh_today": round(sum(r["kwh_today"] or 0 for r in out), 3),
+                "note": "kWh come from the controllers' own energy counters, "
+                        "read over Modbus; watts are the live reading."}
+
+    def get_battery_detail(self):
+        """The Battery Monitor in full, and what the agent has learned of the pack."""
+        data = history.fetch_data(self.cfg)
+        b = systemmod.load()["battery"]
+        curve = self.model.soc_curve_status()
+        return {
+            "as_of": history.stamp(int(time.time()), self.cfg),
+            "monitor": {"model": b["monitor"]["model"],
+                        "slave": b["monitor"]["slave"],
+                        "online": data.get("battMonitorOnline")},
+            "voltage": data.get("batteryVoltage"),
+            "soc_pct": data.get("battSocBM"),
+            "ah_remaining": data.get("battAhRemaining"),
+            "minutes_to_discharge": data.get("battMinToDischarge"),
+            "net_current_a": data.get("battCurrent"),
+            "net_power_w": data.get("battPower"),
+            "temperature_c": None,
+            "temperature_note": "the Battery Monitor publishes no temperature "
+                                "over Modbus; there is no cell or pack "
+                                "temperature to report",
+            "nominal": {"capacity_kwh": b["capacity_kwh_nominal"],
+                        "capacity_ah": b["capacity_ah_nominal"],
+                        "chemistry": b["chemistry"],
+                        "configuration": b["configuration"]},
+            "learned": {"capacity_wh": self.model.capacity_wh(),
+                        "capacity_ah": self.model.capacity_ah(),
+                        "curve_points": curve["points"],
+                        "curve_volts": [curve["volts_low"], curve["volts_high"]],
+                        "soc_at_start_threshold": curve["soc_at_start_threshold"]},
+            "limits": {"floor_v": b["floor_v"], "ceiling_v": b["ceiling_v"],
+                       "full_v": b["full_v"]},
+        }
+
+    def get_guard_state(self):
+        """What the guard will permit right now, and what it will not."""
+        if self.guard is None:
+            return {"error": "no guard is attached"}
+        now = int(time.time())
+        g = self.guard
+        gate = self.model.learning_status(now=now)
+        last_write = g.state.get("last_write_ts") or 0
+        since = now - last_write if last_write else None
+        daylight = g._daylight(now)
+        return {
+            "as_of": history.stamp(now, self.cfg),
+            "hard_limits": {"start_floor_v": guardmod.HARD_START_FLOOR,
+                            "stop_ceiling_v": guardmod.HARD_STOP_CEILING,
+                            "note": "code constants; no rule or config widens them"},
+            "baseline": g.baseline(),
+            "owner_baseline": g.owner_baseline(),
+            "intended": g.intended(),
+            "raised_starts": g.raised_starts(),
+            "rate_limit": {
+                "seconds": guardmod.RATE_LIMIT_SECONDS,
+                "last_write": (history.stamp(last_write, self.cfg)
+                               if last_write else None),
+                "minutes_since": round(since / 60) if since is not None else None,
+                "in_force": bool(last_write and since < guardmod.RATE_LIMIT_SECONDS),
+                "note": "a write that only moves values back toward the "
+                        "baseline is exempt"},
+            "daylight_hold": {
+                "in_daylight": bool(daylight),
+                "sunrise": history.clock(daylight[0], self.cfg) if daylight else None,
+                "sunset": history.clock(daylight[1], self.cfg) if daylight else None,
+                "note": "while the sun is up no write may raise a start above "
+                        "the baseline"},
+            "owner_stand_down": {
+                "until": (history.stamp(g.state["override_until"], self.cfg)
+                          if now < g.state.get("override_until", 0) else None)},
+            "learning_gate": gate,
+        }
+
+    def get_recent_actions(self, n):
+        """The audit log: every write attempted, and what the guard said."""
+        n = max(1, min(int(n), 50))
+        rows = history.recent_actions(self.conn, limit=n)
+        return {"count": len(rows),
+                "actions": [{"at": history.stamp(r["ts"], self.cfg),
+                             "tool": r["tool"], "result": r["result"],
+                             "allowed": bool(r["allowed"]),
+                             "reason": r["reason"],
+                             "voltage": r["voltage"], "soc": r["soc"],
+                             "args": r["args"]} for r in rows]}
 
     def get_ac_diag(self):
         r = requests.get(self.cfg["dashboard_url"] + "/acdiag", timeout=15)

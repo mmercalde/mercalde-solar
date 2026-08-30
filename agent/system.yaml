@@ -1,0 +1,157 @@
+# The system, as it actually is. One file, edited by hand, read by everything.
+#
+# The agent's SYSTEM prompt is generated from this at startup, the config keys
+# that describe hardware or policy are taken from here rather than duplicated
+# in config.json, and guard.py asserts its hard limits against it before the
+# first tick. config.json keeps only what is secret or per-install: the
+# Telegram token, the gateway password, the model endpoint.
+#
+# Where a number here is measured rather than nameplate it says so. Where the
+# repository disagrees with itself, the disagreement is written down rather
+# than resolved by guesswork.
+
+site:
+  name: Rosarito
+  timezone: America/Tijuana
+  latitude: 32.36
+  longitude: -117.06
+
+network:
+  dashboard_url: http://192.168.3.10:8080     # Pi 5, Flask dashboard
+  agent_host: 192.168.3.152                   # KAMRUI, this agent
+  gateway:
+    host: 192.168.3.131                       # Schneider Conext Gateway
+    modbus_port: 503
+    insightlocal_url: https://192.168.3.131
+  vps: 45.32.131.224                          # nginx, Alexa webhook
+  esp8266_backup: 192.168.6.72
+
+# Three Schneider inverters on one Modbus segment. The two XW Pros run in
+# parallel through a PDP; their AC output calibration is held near-identical
+# (Master 32840, Slave 32940) because a large difference between them drives
+# circulating current.
+inverters:
+  - name: xw_pro_master
+    model: Schneider XW Pro 6848
+    slave: 10
+    role: AC output, DC power and charger; paralleled with the slave
+  - name: xw_plus_5548
+    model: Schneider XW+ 5548
+    slave: 11
+    role: fed by the Kubota generator
+  - name: xw_pro_slave
+    model: Schneider XW Pro 6848
+    slave: 12
+    role: paralleled with the master through the PDP
+
+generators:
+  # Effective charge is what the pack actually receives, not the engine's
+  # nameplate. The agent learns each generator's real figure from the shunt
+  # and falls back to assumed_charge_a until it has three runs of its own.
+  mep:
+    label: MEP-803A
+    ags_slave: 51
+    nameplate_kw: 10
+    charge_rate_pct: 100
+    feeds: [xw_pro_master, xw_pro_slave]
+    assumed_charge_a: 140          # conservative, ~7.4 kW at 53 V
+    exercise: {every_days: 5, at: "09:00", minutes: 30}
+  kubota:
+    label: Kubota
+    ags_slave: 50
+    nameplate_kw: 7
+    charge_rate_pct: 70
+    feeds: [xw_plus_5548]
+    assumed_charge_a: 80           # conservative, ~4.2 kW at 53 V
+    exercise: {every_days: 3, at: "09:00", minutes: 30}
+    # The Kubota's runs also drive a Magnum MS4048 inverter/charger that is
+    # not on Modbus. Nothing the Schneider units report includes what the
+    # Magnum is doing, so anything summed from their registers understates a
+    # Kubota run. The shunt's net current into the pack is the only correct
+    # measure of what a Kubota run delivers, and it is what the agent uses.
+    # The 70% charge-rate cap exists because of this parallel charger.
+    magnum: {model: Magnum MS4048, on_modbus: false}
+  max_run:
+    pi5_minutes: 120               # the dashboard's own cap per run
+    ags_hours: 3                   # the AGS cap, whichever binds first
+
+battery:
+  # Three chemistries on a common DC bus, 15S, two BMS units with active
+  # balancers - so 10-15 mV cell deltas are normal and not a fault.
+  chemistry: LG NMC, Tesla 18650 modules, Chevy Bolt LG cells
+  configuration: 15S
+  capacity_kwh_nominal: 96         # ~1790 Ah at 53.6 V
+  capacity_ah_nominal: 1790
+  # The agent does not use the nominal figure to plan. It learns the pack's
+  # real capacity from the monitor's own Ah-remaining against SOC.
+  capacity_learned_from: Conext Battery Monitor, Ah remaining vs SOC
+  floor_v: 52.0                    # never start below this
+  ceiling_v: 57.0                  # never stop above this
+  full_v: 61.0                     # what full would be; deliberately not a target
+  policy: >
+    Held mid-curve on purpose, between about 52 and 57 V, for longevity.
+    Charging to full is never the goal.
+  monitor:
+    model: Conext Battery Monitor
+    slave: 191
+    measures: [voltage, current, state of charge, amp-hours remaining,
+               minutes to discharge]
+    note: >
+      Positive current is charging. The monitor publishes no temperature and
+      no energy counters; battery in and out are derived by summing the XW
+      units' own counters.
+
+# 52 panels, 225 W each, 11.7 kW nominal, across three controllers.
+#
+# The slave-to-model mapping below is the verified one from
+# docs/energy_registers.md, where each slave was read with both MPPT register
+# tables and the wrong table gave an impossible answer. The README's own array
+# table disagrees with it about which slave is the MPPT 80, and its panel
+# counts do not match the measured output ratios either, so the physical
+# array behind each controller is recorded as unverified rather than guessed.
+arrays:
+  totals:
+    panels: 52
+    panel_watts: 225
+    nominal_kw: 11.7
+  controllers:
+  - name: mppt80
+    slave: 170
+    controller: Schneider MPPT 80 600
+    data_key: mppt80PVPower
+    observed_peak_w: 2084          # highest seen in the stored samples
+    physical: unverified - the README places the generator building roof here
+  - name: south
+    slave: 31
+    controller: Schneider MPPT 60 150
+    data_key: southArrayPVPower
+    observed_peak_w: 1497
+    physical: unverified - the README places the house south and west hips here
+  - name: west
+    slave: 30
+    controller: Schneider MPPT 60 150
+    data_key: westArrayPVPower
+    observed_peak_w: 2092
+    physical: unverified - the README places the ground array and terrace here
+
+# What the agent is allowed to do with its one lever. guard.py holds
+# floor_v and ceiling_v as code constants and checks them against
+# battery.floor_v and battery.ceiling_v at startup; the rest is read here.
+policy:
+  default_start: 52.0
+  default_stop: 56.0
+  start_voltage_min: 52.0
+  start_voltage_max: 56.0
+  stop_voltage_min: 54.5
+  stop_voltage_max: 57.0
+  min_stop_minus_start: 2.0
+  solo_peak_threshold: 57.0
+  solo_target: 57.0
+  solo_target_floor: 55.0
+  storm_cloud_pct: 70
+  clear_cloud_pct: 30
+  predawn_hours: 3.0            # tuned on the live system; was 2.0
+  topup_earliest: sunset
+  topup_margin_pct: 15
+  min_topup_wh: 6000
+  topup_bands: {kubota: 8000, mep: 15000}

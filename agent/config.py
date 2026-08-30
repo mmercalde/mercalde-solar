@@ -8,6 +8,8 @@ import json
 import logging
 import os
 
+import system
+
 log = logging.getLogger(__name__)
 
 AGENT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -31,6 +33,7 @@ def load(path=None):
     path = path or CONFIG_PATH
     with open(EXAMPLE_PATH) as f:
         cfg = json.load(f)
+    user = {}
     if os.path.exists(path):
         with open(path) as f:
             user = json.load(f)
@@ -45,6 +48,18 @@ def load(path=None):
             "agent/config.json not found. Copy agent/config.example.json to "
             "agent/config.json and fill in the Telegram and gateway credentials."
         )
+    # The manifest owns everything that describes the system or the rules for
+    # it; config.json keeps what is secret or per-install. Where both name a
+    # key the manifest wins, and the stale one is said out loud rather than
+    # silently ignored.
+    manifest = system.load()
+    overlay = system.config_overlay(manifest)
+    for key, value in overlay.items():
+        if key in user and user[key] != value:
+            log.warning("config.json sets %s=%r, but system.yaml says %r; "
+                        "the manifest wins", key, user[key], value)
+        cfg[key] = value
+
     missing = [k for k in REQUIRED if cfg.get(k) in (None, "")]
     if missing:
         raise SystemExit("config.json is missing required keys: " + ", ".join(missing))

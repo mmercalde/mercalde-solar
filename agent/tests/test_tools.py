@@ -1,10 +1,12 @@
 """Tool behaviour, above all the shape of the one write the agent may make."""
 
 import json
+import time
 from urllib.parse import parse_qs, urlparse
 
 import pytest
 
+import history
 import tools
 
 
@@ -311,7 +313,7 @@ def test_a_telegram_failure_does_not_undo_the_write(conn, cfg, monkeypatch):
 def test_schemas_cover_every_tool_and_nothing_else():
     named = {s["function"]["name"] for s in tools.SCHEMAS}
     assert named == tools.READ_TOOLS | tools.WRITE_TOOLS
-    assert len(named) == 9
+    assert len(named) == 14
 
 
 def test_every_schema_is_a_valid_openai_function():
@@ -480,3 +482,136 @@ def test_a_refused_check_leaves_no_approval_to_write_with(conn, cfg, session):
     t = tools.Tools(conn, cfg, guard=guard)
     out = t.set_gen_thresholds(53.3, 57.0, 53.3, 57.0, "re-asserting intent")
     assert out["applied"] is False and session.calls == 0
+
+
+# --- the five tools that describe the system itself --------------------------
+
+LIVE_DATA = {
+    "batteryVoltage": 54.45, "battSocBM": 87, "battAhRemaining": 1568,
+    "battMinToDischarge": 614, "battCurrent": 40.2, "battPower": 2192,
+    "battMonitorOnline": True,
+    "mppt80PVPower": 1763, "mppt80PVVoltage": 192.52, "mppt80PVCurrent": 9.16,
+    "mppt80ChargeStatus": 769,
+    "southArrayPVPower": 1399, "southArrayPVVoltage": 78.21,
+    "southArrayPVCurrent": 17.9, "southArrayChargeStatus": 769,
+    "westArrayPVPower": 2042, "westArrayPVVoltage": 74.53,
+    "westArrayPVCurrent": 27.41, "westArrayChargeStatus": 769,
+    "mep803aAction": 10, "kubotaAction": 10,
+}
+
+
+@pytest.fixture
+def live(monkeypatch):
+    monkeypatch.setattr(tools.history, "fetch_data", lambda *a, **k: dict(LIVE_DATA))
+
+
+def test_the_specs_are_the_manifest(conn, cfg):
+    import system
+    assert tools.Tools(conn, cfg).get_system_specs() == system.load()
+
+
+def test_the_mppt_detail_is_per_controller(conn, cfg, live):
+    out = tools.Tools(conn, cfg).get_mppt_detail()
+    by_name = {c["name"]: c for c in out["controllers"]}
+    assert set(by_name) == {"mppt80", "south", "west"}
+    assert by_name["west"]["watts"] == 2042
+    assert by_name["west"]["pv_volts"] == 74.53
+    assert by_name["west"]["pv_amps"] == 27.41
+    assert by_name["west"]["slave"] == 30
+    assert by_name["mppt80"]["controller"] == "Schneider MPPT 80 600"
+    assert out["total_w"] == 1763 + 1399 + 2042
+
+
+def test_the_mppt_detail_carries_the_energy_counters(conn, cfg, live):
+    for device, kwh in (("west", 6.94), ("south", 6.23), ("mppt80", 6.78)):
+        conn.execute("INSERT INTO counters (ts, device, counter, period, kwh) "
+                     "VALUES (1000, ?, 'energy_from_pv', 'today', ?)",
+                     (device, kwh))
+    conn.commit()
+    out = tools.Tools(conn, cfg).get_mppt_detail()
+    by_name = {c["name"]: c for c in out["controllers"]}
+    assert by_name["west"]["kwh_today"] == 6.94
+    assert out["total_kwh_today"] == 19.95
+
+
+def test_a_controller_with_no_counter_row_says_none(conn, cfg, live):
+    out = tools.Tools(conn, cfg).get_mppt_detail()
+    assert all(c["kwh_today"] is None for c in out["controllers"])
+
+
+def test_the_battery_detail_carries_the_monitor(conn, cfg, live):
+    out = tools.Tools(conn, cfg).get_battery_detail()
+    assert out["ah_remaining"] == 1568
+    assert out["minutes_to_discharge"] == 614
+    assert out["net_current_a"] == 40.2
+    assert out["monitor"]["slave"] == 191 and out["monitor"]["online"] is True
+    assert out["limits"] == {"floor_v": 52.0, "ceiling_v": 57.0, "full_v": 61.0}
+
+
+def test_the_battery_detail_says_there_is_no_temperature(conn, cfg, live):
+    """It is not published over Modbus, so the tool says so rather than
+    leaving the model to wonder whether it forgot to look."""
+    out = tools.Tools(conn, cfg).get_battery_detail()
+    assert out["temperature_c"] is None
+    assert "publishes no temperature" in out["temperature_note"]
+
+
+def test_the_battery_detail_separates_nominal_from_learned(conn, cfg, live):
+    out = tools.Tools(conn, cfg).get_battery_detail()
+    assert out["nominal"]["capacity_kwh"] == 96
+    assert out["learned"]["capacity_wh"] is None, "nothing learned from an empty db"
+
+
+def test_the_guard_state_reports_what_it_will_permit(conn, cfg, monkeypatch,
+                                                     tmp_path):
+    import guard as guardmod
+    import sun
+    monkeypatch.setattr(sun, "times", lambda *a, **k: (1000, 2000))
+    g = guardmod.Guard(conn, cfg, state_path=str(tmp_path / "s.json"))
+    out = tools.Tools(conn, cfg, guard=g).get_guard_state()
+    assert out["hard_limits"]["start_floor_v"] == 52.0
+    assert out["hard_limits"]["stop_ceiling_v"] == 57.0
+    assert out["baseline"] == {"mep_start": 52.0, "mep_stop": 56.0,
+                               "kub_start": 52.0, "kub_stop": 56.0}
+    assert out["owner_baseline"] is None
+    assert out["rate_limit"]["in_force"] is False
+    assert out["daylight_hold"]["in_daylight"] is False
+    assert out["learning_gate"]["open"] is False
+
+
+def test_the_guard_state_shows_the_rate_limit_running(conn, cfg, monkeypatch,
+                                                      tmp_path):
+    import guard as guardmod
+    import sun
+    monkeypatch.setattr(sun, "times", lambda *a, **k: (1000, 2000))
+    g = guardmod.Guard(conn, cfg, state_path=str(tmp_path / "s.json"))
+    g.note_write({"mep_start": 52.0, "mep_stop": 56.0,
+                  "kub_start": 52.0, "kub_stop": 56.0}, now=int(time.time()) - 600)
+    out = tools.Tools(conn, cfg, guard=g).get_guard_state()
+    assert out["rate_limit"]["in_force"] is True
+    assert out["rate_limit"]["minutes_since"] == 10
+
+
+def test_the_guard_state_needs_a_guard(conn, cfg):
+    assert "error" in tools.Tools(conn, cfg).get_guard_state()
+
+
+def test_recent_actions_come_from_the_audit_trail(conn, cfg):
+    for i in range(6):
+        history.record_action(conn, "set_gen_thresholds", {"mep_start": 52.0},
+                              i % 2, f"reason {i}", 54.2, 71,
+                              "allowed" if i % 2 else "refused", ts=1000 + i)
+    out = tools.Tools(conn, cfg).get_recent_actions(3)
+    assert out["count"] == 3
+    assert [a["reason"] for a in out["actions"]] == \
+        ["reason 5", "reason 4", "reason 3"]
+    assert out["actions"][0]["allowed"] is True
+    assert out["actions"][1]["result"] == "refused"
+
+
+def test_recent_actions_is_bounded(conn, cfg):
+    for i in range(80):
+        history.record_action(conn, "x", {}, 1, "r", None, None, "allowed",
+                              ts=1000 + i)
+    assert tools.Tools(conn, cfg).get_recent_actions(500)["count"] == 50
+    assert tools.Tools(conn, cfg).get_recent_actions(0)["count"] == 1

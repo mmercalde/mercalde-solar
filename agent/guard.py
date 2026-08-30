@@ -24,6 +24,7 @@ import history
 import loadmodel
 import policy as policymod
 import sun as sunmod
+import system as systemmod
 
 log = logging.getLogger(__name__)
 
@@ -39,11 +40,15 @@ log = logging.getLogger(__name__)
 # often are. They may never be looser.
 HARD_START_FLOOR = 52.0
 HARD_STOP_CEILING = 57.0
+# The manifest describes the same two limits to the model and to anyone
+# reading it. If it ever disagreed with these, one of them would be lying.
+systemmod.check_hard_limits(HARD_START_FLOOR, HARD_STOP_CEILING)
 # Float noise only. These are hard limits, so nothing is rounded into them:
 # a start of 51.9 is below the floor, not close enough to it.
 HARD_EPS = 1e-9
 
 MIN_STOP_MINUS_START = 2.0
+systemmod.check_separation(MIN_STOP_MINUS_START)
 STALE_SECONDS = 300
 RATE_LIMIT_SECONDS = 3600
 OWNER_OVERRIDE_SECONDS = 6 * 3600

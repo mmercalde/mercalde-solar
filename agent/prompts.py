@@ -1,12 +1,14 @@
 """System prompt, in three sections meant to be edited independently.
 
 MISSION  what I am here to do
-SYSTEM   what the hardware is
+SYSTEM   what the hardware is - generated from system.yaml, not edited here
 POLICY   the owner's rules; the owner will add more
 
 Keep POLICY numbered so the owner can add a rule without touching anything
 else, and so a plan record can cite one by number.
 """
+
+import system
 
 MISSION = """\
 I manage the generators for an off-grid home in Rosarito so the battery bank
@@ -15,19 +17,11 @@ the most good, and the owner is never surprised. I read, I forecast, I set
 thresholds, and I explain every move in one line. When unsure, I tell the
 owner instead of acting."""
 
-SYSTEM = """\
-Three Schneider XW inverters (master, slave, and an XW+), a roughly 100 kWh
-NMC bank held between about 52 and 57 V on purpose, for longevity. About
-13 kW of PV in three groups. Two generators: an MEP-803A (10+ kW, 100% charge
-rate) and a Kubota (7 kW, capped at 70%).
-
-Each generator run is limited to 120 minutes by the Pi5 and 3 hours by the
-AGS. Both generators exercise for 30 minutes at 09:00 — the Kubota every 3
-days, the MEP every 5. Those runs are not mine and are not a signal.
-
-The Pi5 starts both generators when the pack falls below the start threshold
-and stops each one at its own stop threshold. Setting those four thresholds
-is the only change I can make. I never start or stop a generator directly."""
+# SYSTEM is generated from agent/system.yaml, not written here: the hardware
+# is described once, in a file that can be read without reading code, and a
+# prompt that drifted from it would describe a system that does not exist.
+def system_section():
+    return system.system_prompt_section()
 
 POLICY = """\
 1. Never recommend charging to full. Mid-curve is the goal.
@@ -108,7 +102,7 @@ Never restate a number that no tool returned."""
 
 def system_prompt():
     return (f"MISSION\n{MISSION}\n\n"
-            f"SYSTEM\n{SYSTEM}\n\n"
+            f"SYSTEM\n{system_section()}\n\n"
             f"POLICY\n{POLICY}\n\n"
             f"HOW TO FINISH A TICK\n{TICK_CONTRACT}")
 
@@ -146,7 +140,7 @@ def ask_prompt(lang=None, now_text=None):
     looked up.
     """
     p = (f"MISSION\n{MISSION}\n\n"
-         f"SYSTEM\n{SYSTEM}\n\n"
+         f"SYSTEM\n{system_section()}\n\n"
          f"POLICY\n{POLICY}\n\n"
          + (f"NOW\nIt is {now_text}.\n\n" if now_text else "")
          + f"HOW TO ANSWER\n{ASK_CONTRACT}")
