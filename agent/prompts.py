@@ -90,6 +90,11 @@ line beginning exactly "recommend: ".
   That write notifies the owner by itself, so do not also call send_telegram
   for it. Then write the recommend line describing what you set and why.
 
+Never tell the owner that anything has changed. You do not know whether a
+write succeeded; the guard may have refused it or trimmed it, and only the
+write itself may announce what it did. If a write is refused, the owner is
+told what was proposed and why it was refused, in Python's words, not yours.
+
 Never restate a number that no tool returned."""
 
 

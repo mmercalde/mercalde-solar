@@ -372,3 +372,62 @@ def test_an_untrimmed_write_says_nothing_about_refusals(conn, cfg, sent):
     t = tools.Tools(conn, cfg, guard=guard)
     out = t.set_gen_thresholds(55.5, 57.0, 52.0, 54.5, "solo top-up")
     assert out["refused_parts"] == [] and "Not done" not in sent[0]
+
+
+# --- the model may not narrate a write --------------------------------------
+
+def test_a_refused_write_replaces_the_models_message(conn, cfg, monkeypatch):
+    """At 12:17 am it said "Adjusted generator thresholds to 52.0/54.5" after
+    the guard had refused exactly that. Nothing had been adjusted."""
+    out = []
+    monkeypatch.setattr(tools.telegram, "send",
+                        lambda cfg, text, **k: out.append(text) or True)
+    guard = StubGuard(allowed=False,
+                      reason="kubota is running; its stop cannot be lowered")
+    t = tools.Tools(conn, cfg, guard=guard)
+    t.set_gen_thresholds(52.0, 54.5, 52.0, 54.5, "back to default")
+    t.send_telegram("Adjusted generator thresholds to 52.0/54.5.")
+    assert len(out) == 1
+    assert "Adjusted" not in out[0]
+    assert "proposed MEP 52.0/54.5, Kubota 52.0/54.5" in out[0]
+    assert "refused: kubota is running" in out[0]
+
+
+def test_a_tick_with_no_refusal_sends_what_the_model_wrote(conn, cfg,
+                                                            monkeypatch):
+    out = []
+    monkeypatch.setattr(tools.telegram, "send",
+                        lambda cfg, text, **k: out.append(text) or True)
+    tools.Tools(conn, cfg).send_telegram("The pack is healthy tonight.")
+    assert out == ["The pack is healthy tonight."]
+
+
+def test_every_refusal_of_the_tick_is_reported(conn, cfg, monkeypatch):
+    out = []
+    monkeypatch.setattr(tools.telegram, "send",
+                        lambda cfg, text, **k: out.append(text) or True)
+    t = tools.Tools(conn, cfg, guard=StubGuard(allowed=False, reason="rate limit"))
+    t.set_gen_thresholds(52.0, 54.5, 52.0, 54.5, "one")
+    t.set_gen_thresholds(55.0, 57.0, 52.0, 56.0, "two")
+    t.send_telegram("anything at all")
+    assert out[0].count("proposed MEP") == 2
+    assert "55.0/57.0" in out[0]
+
+
+def test_a_refusal_message_is_still_escaped(conn, cfg, monkeypatch):
+    out = []
+    monkeypatch.setattr(tools.telegram, "send",
+                        lambda cfg, text, **k: out.append(text) or True)
+    t = tools.Tools(conn, cfg,
+                    guard=StubGuard(allowed=False, reason="peak 56.0 < 57.0"))
+    t.set_gen_thresholds(52.0, 54.5, 52.0, 54.5, "x")
+    t.send_telegram("whatever")
+    assert "peak 56.0 &lt; 57.0" in out[0]
+
+
+def test_a_dry_run_shows_the_refusal_rather_than_the_narration(conn, cfg):
+    t = tools.Tools(conn, cfg, guard=StubGuard(allowed=False, reason="no"),
+                    dry_run=True)
+    t.set_gen_thresholds(52.0, 54.5, 52.0, 54.5, "x")
+    out = t.send_telegram("Adjusted the thresholds.")
+    assert "proposed MEP" in out["text"] and "Adjusted" not in out["text"]

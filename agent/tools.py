@@ -122,6 +122,17 @@ def write_message(applied, reason, before=None, voltage=None,
     return "\n".join(lines)
 
 
+def refusal_message(refusals):
+    """What the owner is told when the agent proposed something and was told no."""
+    lines = []
+    for r in refusals:
+        v = r["values"]
+        lines.append(f"proposed MEP {v['mep_start']}/{v['mep_stop']}, "
+                     f"Kubota {v['kub_start']}/{v['kub_stop']} — "
+                     f"refused: {r['reason']}")
+    return "\n".join(lines)
+
+
 def thresholds_from_config(live):
     """Pull the four values the agent owns out of a /config response."""
     return {
@@ -213,6 +224,9 @@ class Tools:
         self.policy = policy
         self.model = loadmodel.LoadModel(conn, cfg)
         self.calls = []
+        # Writes the guard turned down this tick. A refusal makes anything the
+        # model then says about changing the thresholds untrue.
+        self.refusals = []
 
     @property
     def conn(self):
@@ -337,6 +351,18 @@ class Tools:
         return r.json()
 
     def send_telegram(self, text):
+        """Send the model's message - unless it would be narrating a write.
+
+        At 12:17 am the model told the owner "Adjusted generator thresholds to
+        52.0/54.5" after the guard had refused exactly that write. Nothing had
+        been adjusted. A message is the model's to compose only while it is
+        not describing a change: what changed is announced by the write
+        itself, and what did not is announced here, in Python's words.
+        """
+        if self.refusals:
+            text = refusal_message(self.refusals)
+            log.warning("a write was refused this tick; sending the refusal "
+                        "rather than the model's message")
         # The model's words are text, not markup.
         if self.dry_run:
             return {"sent": False, "dry_run": True, "text": text}
@@ -360,6 +386,7 @@ class Tools:
         if not allowed:
             # The values go back too: a refusal is the guard's decision, not a
             # failure to propose, and the plan record scores those separately.
+            self.refusals.append({"values": values, "reason": why})
             return {"applied": False, "refused_by": "guard",
                     "would_set": values, "reason": why}
         if self.dry_run:
