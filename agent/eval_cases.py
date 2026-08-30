@@ -22,9 +22,21 @@ def _minutes(rows):
     return round(sum(r["duration_min"] or 0 for r in rows), 1)
 
 
+# A clock time and a date are not figures the model is asserting. "2:47 am"
+# must not put 47 into the numbers it stated: grading the live 8B, this
+# reported the model as having said "47.0 V" when it had said 52.84, and a
+# time landing within the tolerance of the true voltage would have passed an
+# answer that was wrong.
+TIME_RE = re.compile(r"\b\d{1,2}:\d{2}(?::\d{2})?\s*(?:[ap]\.?\s?m\.?)?",
+                     re.IGNORECASE)
+DATE_RE = re.compile(r"\b\d{4}-\d{2}-\d{2}\b")
+
+
 def _numbers(text):
+    """Every figure the answer states, with times and dates taken out first."""
+    cleaned = DATE_RE.sub(" ", TIME_RE.sub(" ", text or ""))
     out = []
-    for raw in re.findall(r"-?\d[\d,]*(?:\.\d+)?", text or ""):
+    for raw in re.findall(r"-?\d[\d,]*(?:\.\d+)?", cleaned):
         try:
             out.append(float(raw.replace(",", "")))
         except ValueError:

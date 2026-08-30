@@ -299,3 +299,58 @@ def test_a_month_and_day_still_to_come_is_taken_as_last_year(cfg):
     now = ts_at(cfg, "2026-08-30", 13, 30)
     when, _ = toolsmod.parse_when("12-25 2:47 am", cfg, now)
     assert history.stamp(when, cfg) == "2025-12-25 2:47 am"
+
+
+# --- the grader must not mistake a clock time for a figure -------------------
+
+def test_a_clock_time_is_not_one_of_the_numbers_stated():
+    """Grading the live 8B, "2:47 am" put 47 into the figures and the grader
+    reported the model as saying "47.0 V" when it had said 52.84."""
+    assert eval_cases._numbers(
+        "The battery voltage at exactly 2:47 am last night was 52.84 V.") == [52.84]
+
+
+@pytest.mark.parametrize("text,expect", [
+    ("It was 53.66 V at 2:47 am.", [53.66]),
+    ("At 2:53 a.m. it was 53.10 V.", [53.10]),
+    ("At 14:07:30 the pack read 54.2 V.", [54.2]),
+    ("On 2026-08-30 at 08:28 the pack read 52.35 V.", [52.35]),
+    ("The run began at 11:35 pm and lasted 122 minutes.", [122.0]),
+])
+def test_times_and_dates_are_stripped_before_the_figures(text, expect):
+    assert eval_cases._numbers(text) == expect
+
+
+def test_the_grader_now_names_the_number_the_model_actually_said():
+    truth = {"asked_for": "2026-08-30 2:47 am", "voltage": 53.66,
+             "sample_at": "2026-08-30 2:47 am"}
+    ok, why = eval_cases.grade_voltage_at(
+        "The battery voltage at exactly 2:47 am last night was 52.84 V.", truth)
+    assert not ok
+    assert "stated 52.84 V" in why, "not 47.0, which is half the clock"
+
+
+def test_a_time_can_no_longer_pass_an_answer_by_accident():
+    """2:53 would have read as 53.0 and matched a true 53.0 V within tolerance,
+    passing an answer that never gave a voltage at all."""
+    truth = {"asked_for": "2026-08-30 2:53 am", "voltage": 53.0,
+             "sample_at": "2026-08-30 2:53 am"}
+    ok, why = eval_cases.grade_voltage_at(
+        "I checked the log around 2:53 am.", truth)
+    assert not ok and "no voltage given" in why
+
+
+def test_a_correct_answer_still_passes_with_the_time_in_it():
+    truth = {"asked_for": "2026-08-30 2:47 am", "voltage": 53.66,
+             "sample_at": "2026-08-30 2:47 am"}
+    assert eval_cases.grade_voltage_at(
+        "At exactly 2:47 am last night the pack read 53.66 V.", truth)[0]
+
+
+def test_the_runtime_grader_is_not_confused_by_run_times_either():
+    truth = {"mep": {"runs": 0, "minutes": 0.0},
+             "kubota": {"runs": 3, "minutes": 126.0}}
+    ok, why = eval_cases.grade_runtime(
+        "The Kubota ran 126 minutes over 3 runs, starting at 11:35 pm; "
+        "the MEP did not run.", truth)
+    assert ok, why

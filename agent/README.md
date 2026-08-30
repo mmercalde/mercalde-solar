@@ -73,7 +73,7 @@ Every 15 minutes, day and night:
 | `schneider_modbus.py` | copied from `pi5/` |
 
 Documentation: `docs/gateway_api.md`, `docs/energy_registers.md`,
-`docs/alexa.md`.
+`docs/alexa.md`, `docs/kamrui_stability.md`.
 
 ## Install
 
