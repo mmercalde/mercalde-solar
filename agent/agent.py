@@ -130,6 +130,7 @@ class Agent:
                             if sunrise_ts else 12)
         forecast = self.model.load_forecast(min(hours_to_sunrise, 24), now=now)
         projection = self.model.project_voltage(52.0, now=now)
+        deficit = self.model.overnight_deficit(sunrise_ts, now=now)
         drawdown = self.model.overnight_drawdown(now=now)
         gate = self.model.learning_status(now=now)
         soc_curve = self.model.soc_curve_status()
@@ -163,6 +164,7 @@ class Agent:
             "weather": wx, "sunrise_ts": sunrise_ts,
             "sunset_ts": sunset_ts, "remaining_solar_wh": remaining_solar_wh,
             "forecast": forecast, "projection": projection,
+            "deficit": deficit,
             "drawdown": drawdown, "gate": gate, "soc_curve": soc_curve,
             "tomorrow_cloud": tomorrow_cloud, "est_solar": est_solar,
             "summary_24h": history.summary(self.conn, 24, now=now),

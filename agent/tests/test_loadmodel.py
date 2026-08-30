@@ -904,3 +904,94 @@ def test_the_cleaned_rows_are_not_re_read_for_every_hour(conn, cfg, lm,
     lm.load_forecast(12, now=ts_at(cfg, "2026-08-20", 20))
     built = [q for q in reads if "SELECT hour_ts" in q]
     assert len(built) == 1, "the rows are built once, not once an hour"
+
+
+# --- the overnight deficit (POLICY 4) ---------------------------------------
+
+@pytest.fixture
+def deficit_pack(conn, cfg, lm, monkeypatch):
+    """A learned pack: 52.0 V is 40% of a 100 kWh bank, 1,000 Wh a night hour."""
+    monkeypatch.setattr(weather, "hourly", lambda *a, **k: [])   # night, no sun
+    scraped(conn, {52.0: (40, 900), 54.0: (60, 900),
+                   56.0: (80, 900), 57.0: (90, 900)})
+    build_load_history(conn, cfg, days=30, start="2026-08-01",
+                       night_wh=1000, day_wh=1000)
+    base = ts_at(cfg, "2026-08-20", 20)
+    for i in range(20):
+        # 1,850 Ah at 100 kWh: 1,000 Ah remaining is 54% of it.
+        add_sample(conn, cfg, base + i * 60, 54.0, 60, -1000, ah=1000)
+    return lm
+
+
+def test_the_deficit_is_what_the_night_needs_less_what_the_pack_holds(cfg,
+                                                                      deficit_pack):
+    now = ts_at(cfg, "2026-08-20", 21)
+    sunrise = ts_at(cfg, "2026-08-21", 6)
+    d = deficit_pack.overnight_deficit(sunrise, now=now)
+    assert d["needed_wh"] == 9000, "nine hours at a kilowatt"
+    # 60% now, 40% at the floor: a fifth of the pack.
+    assert d["available_wh"] == round(0.20 * d["capacity_wh"])
+    assert d["deficit_wh"] == d["needed_wh"] - d["available_wh"]
+
+
+def test_a_pack_with_room_to_spare_has_a_negative_deficit(cfg, deficit_pack):
+    now = ts_at(cfg, "2026-08-20", 23)
+    d = deficit_pack.overnight_deficit(ts_at(cfg, "2026-08-21", 2), now=now)
+    assert d["deficit_wh"] < 0
+
+
+def test_the_deficit_says_why_it_cannot_be_computed(conn, cfg, lm, monkeypatch):
+    monkeypatch.setattr(weather, "hourly", lambda *a, **k: [])
+    now = ts_at(cfg, "2026-08-20", 21)
+    d = lm.overnight_deficit(ts_at(cfg, "2026-08-21", 6), now=now)
+    assert d["deficit_wh"] is None and "no battery monitor sample" in d["reason"]
+
+
+def test_a_sunrise_already_past_is_not_a_deficit(cfg, deficit_pack):
+    now = ts_at(cfg, "2026-08-20", 21)
+    d = deficit_pack.overnight_deficit(now - 3600, now=now)
+    assert d["deficit_wh"] is None and "no sunrise to reach" in d["reason"]
+
+
+def test_the_deficit_reports_which_load_history_it_used(cfg, deficit_pack):
+    now = ts_at(cfg, "2026-08-20", 21)
+    d = deficit_pack.overnight_deficit(ts_at(cfg, "2026-08-21", 6), now=now)
+    assert d["source"] == "last 14 nights"
+
+
+# --- the target the deficit implies -----------------------------------------
+
+def test_the_target_is_the_deficit_plus_its_margin_in_volts(cfg, deficit_pack):
+    """9,000 Wh and 15% is 10,350: 10.35% of a 100 kWh pack. From 60% that is
+    70.35%, which the curve puts at 55.2 V, rounded up to 55.5."""
+    t = deficit_pack.topup_target(9000, 15, 60, 100000, low=55.0, high=57.0)
+    assert t["padded_wh"] == 10350 and t["target_soc"] == 70.3
+    assert t["volts"] == 55.5
+    assert t["basis"] == "resting curve"
+
+
+def test_the_target_is_rounded_up_never_down(cfg, deficit_pack):
+    """Too much is minutes of run time. Too little is not getting through."""
+    t = deficit_pack.topup_target(100, 0, 60, 100000, low=52.0, high=57.0)
+    assert t["uncapped_volts"] == 54.5, "60.1% is 54.005 V, which rounds up"
+
+
+def test_the_target_is_clamped_at_both_ends(cfg, deficit_pack):
+    assert deficit_pack.topup_target(100, 0, 60, 100000,
+                                     low=55.0, high=57.0)["volts"] == 55.0
+    assert deficit_pack.topup_target(60000, 0, 60, 100000,
+                                     low=55.0, high=57.0)["volts"] == 57.0
+
+
+def test_the_target_uses_the_charge_curve_when_there_is_one(conn, cfg,
+                                                            deficit_pack):
+    """The stop is a terminal voltage read while charging, so the charge-side
+    curve is what turns the charge wanted into the voltage to stop at."""
+    this_morning(conn, cfg)
+    t = deficit_pack.topup_target(9000, 15, 60, 100000, low=55.0, high=57.0,
+                                  solo=False)
+    assert t["basis"].startswith("charging curve")
+
+
+def test_no_curve_at_all_gives_no_target(conn, cfg, lm):
+    assert lm.topup_target(9000, 15, 60, 100000, low=55.0, high=57.0) is None

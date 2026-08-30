@@ -54,8 +54,15 @@ def base_facts(cfg, gate_open=False, model=None):
         "charge_rates": {"mep": {"v_per_h": 1.6}, "kubota": {"v_per_h": 1.0}},
         "run_window_h": {"mep": 2.0, "kubota": 2.0},
         "charge_rates": {},
+        "baseline": {"mep_start": 52.0, "mep_stop": 56.0,
+                     "kub_start": 52.0, "kub_stop": 56.0},
+        "deficit": {"deficit_wh": 9000, "needed_wh": 32000,
+                    "available_wh": 23000, "capacity_wh": 100000,
+                    "soc_now": 63, "soc_floor": 40.0, "floor_v": 52.0,
+                    "hours": 8.2, "source": "last 14 nights"},
     }
-    f["soc"] = 84
+    f["voltage"] = 54.2
+    f["soc"] = 63
     f["policy"] = policy.evaluate(cfg, f, model or StubModel())
     return f
 
@@ -68,7 +75,7 @@ def test_plan_record_matches_the_spec_shape(a, cfg):
                         "no (learning phase)")
     lines = rec.splitlines()
     assert len(lines) == 10
-    assert lines[0] == "2026-08-28 4:00 pm  V 55.8  SOC 84%  load 1.1 kW"
+    assert lines[0] == "2026-08-28 4:00 pm  V 54.2  SOC 63%  load 1.1 kW"
     assert lines[1] == "peak today: 55.8 V  (threshold 57.0 -> solar shortfall)"
     assert lines[2] == ("overnight Wh: 10,800 — from last 14 nights "
                         "(12 nights)")
@@ -79,21 +86,22 @@ def test_plan_record_matches_the_spec_shape(a, cfg):
                         "cloud < 70%)")
     assert lines[6] == ("POLICY 3 pre-dawn stop 54.5: no (52 V projected 4:10 am, "
                         "2.4 h before sunrise 6:31 am (window 2.0 h))")
-    assert lines[7] == ("POLICY 4 solo top-up: FIRES (peak 55.8 < 57.0; 52 V "
-                        "projected 4:10 am before sunrise 6:31 am; V 55.8 > "
-                        "55.0 → Kubota; 57.0 reachable in 0.6 h at 60 A into "
-                        "the pack (10.0% SOC/h); the run begins when the pack "
-                        "falls to 55.0)")
+    assert lines[7].startswith("POLICY 4 top-up: FIRES (deficit 9,000 Wh to "
+                               "sunrise above 52.0 V")
+    assert "+15% is 10,350 Wh → stop 55.5" in lines[7]
+    assert "raised to 56.4 to clear a start above 54.2 V" in lines[7]
+    assert "MEP band (deficit ≤ 15,000 Wh)" in lines[7]
     assert lines[8].startswith("recommend: Kubota solo")
     assert lines[9] == "applied: no (learning phase)"
 
 
 def test_the_plan_record_shows_a_rule_that_does_not_fire_and_why(a, cfg):
     f = base_facts(cfg)
-    f["peak_today"] = 57.4
+    f["deficit"] = dict(f["deficit"], deficit_wh=-4000)
     f["policy"] = policy.evaluate(cfg, f, StubModel())
     lines = a.plan_record(f, "no change", "no (dry run)").splitlines()
-    assert "POLICY 4 solo top-up: no (peak 57.4 ≥ 57.0)" in lines
+    assert ("POLICY 4 top-up: no (the pack holds 4,000 Wh more than the night "
+            "needs above 52.0 V, so nothing is short)") in lines
 
 
 def test_peak_at_or_above_threshold_is_not_a_shortfall(a, cfg):
@@ -469,7 +477,7 @@ def prompt_facts(cfg, **over):
 def test_the_tick_prompt_carries_the_computed_rules(a, cfg):
     prompt = a.tick_prompt(prompt_facts(cfg))
     assert "POLICY EVALUATION" in prompt
-    assert "POLICY 4 solo top-up: FIRES" in prompt
+    assert "POLICY 4 top-up: FIRES" in prompt
     assert "the arithmetic is already done, do not redo it" in prompt
 
 
@@ -482,12 +490,15 @@ def test_the_tick_prompt_demands_an_answer_to_a_firing_rule(a, cfg):
 def test_the_tick_prompt_says_which_values_the_rule_asks_for(a, cfg):
     """"Set the thresholds it calls for" is not actionable without them."""
     prompt = a.tick_prompt(prompt_facts(cfg))
-    assert ("POLICY 4 solo top-up FIRES → set MEP 52.0/56.0, Kubota 55.0/57.0"
+    assert ("POLICY 4 top-up FIRES → set MEP 54.4/56.4, Kubota 52.0/56.0"
             in prompt)
 
 
 def test_the_tick_prompt_says_so_when_nothing_fires(a, cfg):
-    prompt = a.tick_prompt(prompt_facts(cfg, peak_today=57.4))
+    f = prompt_facts(cfg)
+    f["deficit"] = dict(f["deficit"], deficit_wh=-4000)
+    f["policy"] = policy.evaluate(cfg, f, StubModel())
+    prompt = a.tick_prompt(f)
     assert "No rule fires." in prompt
     assert "FIRES" not in prompt
 
@@ -499,8 +510,8 @@ def test_a_firing_rule_answered_with_no_change_is_audited_as_a_miss(a, cfg, conn
                                f["voltage"], f["soc"], now=f["now"])
     row = conn.execute("SELECT * FROM actions ORDER BY ts DESC LIMIT 1").fetchone()
     assert row["tool"] == "policy_miss" and row["result"] == "missed"
-    assert row["allowed"] == 0 and row["voltage"] == 55.8
-    assert "POLICY 4 solo top-up fired" in row["reason"]
+    assert row["allowed"] == 0 and row["voltage"] == 54.2
+    assert "POLICY 4 top-up fired" in row["reason"]
     assert "the model said: no change - looks fine" in row["reason"]
 
 

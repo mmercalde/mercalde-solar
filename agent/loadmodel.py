@@ -484,6 +484,12 @@ class LoadModel:
         out. Exercise runs are too: 30 minutes at 09:00 with the sun already
         up says nothing about lifting the pack at night.
 
+        The Kubota's runs also drive a Magnum MS4048 charger, which is not on
+        Modbus and so contributes nothing the inverters can report. The
+        shunt's current into the pack is the only correct measure of what a
+        Kubota run delivers - anything summed from the Schneider registers
+        would understate it by whatever the Magnum was doing.
+
         `gen` of None pools every generator's runs, which is how the two of
         them running together are measured.
         """
@@ -959,6 +965,99 @@ class LoadModel:
         if not p.get("reached"):
             return None
         return p.get("at") or self._at_label(p["reached"], int(now or time.time()))
+
+    # --- the overnight deficit (POLICY 4) ----------------------------------
+
+    def _drain_wh(self, now, until, hours=24):
+        """Wh the house takes out of the pack between now and `until`.
+
+        The same hour-by-hour walk project_voltage does, load against the
+        forecast solar, so the two cannot disagree about the night ahead. An
+        hour where solar beats the load is not counted as a credit: it fills
+        the pack it was going to fill either way.
+        """
+        forecast = weather.hourly(self.cfg, hours=hours, now=now)
+        solar_by_ts = {f["ts"]: f for f in forecast}
+        sm = self.solar_model(now=now)
+        per_unit = None
+        if sm.get("learned") and forecast:
+            day_rad = sum(f["radiation"] for f in forecast[:24]) or 1
+            per_unit = sm["clear_day_wh"] / day_rad
+        total = 0.0
+        for i in range(hours):
+            ts = history.hour_floor(now) + i * 3600
+            if ts >= until:
+                break
+            t = datetime.fromtimestamp(ts, history.tzinfo(self.cfg))
+            p = self.load_profile(month=t.month, weekend=t.weekday() >= 5, now=now)
+            load_wh = p["profile"].get(t.hour) or _median(list(p["profile"].values()))
+            if load_wh is None:
+                return None, None
+            solar_wh = 0.0
+            f = solar_by_ts.get(ts)
+            if f and per_unit:
+                solar_wh = f["radiation"] * per_unit
+            total += max(0.0, load_wh - solar_wh)
+        return round(total), p.get("source")
+
+    def overnight_deficit(self, until, floor_v=52.0, now=None):
+        """How many Wh short the pack is of reaching `until` above floor_v.
+
+        Positive means the night cannot be got through on what the pack
+        holds, and by how much. Negative means it can, with that much to
+        spare. None with a reason where the inputs are not learned.
+        """
+        now = int(now or time.time())
+        if not until or until <= now:
+            return {"deficit_wh": None, "reason": "no sunrise to reach"}
+        sample = history.latest_sample(self.conn)
+        if not sample or sample["batt_soc"] is None:
+            return {"deficit_wh": None, "reason": "no battery monitor sample"}
+        soc_floor = self.soc_for_voltage(floor_v)
+        if soc_floor is None:
+            return {"deficit_wh": None,
+                    "reason": f"the learned curve does not reach {floor_v} V"}
+        capacity = self.capacity_wh()
+        if capacity is None:
+            return {"deficit_wh": None, "reason": "pack capacity not learned"}
+        needed, source = self._drain_wh(now, until)
+        if needed is None:
+            return {"deficit_wh": None, "reason": "load profile not learned"}
+
+        available = (sample["batt_soc"] - soc_floor) / 100.0 * capacity
+        return {"deficit_wh": round(needed - available),
+                "needed_wh": needed, "available_wh": round(available),
+                "hours": round((until - now) / 3600.0, 1),
+                "soc_now": sample["batt_soc"], "soc_floor": round(soc_floor, 1),
+                "capacity_wh": capacity, "floor_v": floor_v, "source": source}
+
+    def topup_target(self, deficit_wh, margin_pct, soc_now, capacity_wh,
+                     low, high, gen=None, solo=None, now=None):
+        """The stop voltage that puts the deficit, plus its margin, in the pack.
+
+        The stop is a terminal voltage read while charging, so the charge-side
+        curve is what turns the state of charge wanted into the voltage to
+        stop at; the resting curve stands in until that is learned, and says
+        so. Rounded up to the half volt - the cost of a little too much is
+        minutes of run time, and of too little is not getting through the
+        night - then clamped.
+        """
+        if not capacity_wh or soc_now is None:
+            return None
+        padded = deficit_wh * (1.0 + margin_pct / 100.0)
+        target_soc = min(100.0, soc_now + padded / capacity_wh * 100.0)
+        curve = self.charge_curve(gen, solo=solo, now=now)
+        if curve.learned:
+            volts, basis = curve.volts_for_soc(target_soc), f"charging curve ({curve.label})"
+        else:
+            volts, basis = self.volts_for_soc(target_soc), "resting curve"
+        if volts is None:
+            return None
+        volts = math.ceil(round(volts, 6) / 0.5) * 0.5
+        return {"volts": round(min(high, max(low, volts)), 2),
+                "uncapped_volts": round(volts, 2),
+                "padded_wh": round(padded), "target_soc": round(target_soc, 1),
+                "basis": basis}
 
     # --- data coverage (guard rule 6) --------------------------------------
 

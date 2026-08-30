@@ -583,10 +583,13 @@ def owner_status(cfg, now):
 def a_firing_rule(cfg, now):
     """A real evaluation in which POLICY 4 fires and nothing else does."""
     return policy.evaluate(cfg, {
-        "voltage": 54.0, "soc": 80.0, "peak_today": 55.0,
-        "sunrise_ts": now + 8 * 3600,
+        "now": now, "voltage": 54.0, "soc": 63.0, "peak_today": 55.0,
+        "sunrise_ts": now + 8 * 3600, "sunset_ts": now - 3600,
         "projection": {"reached": now + 4 * 3600}, "tomorrow_cloud": 20,
-        "thresholds": dict(OWNER),
+        "deficit": {"deficit_wh": 9000, "needed_wh": 32000,
+                    "available_wh": 23000, "capacity_wh": 100000,
+                    "floor_v": 52.0},
+        "thresholds": dict(OWNER), "baseline": dict(OWNER),
         "run_window_h": {"mep": 2.0, "kubota": 2.0}}, StubModel())
 
 

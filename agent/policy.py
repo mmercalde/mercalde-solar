@@ -35,14 +35,25 @@ OVERRULE_RE = re.compile(r"overrul\w*\s*:?\s*policy\s*(\d+)", re.IGNORECASE)
 
 
 def window_opens(cfg, f):
-    """When today's top-up window opens, from `solo_window`.
+    """When today's top-up window opens, from `topup_earliest`.
 
-    "sunset", or "sunset-30" for half an hour before it. The point of the
-    window is that the day's solar goes into the pack first: a top-up is
-    decided once production is finished and the peak is known, not at half
-    past nine in the morning with eight hours of sun still to come.
+    "sunset", "sunset-30" for half an hour before it, or a clock time like
+    "20:00". The point of the window is that the day's solar goes into the
+    pack first: a top-up is decided once production is finished and the
+    shortfall is known, not at half past nine in the morning with eight hours
+    of sun still to come.
     """
-    spec = str(cfg.get("solo_window") or "sunset").strip().lower()
+    spec = str(cfg.get("topup_earliest") or "sunset").strip().lower()
+    if ":" in spec:
+        try:
+            hour, minute = (int(x) for x in spec.split(":", 1))
+        except ValueError:
+            return f.get("sunset_ts")
+        now = f.get("now")
+        if not now:
+            return None
+        return int(history.local(now, cfg).replace(
+            hour=hour, minute=minute, second=0, microsecond=0).timestamp())
     base, _, offset = spec.partition("-")
     if base.strip() != "sunset":
         return None
@@ -69,8 +80,7 @@ def _held_for_daylight(cfg, f):
     left = f.get("remaining_solar_wh")
     solar = (f"{left / 1000.0:.1f} kWh" if left is not None
              else "not learned yet")
-    return (f"held until sunset {_clock(opens, cfg)}; remaining solar today "
-            f"{solar}")
+    return (f"held until {_clock(opens, cfg)}; remaining solar today {solar}")
 
 
 def _clock(ts, cfg):
@@ -123,132 +133,162 @@ def call_to_action(rules):
 
 # --- POLICY 4: solo top-up --------------------------------------------------
 
-def _proposal(cfg, gen, target):
-    """One generator raised to `target`, the other left as the backstop."""
-    start = min(cfg["start_voltage_max"], target - MIN_STOP_MINUS_START)
-    other_s, other_p = cfg["default_start"], cfg["default_stop"]
-    values = ({"mep_start": start, "mep_stop": target,
-               "kub_start": other_s, "kub_stop": other_p} if gen == "mep" else
-              {"mep_start": other_s, "mep_stop": other_p,
-               "kub_start": start, "kub_stop": target})
-    return start, values
+# How far above the pack's voltage a start is set so the Pi5 acts on it at
+# once. Thresholds are written to one decimal, and the reading wanders a
+# little, so a tenth would be a coin toss.
+START_ABOVE_PACK_V = 0.2
 
 
-def _both_proposal(cfg, target):
-    start = min(cfg["start_voltage_max"], target - MIN_STOP_MINUS_START)
-    return start, {"mep_start": start, "mep_stop": target,
-                   "kub_start": start, "kub_stop": target}
+def _proposal(cfg, gens, target, start, baseline):
+    """The chosen generators raised, the rest left at the owner's baseline."""
+    values = dict(baseline)
+    for gen in gens:
+        skey, pkey = ("mep_start", "mep_stop") if gen == "mep" else \
+                     ("kub_start", "kub_stop")
+        values[skey], values[pkey] = start, target
+    return values
+
+
+def _bands(cfg):
+    """[(name, generators, ceiling Wh)] smallest first, ending open-ended."""
+    conf = cfg.get("topup_bands") or {}
+    kub, mep = conf.get("kubota"), conf.get("mep")
+    return [("Kubota", ("kubota",), kub),
+            ("MEP", ("mep",), mep),
+            ("both", ("mep", "kubota"), None)]
+
+
+def _band_for(cfg, deficit_wh):
+    """The band the deficit lands in, and the ones above it to step through."""
+    bands = _bands(cfg)
+    for i, (name, gens, ceiling) in enumerate(bands):
+        if ceiling is None or deficit_wh <= ceiling:
+            return i, bands
+    return len(bands) - 1, bands
+
+
+def _window_for(f, gens):
+    windows = f.get("run_window_h") or {}
+    chosen = [windows[g] for g in gens if g in windows]
+    return min(chosen) if chosen else None
 
 
 def solo_top_up(cfg, f, model):
-    """Peak short of 57.0 and 52 V before sunrise: run a generator to 57.0.
+    """POLICY 4, the top-up. What the night is short of, and what will cover it.
 
-    Every clause is a comparison the model was previously left to make in its
-    head, so each one is reported with both numbers whether it passes or not.
-
-    When the chosen generator cannot make 57.0 inside its run window, the rule
-    does not simply fall silent. It fires for the highest target that
-    generator can actually reach, rounded down to half a volt and never below
-    solo_target_floor; and if even that is out of reach, for both generators
-    together when the pair can make 57.0. The detail says which of the three
-    it is.
+    Not "did today's peak reach 57" but "how many watt-hours is the pack short
+    of sunrise", which is the question the run is actually for. The shortfall
+    sets the stop voltage and picks the generators; 57.0 is now the ceiling of
+    that calculation rather than its purpose.
     """
-    name = "solo top-up"
+    name = "top-up"
     held = _held_for_daylight(cfg, f)
     if held:
         return _rule(4, name, False, held, held=True)
-    peak, v, soc = f.get("peak_today"), f.get("voltage"), f.get("soc")
-    limit = cfg["solo_peak_threshold"]
-    proj = f.get("projection") or {}
-    sunrise, reached = f.get("sunrise_ts"), proj.get("reached")
 
-    if peak is None or v is None:
-        return _rule(4, name, False, "peak voltage or battery voltage unknown")
-    if peak >= limit:
-        return _rule(4, name, False, f"peak {peak:.1f} ≥ {limit:.1f}")
-    parts = [f"peak {peak:.1f} < {limit:.1f}"]
-
-    if not reached:
-        return _rule(4, name, False, "; ".join(parts + [
-            f"52 V not projected ({proj.get('reason', 'unknown')})"]))
-    if not sunrise:
-        return _rule(4, name, False, "; ".join(parts + ["next sunrise unknown"]))
-    if reached >= sunrise:
-        return _rule(4, name, False, "; ".join(parts + [
-            f"52 V projected {_clock(reached, cfg)}, not before sunrise "
-            f"{_clock(sunrise, cfg)}"]))
-    parts.append(f"52 V projected {_clock(reached, cfg)} before sunrise "
-                 f"{_clock(sunrise, cfg)}")
-
-    select = cfg["solo_select_voltage"]
-    gen = "mep" if v <= select else "kubota"
-    label = "MEP" if gen == "mep" else "Kubota"
-    parts.append(f"V {v:.1f} {'≤' if v <= select else '>'} {select:.1f} → {label}")
-
-    windows = f.get("run_window_h") or {}
-    window = windows.get(gen)
-    target = cfg["solo_target"]
-
-    # POLICY 5: a target is only valid if it is reachable in the run window.
-    reach = model.reach(gen, v, target, window, solo=True, soc_now=soc)
-    # "reachable in 0.0 h" is not a reason to run a generator: the pack is
-    # already at or above the target, and there is nothing to top up.
-    if reach["hours"] is not None and reach["hours"] <= 0:
-        return _rule(4, name, False, "; ".join(parts + [
-            f"{target:.1f} is already met at {v:.1f} V, so there is nothing "
-            f"to top up"]))
-    if reach["ok"]:
-        parts.append(reach["why"])
-        start, values = _proposal(cfg, gen, target)
-        if start <= v:
-            parts.append(f"the run begins when the pack falls to {start:.1f}")
-        return _rule(4, name, True, "; ".join(parts), values, gen=gen,
-                     target=target, mode="solo")
-    if reach["hours"] is None:
+    v, soc = f.get("voltage"), f.get("soc")
+    baseline = f.get("baseline") or {}
+    d = f.get("deficit") or {}
+    if v is None or not baseline:
+        return _rule(4, name, False, "battery voltage or baseline unknown")
+    if d.get("deficit_wh") is None:
         return _rule(4, name, False,
-                     "; ".join(parts + [f"{reach['why']} (POLICY 5)"]))
-    parts.append(reach["why"] + " (POLICY 5)")
+                     f"the deficit is not known ({d.get('reason', 'unknown')})")
 
-    # Solo, but only as high as the window allows.
-    floor = cfg["solo_target_floor"]
-    lower = model.best_reachable_target(gen, v, window, ceiling=target,
-                                        floor=floor, soc_now=soc, solo=True)
-    if lower is not None:
-        parts.append(f"highest reachable in {window:.1f} h is {lower:.1f} "
-                     f"({reach.get('basis') or 'no curve'}), so {label} alone "
-                     f"to {lower:.1f}")
-        start, values = _proposal(cfg, gen, lower)
-        if start <= v:
-            parts.append(f"the run begins when the pack falls to {start:.1f}")
-        return _rule(4, name, True, "; ".join(parts), values, gen=gen,
-                     target=lower, mode="solo-reduced")
+    deficit = d["deficit_wh"]
+    floor_v = d.get("floor_v", 52.0)
+    if deficit <= 0:
+        return _rule(4, name, False,
+                     f"the pack holds {abs(deficit):,} Wh more than the night "
+                     f"needs above {floor_v:.1f} V, so nothing is short")
+    minimum = cfg["min_topup_wh"]
+    if deficit < minimum:
+        return _rule(4, name, False,
+                     f"deficit {deficit:,} Wh is under the {minimum:,} Wh a run "
+                     f"is worth; POLICY 3's pre-dawn stop covers a night this "
+                     f"close")
 
-    # Not even the floor solo. Both together, at the best they can do.
-    pair_window = min(w for w in windows.values()) if windows else window
-    pair = model.reach(None, v, target, pair_window, solo=False, soc_now=soc)
-    if pair["ok"]:
-        parts.append(f"{floor:.1f} is out of reach alone, but both together "
-                     f"{pair['why']}, so run both")
-        start, values = _both_proposal(cfg, target)
-        return _rule(4, name, True, "; ".join(parts), values, gen="both",
-                     target=target, mode="both")
-    parts.append(f"{floor:.1f} is out of reach alone and both together "
-                 f"{pair['why']}")
-    # The pair gets the same treatment as one generator: the highest target it
-    # can actually reach, rather than nothing. Without this the everyday stop
-    # of 56.0 could never be exceeded, no run would ever reach 57.0, and the
-    # charge-side curve could never learn what 57.0 costs.
-    pair_lower = model.best_reachable_target(None, v, pair_window, ceiling=target,
-                                             floor=floor, soc_now=soc, solo=False)
-    if pair_lower is not None:
-        parts.append(f"highest the pair can reach in {pair_window:.1f} h is "
-                     f"{pair_lower:.1f} ({pair.get('basis') or 'no curve'}), "
-                     f"so run both to {pair_lower:.1f}")
-        start, values = _both_proposal(cfg, pair_lower)
-        return _rule(4, name, True, "; ".join(parts), values, gen="both",
-                     target=pair_lower, mode="both-reduced")
-    parts.append(f"and the pair cannot reach {floor:.1f} either")
-    return _rule(4, name, False, "; ".join(parts))
+    margin = cfg["topup_margin_pct"]
+    parts = [f"deficit {deficit:,} Wh to sunrise above {floor_v:.1f} V "
+             f"(needs {d.get('needed_wh', 0):,}, holds {d.get('available_wh', 0):,})"]
+
+    # The run has to begin now, so the start goes above the pack - and the
+    # stop has to clear that start by the separation the guard requires,
+    # whatever the deficit alone would have asked for.
+    start = round(min(cfg["start_voltage_max"],
+                      max(cfg["start_voltage_min"],
+                          round(v + START_ABOVE_PACK_V, 1))), 1)
+    ceiling = cfg["solo_target"]
+    if start <= v + EPS:
+        return _rule(4, name, False, "; ".join(parts + [
+            f"but a start above {v:.1f} V would be over the "
+            f"{cfg['start_voltage_max']:.1f} V limit, so no run can be started "
+            f"now"]))
+    least_stop = round(start + MIN_STOP_MINUS_START, 1)
+    if least_stop > ceiling + EPS:
+        return _rule(4, name, False, "; ".join(parts + [
+            f"but a start above {v:.1f} V would need a stop of "
+            f"{least_stop:.1f}, over the {ceiling:.1f} ceiling, so no run can "
+            f"be started now"]))
+
+    index, bands = _band_for(cfg, deficit)
+    tried = []
+    while index < len(bands):
+        label, gens, band_max = bands[index]
+        gen = None if len(gens) > 1 else gens[0]
+        solo = len(gens) == 1
+        want = model.topup_target(deficit, margin, soc, d.get("capacity_wh"),
+                                  low=cfg["solo_target_floor"], high=ceiling,
+                                  gen=gen, solo=solo)
+        if want is None:
+            return _rule(4, name, False, "; ".join(parts + [
+                "no curve reaches the state of charge the deficit asks for"]))
+        target = max(want["volts"], least_stop)
+        note = [f"+{margin}% is {want['padded_wh']:,} Wh → stop "
+                f"{want['volts']:.1f} ({want['basis']})"]
+        if target > want["volts"] + EPS:
+            note.append(f"raised to {target:.1f} to clear a start above "
+                        f"{v:.1f} V by {MIN_STOP_MINUS_START:.1f} V")
+        reach = model.reach(gen, v, target, _window_for(f, gens), solo=solo,
+                            soc_now=soc)
+        band = (f"{label} band (deficit ≤ {band_max:,} Wh)" if band_max
+                else f"{label} band (above every other)")
+        if reach["ok"]:
+            parts += note
+            if tried:
+                parts.append("stepped up past " + "; ".join(tried))
+            parts.append(f"{band}: {reach['why']}")
+            parts.append(f"start {start:.1f} is above the pack's {v:.1f} V, so "
+                         f"the run begins now")
+            return _rule(4, name, True, "; ".join(parts),
+                         _proposal(cfg, gens, target, start, baseline),
+                         gen="+".join(gens), target=target, mode=label.lower(),
+                         deficit_wh=deficit, start=start)
+        if not tried:
+            parts += note
+        tried.append(f"{band} {reach['why']}")
+        index += 1
+
+    # Every band falls short of the target. Running both for as long as they
+    # are allowed still beats letting the pack fall through the floor, so the
+    # top band takes the most it can reach.
+    label, gens, _ = bands[-1]
+    parts.append("no band reaches it: " + "; ".join(tried))
+    lower = model.best_reachable_target(None, v, _window_for(f, gens),
+                                        ceiling=ceiling,
+                                        floor=max(cfg["solo_target_floor"],
+                                                  least_stop),
+                                        soc_now=soc, solo=False)
+    if lower is None:
+        return _rule(4, name, False, "; ".join(parts + [
+            f"and both together cannot reach {least_stop:.1f}"]))
+    parts.append(f"both together to {lower:.1f}, the most they can reach")
+    parts.append(f"start {start:.1f} is above the pack's {v:.1f} V, so the run "
+                 f"begins now")
+    return _rule(4, name, True, "; ".join(parts),
+                 _proposal(cfg, gens, lower, start, baseline),
+                 gen="+".join(gens), target=lower, mode="both",
+                 deficit_wh=deficit, start=start)
 
 
 # --- POLICY 3: the two stop-voltage cases -----------------------------------

@@ -38,6 +38,12 @@ def night(cfg):
         "tomorrow_cloud": 20,
         "sunset_ts": ts_at(cfg, "2026-08-27", 19, 24),
         "remaining_solar_wh": 0,
+        # 100 kWh of pack, and ten points of charge to the volt, so a
+        # kilowatt-hour is one point and 52.0 V is 40%.
+        "deficit": {"deficit_wh": 9000, "needed_wh": 32000,
+                    "available_wh": 23000, "capacity_wh": 100000,
+                    "soc_now": 63, "soc_floor": 40.0, "floor_v": 52.0,
+                    "hours": 8.2, "source": "last 14 nights"},
         "thresholds": {"mep_start": 52.0, "mep_stop": 56.0,
                        "kub_start": 52.0, "kub_stop": 56.0},
         "baseline": {"mep_start": 52.0, "mep_stop": 56.0,
@@ -46,164 +52,150 @@ def night(cfg):
     }
 
 
-# --- POLICY 4: the rule that was missed -------------------------------------
+# --- POLICY 4: the top-up, by deficit ---------------------------------------
 
-def test_the_solo_top_up_fires_on_the_night_it_was_missed(cfg, night, model):
+def test_the_deficit_sets_the_target(cfg, night, model):
+    """9,000 Wh short, plus 15%, is 10,350 Wh: 10.35 points of a 100 kWh pack,
+    which from 63% is 73.35% and 55.3 V, rounded up to 55.5."""
     r = policy.solo_top_up(cfg, night, model)
     assert r["fires"]
-    assert r["proposal"] == {"mep_start": 55.0, "mep_stop": 57.0,
-                             "kub_start": 52.0, "kub_stop": 56.0}
+    assert "deficit 9,000 Wh to sunrise above 52.0 V" in r["detail"]
+    assert "needs 32,000, holds 23,000" in r["detail"]
+    assert "+15% is 10,350 Wh → stop 55.5" in r["detail"]
 
 
-def test_the_firing_line_shows_every_number(cfg, night, model):
-    """The owner's example, in the rate that is actually the generator's."""
-    assert policy.line(policy.solo_top_up(cfg, night, model)) == (
-        "POLICY 4 solo top-up: FIRES (peak 55.0 < 57.0; 52 V projected 3:08 am "
-        "before sunrise 6:21 am; V 54.2 ≤ 55.0 → MEP; 57.0 reachable in 1.8 h "
-        "at 90 A into the pack (15.0% SOC/h))")
-
-
-def test_a_peak_that_reached_the_threshold_does_not_fire(cfg, night, model):
-    night["peak_today"] = 57.4
+def test_the_stop_clears_the_start_the_guard_will_require(cfg, night, model):
+    """The pack is at 54.2, so the start goes to 54.4 and the stop cannot be
+    the 55.5 the deficit alone asked for."""
     r = policy.solo_top_up(cfg, night, model)
-    assert not r["fires"] and r["detail"] == "peak 57.4 ≥ 57.0"
+    assert "raised to 56.4 to clear a start above 54.2 V by 2.0 V" in r["detail"]
+    assert r["target"] == 56.4 and r["start"] == 54.4
+    assert r["proposal"]["mep_start"] == 54.4 and r["proposal"]["mep_stop"] == 56.4
 
 
-def test_reaching_52_after_sunrise_does_not_fire(cfg, night, model):
-    night["projection"] = {"reached": ts_at(cfg, "2026-08-28", 9, 0)}
+def test_the_other_generator_stays_at_the_owners_baseline(cfg, night, model):
+    night["baseline"] = {"mep_start": 52.0, "mep_stop": 55.0,
+                         "kub_start": 52.0, "kub_stop": 55.0}
     r = policy.solo_top_up(cfg, night, model)
-    assert not r["fires"] and "not before sunrise 6:21 am" in r["detail"]
+    assert r["proposal"]["kub_start"] == 52.0 and r["proposal"]["kub_stop"] == 55.0
 
 
-def test_no_projection_does_not_fire_and_says_why(cfg, night, model):
-    night["projection"] = {"reached": None, "reason": "pack capacity not learned"}
+def test_the_run_is_made_to_begin_now(cfg, night, model):
     r = policy.solo_top_up(cfg, night, model)
-    assert not r["fires"]
-    assert "52 V not projected (pack capacity not learned)" in r["detail"]
-
-
-def test_above_the_select_voltage_picks_the_kubota(cfg, night):
-    night["voltage"] = 55.6
-    model = StubModel(rates={"kubota": {"a": 120.0, "soc_per_h": 20.0}})
-    r = policy.solo_top_up(cfg, night, model)
-    assert r["fires"] and r["gen"] == "kubota" and r["mode"] == "solo"
-    assert "V 55.6 > 55.0 → Kubota" in r["detail"]
-    assert r["proposal"] == {"mep_start": 52.0, "mep_stop": 56.0,
-                             "kub_start": 55.0, "kub_stop": 57.0}
-
-
-def test_no_observed_rate_does_not_fire(cfg, night):
-    model = StubModel(rates={})
-    r = policy.solo_top_up(cfg, night, model)
-    assert not r["fires"] and "no observed charge rate for mep" in r["detail"]
-    assert "POLICY 5" in r["detail"]
-
-
-def test_a_target_already_met_is_not_a_reason_to_run(cfg, night):
-    """The record printed "57.0 reachable in 0.0 h" and the rule fired. There
-    is nothing to top up."""
-    model = StubModel(rates={"mep": {"a": 90.0, "soc_per_h": 15.0}})
-    night["voltage"] = 54.2
-    night["soc"] = 95.0                     # already past what 57.0 costs
-    r = policy.solo_top_up(cfg, night, model)
-    assert not r["fires"]
-    assert "57.0 is already met at 54.2 V, so there is nothing to top up" \
+    assert "start 54.4 is above the pack's 54.2 V, so the run begins now" \
         in r["detail"]
+    assert r["proposal"]["mep_start"] > night["voltage"]
 
 
-def test_a_target_exactly_met_does_not_fire_either(cfg, night):
-    model = StubModel(rates={"mep": {"a": 90.0, "soc_per_h": 15.0}})
-    night["soc"] = 90.0                     # exactly the state of charge 57.0 costs
-    r = policy.solo_top_up(cfg, night, model)
-    assert not r["fires"] and "already met" in r["detail"]
-
-
-def test_a_target_a_whisker_away_still_fires(cfg, night):
-    model = StubModel(rates={"mep": {"a": 90.0, "soc_per_h": 15.0}})
-    night["soc"] = 89.5
-    r = policy.solo_top_up(cfg, night, model)
-    assert r["fires"] and r["target"] == 57.0
-
-
-# --- POLICY 4 when 57.0 is out of reach in the window -----------------------
-
-def test_an_unreachable_target_still_fires_at_the_best_it_can_reach(cfg, night):
-    """The rule's point is to top the pack up. Two hours at 10 points an hour
-    takes 63% to 83%, which is 56.3 V, so it asks for 56.0."""
-    model = StubModel(rates={"mep": {"a": 60.0, "soc_per_h": 10.0}})
-    r = policy.solo_top_up(cfg, night, model)
-    assert r["fires"] and r["mode"] == "solo-reduced" and r["target"] == 56.0
-    assert "57.0 needs 2.7 h" in r["detail"] and "POLICY 5" in r["detail"]
-    assert ("highest reachable in 2.0 h is 56.0 (resting curve, 0 charging "
-            "runs on record), so MEP alone to 56.0") in r["detail"]
-    assert r["proposal"] == {"mep_start": 54.0, "mep_stop": 56.0,
-                             "kub_start": 52.0, "kub_stop": 56.0}
-
-
-def test_the_reduced_target_rounds_down_to_a_half_volt(cfg, night):
-    """83.5% is 56.35 V, which is 56.0, not 56.5."""
-    model = StubModel(rates={"mep": {"a": 61.0, "soc_per_h": 10.25}})
-    r = policy.solo_top_up(cfg, night, model)
-    assert r["target"] == 56.0
-
-
-def test_both_generators_are_proposed_when_one_cannot_clear_the_floor(cfg, night):
-    """Under the 55.0 floor alone, but the pair makes 57.0 inside the window."""
-    model = StubModel(rates={"mep": {"a": 20.0, "soc_per_h": 3.0}},
-                      pair={"a": 180.0, "soc_per_h": 30.0})
-    r = policy.solo_top_up(cfg, night, model)
-    assert r["fires"] and r["mode"] == "both" and r["gen"] == "both"
-    assert r["target"] == 57.0
-    assert "55.0 is out of reach alone, but both together" in r["detail"]
-    assert r["proposal"] == {"mep_start": 55.0, "mep_stop": 57.0,
-                             "kub_start": 55.0, "kub_stop": 57.0}
-
-
-def test_a_reachable_solo_target_is_preferred_to_running_both(cfg, night):
-    """One engine to 56.0 beats two to 57.0; the pair is the last resort."""
-    model = StubModel(rates={"mep": {"a": 60.0, "soc_per_h": 10.0}},
-                      pair={"a": 180.0, "soc_per_h": 30.0})
-    r = policy.solo_top_up(cfg, night, model)
-    assert r["mode"] == "solo-reduced" and r["gen"] == "mep"
-
-
-def test_the_pair_also_takes_the_best_it_can_reach(cfg, night):
-    """Without this the everyday 56.0 stop could never be exceeded, no run
-    would ever reach 57.0, and the charge curve could never learn its cost."""
-    model = StubModel(rates={"mep": {"a": 20.0, "soc_per_h": 3.0}},
-                      pair={"a": 80.0, "soc_per_h": 12.0})
-    r = policy.solo_top_up(cfg, night, model)
-    assert r["fires"] and r["mode"] == "both-reduced" and r["gen"] == "both"
-    # 63% and two hours at 12 points an hour is 87%, which is 56.7 -> 56.5.
-    assert r["target"] == 56.5
-    assert "highest the pair can reach in 2.0 h is 56.5" in r["detail"]
-    assert r["proposal"] == {"mep_start": 54.5, "mep_stop": 56.5,
-                             "kub_start": 54.5, "kub_stop": 56.5}
-
-
-def test_nothing_fires_when_neither_one_nor_both_can_do_anything_useful(cfg,
-                                                                        night):
-    model = StubModel(rates={"mep": {"a": 20.0, "soc_per_h": 3.0}},
-                      pair={"a": 14.0, "soc_per_h": 2.0})
+def test_a_pack_with_more_than_the_night_needs_does_not_fire(cfg, night, model):
+    night["deficit"] = dict(night["deficit"], deficit_wh=-4000)
     r = policy.solo_top_up(cfg, night, model)
     assert not r["fires"]
-    assert "55.0 is out of reach alone and both together 57.0 needs" in r["detail"]
-    assert "the pair cannot reach 55.0 either" in r["detail"]
+    assert "holds 4,000 Wh more than the night needs above 52.0 V" in r["detail"]
 
 
-def test_without_paired_history_the_pair_is_not_assumed(cfg, night):
-    model = StubModel(rates={"mep": {"a": 20.0, "soc_per_h": 3.0}}, pair=None)
+def test_a_deficit_too_small_to_be_worth_a_run_does_not_fire(cfg, night, model):
+    night["deficit"] = dict(night["deficit"], deficit_wh=5500)
     r = policy.solo_top_up(cfg, night, model)
     assert not r["fires"]
-    assert "no observed charge rate for both generators" in r["detail"]
+    assert "5,500 Wh is under the 6,000 Wh a run is worth" in r["detail"]
+    assert "POLICY 3's pre-dawn stop" in r["detail"]
 
 
-def test_a_start_below_the_current_voltage_is_called_out(cfg, night, model):
-    """The start must clear the 57.0 stop by 2.0 V, so it cannot exceed 55.0."""
-    night["voltage"] = 55.0          # picks the MEP, but 55.0 is not above it
+def test_an_unknown_deficit_says_why(cfg, night, model):
+    night["deficit"] = {"deficit_wh": None, "reason": "pack capacity not learned"}
     r = policy.solo_top_up(cfg, night, model)
-    assert r["fires"]
-    assert "the run begins when the pack falls to 55.0" in r["detail"]
+    assert not r["fires"]
+    assert "the deficit is not known (pack capacity not learned)" in r["detail"]
+
+
+def test_a_target_is_never_above_the_ceiling(cfg, night):
+    """40 kWh would want 66 V. The ceiling is the ceiling."""
+    model = StubModel(pair={"a": 400.0, "soc_per_h": 40.0})
+    night["deficit"] = dict(night["deficit"], deficit_wh=40000)
+    r = policy.solo_top_up(cfg, night, model)
+    assert r["fires"] and r["target"] == cfg["solo_target"] == 57.0
+
+
+def test_a_full_pack_cannot_have_a_run_started_now(cfg, night, model):
+    """At 55.4 V a start above the pack needs a stop over the ceiling."""
+    night["voltage"] = 55.4
+    r = policy.solo_top_up(cfg, night, model)
+    assert not r["fires"]
+    assert "over the 57.0 ceiling, so no run can be started now" in r["detail"]
+
+
+# --- POLICY 4: which generators, by how big the deficit is -------------------
+
+def test_a_small_deficit_picks_the_kubota(cfg, night):
+    model = StubModel(rates={"kubota": {"a": 90.0, "soc_per_h": 12.0},
+                             "mep": {"a": 120.0, "soc_per_h": 15.0}})
+    night["deficit"] = dict(night["deficit"], deficit_wh=7000)
+    r = policy.solo_top_up(cfg, night, model)
+    assert r["fires"] and r["gen"] == "kubota" and r["mode"] == "kubota"
+    assert "Kubota band (deficit ≤ 8,000 Wh)" in r["detail"]
+    assert r["proposal"]["kub_start"] == 54.4
+    assert r["proposal"]["mep_start"] == 52.0, "the MEP is left alone"
+
+
+def test_a_middling_deficit_picks_the_mep(cfg, night, model):
+    r = policy.solo_top_up(cfg, night, model)
+    assert r["gen"] == "mep" and "MEP band (deficit ≤ 15,000 Wh)" in r["detail"]
+
+
+def test_a_large_deficit_takes_both(cfg, night):
+    model = StubModel(pair={"a": 200.0, "soc_per_h": 30.0})
+    night["deficit"] = dict(night["deficit"], deficit_wh=20000)
+    r = policy.solo_top_up(cfg, night, model)
+    assert r["fires"] and r["gen"] == "mep+kubota" and r["mode"] == "both"
+    assert "both band (above every other)" in r["detail"]
+    assert r["proposal"]["mep_start"] == 54.4 and r["proposal"]["kub_start"] == 54.4
+
+
+def test_a_band_that_cannot_deliver_steps_up(cfg, night):
+    """7,000 Wh is the Kubota's band, but at 3 points an hour it cannot make
+    the target in two hours, so the MEP takes it."""
+    model = StubModel(rates={"kubota": {"a": 20.0, "soc_per_h": 3.0},
+                             "mep": {"a": 90.0, "soc_per_h": 15.0}})
+    night["deficit"] = dict(night["deficit"], deficit_wh=7000)
+    r = policy.solo_top_up(cfg, night, model)
+    assert r["fires"] and r["gen"] == "mep"
+    assert "stepped up past Kubota band" in r["detail"]
+    assert "MEP band (deficit ≤ 15,000 Wh)" in r["detail"]
+
+
+def test_stepping_up_can_reach_both(cfg, night):
+    model = StubModel(rates={"kubota": {"a": 20.0, "soc_per_h": 3.0},
+                             "mep": {"a": 30.0, "soc_per_h": 4.0}},
+                      pair={"a": 200.0, "soc_per_h": 30.0})
+    night["deficit"] = dict(night["deficit"], deficit_wh=7000)
+    r = policy.solo_top_up(cfg, night, model)
+    assert r["fires"] and r["gen"] == "mep+kubota"
+    assert "stepped up past Kubota band" in r["detail"]
+    assert "MEP band" in r["detail"]
+
+
+def test_when_no_band_reaches_it_both_take_what_they_can(cfg, night):
+    """The deadlock decision still stands: a target out of reach is a reason
+    to ask for less, not to do nothing. Two hours at 12 points an hour takes
+    63% to 87%, which is 56.7."""
+    model = StubModel(rates={"kubota": {"a": 20.0, "soc_per_h": 3.0},
+                             "mep": {"a": 30.0, "soc_per_h": 4.0}},
+                      pair={"a": 90.0, "soc_per_h": 12.0})
+    night["deficit"] = dict(night["deficit"], deficit_wh=20000)
+    r = policy.solo_top_up(cfg, night, model)
+    assert r["fires"] and r["gen"] == "mep+kubota"
+    assert "no band reaches it" in r["detail"]
+    assert "both together to 56.5, the most they can reach" in r["detail"]
+    assert r["target"] >= 56.4, "and still clears the start"
+
+
+def test_nothing_fires_when_even_both_cannot_clear_the_start(cfg, night):
+    model = StubModel(rates={"mep": {"a": 10.0, "soc_per_h": 1.0}},
+                      pair={"a": 14.0, "soc_per_h": 1.5})
+    night["deficit"] = dict(night["deficit"], deficit_wh=20000)
+    r = policy.solo_top_up(cfg, night, model)
+    assert not r["fires"] and "cannot reach 56.4" in r["detail"]
 
 
 # --- POLICY 4 waits for the day's solar to finish ---------------------------
@@ -219,14 +211,12 @@ def test_the_rule_is_held_while_the_sun_is_still_producing(cfg, night, model):
     """It fired at 9:36 am and started the MEP. The day's solar goes in first."""
     r = policy.solo_top_up(cfg, daytime(cfg, night), model)
     assert not r["fires"] and r["held"]
-    assert r["detail"] == ("held until sunset 7:24 pm; remaining solar today "
-                           "8.2 kWh")
-    assert policy.line(r).startswith("POLICY 4 solo top-up: held")
+    assert r["detail"] == "held until 7:24 pm; remaining solar today 8.2 kWh"
+    assert policy.line(r).startswith("POLICY 4 top-up: held")
 
 
 def test_the_hold_says_so_when_the_solar_model_is_not_learned(cfg, night, model):
-    night = daytime(cfg, night, remaining=None)
-    r = policy.solo_top_up(cfg, night, model)
+    r = policy.solo_top_up(cfg, daytime(cfg, night, remaining=None), model)
     assert "remaining solar today not learned yet" in r["detail"]
 
 
@@ -236,9 +226,24 @@ def test_the_window_opens_at_sunset(cfg, night, model):
 
 
 def test_the_window_can_open_early(cfg, night, model):
-    cfg = dict(cfg, solo_window="sunset-30")
+    cfg = dict(cfg, topup_earliest="sunset-30")
     assert policy.solo_top_up(cfg, daytime(cfg, night, 18, 53), model)["held"]
     assert policy.solo_top_up(cfg, daytime(cfg, night, 18, 54), model)["fires"]
+
+
+def test_the_window_can_be_a_clock_time(cfg, night, model):
+    cfg = dict(cfg, topup_earliest="20:00")
+    held = policy.solo_top_up(cfg, daytime(cfg, night, 19, 59), model)
+    assert held["held"] and "held until 8:00 pm" in held["detail"]
+    assert policy.solo_top_up(cfg, daytime(cfg, night, 20, 0), model)["fires"]
+
+
+def test_a_clock_time_window_ignores_the_sunset(cfg, night, model):
+    """It is the owner's hour, not the sun's, so no forecast is needed."""
+    cfg = dict(cfg, topup_earliest="20:00")
+    night = daytime(cfg, night, 20, 30)
+    night["sunset_ts"] = None
+    assert policy.solo_top_up(cfg, night, model)["fires"]
 
 
 def test_the_window_closes_at_midnight(cfg, night, model):
@@ -304,7 +309,7 @@ def test_a_pre_charge_start_raise_waits_for_the_window(cfg, night, model):
     cfg = dict(cfg, default_start=54.0)     # the proposal now raises the start
     r = policy.storm_stop(cfg, night)
     assert not r["fires"] and r["held"]
-    assert "the pre-charge start raise is held until sunset" in r["detail"]
+    assert "the pre-charge start raise is held until 7:24 pm" in r["detail"]
 
 
 # --- POLICY 3: the pre-dawn 54.5 case ---------------------------------------
@@ -370,19 +375,19 @@ def test_an_explicit_overrule_is_not_a_miss(cfg, night, model):
 
 def test_setting_what_the_rule_asked_for_is_not_a_miss(cfg, night, model):
     rules = policy.evaluate(cfg, night, model)
-    write = {"applied": True, "now": {"mep_start": 55.0, "mep_stop": 57.0,
-                                      "kub_start": 52.0, "kub_stop": 56.0}}
-    assert policy.misses(rules, "recommend: MEP solo to 57.0", write) == []
+    fired = policy.firing(rules)[0]
+    write = {"applied": True, "now": dict(fired["proposal"])}
+    assert policy.misses(rules, "recommend: MEP to 56.4", write) == []
 
 
 def test_a_guard_refusal_is_not_the_models_miss(cfg, night, model):
     """The model proposed the rule's values; the guard is what said no."""
     rules = policy.evaluate(cfg, night, model)
+    fired = policy.firing(rules)[0]
     write = {"applied": False, "refused_by": "guard",
-             "would_set": {"mep_start": 55.0, "mep_stop": 57.0,
-                           "kub_start": 52.0, "kub_stop": 56.0},
+             "would_set": dict(fired["proposal"]),
              "reason": "last write was 30 minutes ago"}
-    assert policy.misses(rules, "recommend: MEP solo to 57.0", write) == []
+    assert policy.misses(rules, "recommend: MEP to 56.4", write) == []
 
 
 def test_writing_something_else_entirely_is_still_a_miss(cfg, night, model):
@@ -393,8 +398,10 @@ def test_writing_something_else_entirely_is_still_a_miss(cfg, night, model):
 
 
 def test_nothing_firing_can_never_be_a_miss(cfg, night, model):
-    night["peak_today"] = 57.5
-    assert policy.misses(policy.evaluate(cfg, night, model), "recommend: no change", None) == []
+    night["deficit"] = dict(night["deficit"], deficit_wh=-4000)
+    rules = policy.evaluate(cfg, night, model)
+    assert policy.firing(rules) == []
+    assert policy.misses(rules, "recommend: no change", None) == []
 
 
 @pytest.mark.parametrize("text", [

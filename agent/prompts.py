@@ -38,11 +38,16 @@ POLICY = """\
    the run will land shortly before a clear sunrise and solar will finish the
    charge - never as a general setting. Pre-charge before a bad day by
    raising the start so the run lands in daylight rather than at 3 a.m.
-4. Solo top-up: if today's peak voltage stayed below 57.0 and the overnight
-   projection reaches 52 V before sunrise, run one generator now to 57.0.
-   Choose by current post-solar voltage: 55.0 or below picks the MEP, above
-   55.0 picks the Kubota. Raise only that generator's start; leave the other
-   at the default as a backstop.
+4. Top-up, by deficit. After sunset, work out the watt-hours the pack is
+   short of reaching sunrise without falling below 52.0, add a margin, and
+   turn that into a stop voltage. Under 6 kWh short is not worth a run and
+   POLICY 3's pre-dawn stop covers it. Otherwise the size of the shortfall
+   picks the generators: up to 8 kWh the Kubota, up to 15 kWh the MEP, above
+   that both. If the chosen set cannot deliver that stop inside its run
+   window, step up to the next band. Raise only the chosen generators' start,
+   above the pack's present voltage so the run begins now, and leave the
+   others at the owner's baseline as a backstop. 57.0 is the ceiling of this
+   calculation, not its purpose: charge what the night needs, not to full.
 5. A target is only valid if it is reachable within the run window at that
    generator's observed charge rate. A charge rate is current into the pack,
    in amps and the state of charge per hour it gives. Volts per hour is not a
@@ -50,9 +55,8 @@ POLICY = """\
    Reachability is judged on what the pack does while charging, from real
    runs, because that is the voltage the Pi5 stops on; the settled resting
    voltage is only a fallback until a generator has three runs on record. The
-   POLICY line says which was used. If 57.0 cannot be reached in the window,
-   take the highest target that can be, down to 55.0, or run both generators
-   if together they reach 57.0.
+   POLICY line says which was used. If no band can reach the target, both
+   generators take the highest they can, down to 55.0.
 6. Return the thresholds to default once the reason for changing them has
    passed.
 7. Generators are never run for a top-up while the sun is still producing -

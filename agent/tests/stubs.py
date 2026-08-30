@@ -58,6 +58,17 @@ class StubModel:
                         f"{target_v:.1f} needs {hours:.1f} h at {phrase} but "
                         f"the run window is {window_h:.1f} h")}
 
+    def topup_target(self, deficit_wh, margin_pct, soc_now, capacity_wh,
+                     low, high, gen=None, solo=None, now=None):
+        if not capacity_wh or soc_now is None:
+            return None
+        padded = deficit_wh * (1.0 + margin_pct / 100.0)
+        target_soc = min(100.0, soc_now + padded / capacity_wh * 100.0)
+        volts = math.ceil(round(self._volts(target_soc), 6) / 0.5) * 0.5
+        return {"volts": round(min(high, max(low, volts)), 2),
+                "uncapped_volts": round(volts, 2), "padded_wh": round(padded),
+                "target_soc": round(target_soc, 1), "basis": self.basis}
+
     def best_reachable_target(self, gen, from_v, window_h, ceiling, floor,
                               step=0.5, solo=None, soc_now=None, now=None):
         rate = self._rate(gen)
