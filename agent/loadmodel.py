@@ -94,9 +94,11 @@ def rate_phrase(rate):
     """How a charge rate is written wherever the owner or the model sees one."""
     if not rate or rate.get("a") is None:
         return "no observed rate"
+    assumed = ", assumed" if rate.get("assumed") else ""
     if rate.get("soc_per_h") is None:
-        return f"{rate['a']:.0f} A into the pack"
-    return f"{rate['a']:.0f} A into the pack ({rate['soc_per_h']:.1f}% SOC/h)"
+        return f"{rate['a']:.0f} A into the pack{assumed}"
+    return (f"{rate['a']:.0f} A into the pack "
+            f"({rate['soc_per_h']:.1f}% SOC/h{assumed})")
 
 
 def _weighted_median(pairs):
@@ -181,6 +183,24 @@ class ChargeCurve:
         return [t for t in self.traces
                 if t["start_v"] is not None
                 and t["start_v"] <= from_v + history.SOC_BIN_V]
+
+    def fell_short(self, from_v, to_v, window_h):
+        """Runs that passed from_v, had the whole window, and never reached to_v.
+
+        A run that ends on the Pi5's runtime cap short of its stop is not
+        silence about that stop: it is the pack saying no. Last night the
+        Kubota ran its full 120 minutes and finished well under 57, and the
+        estimate went on treating 57 as reachable because no run had ever
+        recorded a time for it.
+        """
+        out = []
+        for t in self._usable(from_v):
+            reached = self._arrival(t["trace"], from_v)
+            if reached is None or t["max_v"] >= to_v - history.SOC_BIN_V:
+                continue
+            if t["minutes"] - reached + 1 >= window_h * 60:
+                out.append(t)
+        return out
 
     def minutes_between(self, from_v, to_v):
         """Observed minutes from one terminal voltage to another."""
@@ -792,9 +812,12 @@ class LoadModel:
                 continue
             t = traces.get(r["run_id"])
             if t is None:
-                t = traces[r["run_id"]] = {"start_v": r["start_v"], "trace": {}}
+                t = traces[r["run_id"]] = {"start_v": r["start_v"], "trace": {},
+                                           "minutes": 0.0, "max_v": r["battery_v"]}
             v_bin = history.soc_bin(r["battery_v"])
             minutes = (r["ts"] - r["start_ts"]) / 60.0
+            t["minutes"] = max(t["minutes"], minutes)
+            t["max_v"] = max(t["max_v"], r["battery_v"])
             # First arrival: the pack passes a voltage once on the way up.
             if v_bin not in t["trace"] or minutes < t["trace"][v_bin]:
                 t["trace"][v_bin] = minutes
@@ -813,11 +836,28 @@ class LoadModel:
         return ChargeCurve(gen, solo, list(traces.values()), _isotonic(points))
 
     def _rate_for(self, gen, solo, now):
-        """The best-evidenced rate for this generator, solo history first."""
+        """This generator's own rate, or a conservative assumption.
+
+        Never another generator's, and never the paired figure. A paired run
+        measures the pack with both engines and a Magnum on it; using it to
+        size a Kubota run on its own is how last night's top-up was sized at
+        214 A, ran its full two hours and never reached its stop. An
+        assumption that is too low costs a longer run; one that is too high
+        costs a night.
+        """
         rate = self.charge_rate(gen, solo=solo, now=now)
-        if rate is None:
-            rate = self.charge_rate(gen, solo=None, now=now)
-        return rate
+        if rate is not None:
+            return rate
+        assumed = self.cfg.get("assumed_charge_a") or {}
+        amps = (sum(assumed.get(g, 0) for g in history.GENS) if gen is None
+                else assumed.get(gen))
+        if not amps:
+            return None
+        capacity_ah = self.capacity_ah()
+        return {"gen": gen, "solo": solo, "runs": 0, "a": float(amps),
+                "capacity_ah": capacity_ah, "assumed": True,
+                "soc_per_h": (round(100.0 * amps / capacity_ah, 2)
+                              if capacity_ah else None)}
 
     def hours_to_target(self, from_v, target_v, rate, soc_now=None):
         """Hours for `rate` to lift the pack from from_v to target_v.
@@ -859,6 +899,16 @@ class LoadModel:
         curve = self.charge_curve(gen, solo=solo, now=now)
         base = {"gen": gen, "window_h": window_h, "target_v": target_v,
                 "curve": curve}
+
+        short = curve.fell_short(from_v, target_v, window_h)
+        if short:
+            n = len(short)
+            best = max(t["max_v"] for t in short)
+            basis = (f"observed while charging ({curve.label}): "
+                     f"{n} run{'' if n == 1 else 's'} had the window and "
+                     f"stopped at {best:.1f}")
+            return dict(base, ok=False, rate=None, hours=None, basis=basis,
+                        why=f"{target_v:.1f} was not reached — {basis}")
 
         if curve.learned:
             observed = curve.minutes_between(from_v, target_v)

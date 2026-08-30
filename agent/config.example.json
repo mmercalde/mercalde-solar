@@ -16,6 +16,7 @@
   "topup_earliest": "sunset",
   "topup_margin_pct": 15, "min_topup_wh": 6000,
   "topup_bands": {"kubota": 8000, "mep": 15000},
+  "assumed_charge_a": {"kubota": 80, "mep": 140},
   "ags_max_run_hours": {"mep": 3, "kubota": 3},
   "exercise": {"mep_days": 5, "kubota_days": 3, "start": "09:00", "minutes": 30},
   "learning_live_days": 7,

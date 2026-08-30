@@ -390,7 +390,9 @@ def test_a_run_taken_under_an_exceptional_load_is_not_a_rate(ready, conn, cfg,
     conn.commit()
     st = make_status(cfg, now, voltage=54.0, soc=80)
     ok, why = ready.check(55.0, 57.0, 52.0, 54.5, "solo top-up", now=now, status=st)
-    assert not ok and "no observed charge rate for mep" in why
+    assert not ok
+    assert "140 A into the pack" in why and "assumed" in why, \
+        "the spiked run is gone, so the assumption stands in for it"
 
 
 def test_reachability_only_applies_to_generators_that_will_fire(ready, cfg, now):
@@ -400,13 +402,25 @@ def test_reachability_only_applies_to_generators_that_will_fire(ready, cfg, now)
     assert ok, why
 
 
-def test_no_observed_rate_refuses_and_points_at_the_defaults(conn, cfg, g, now):
+def test_no_observed_rate_uses_the_assumption_not_a_guess(conn, cfg, g, now):
     open_the_gate(conn, cfg, now)      # gate open, but no runs recorded
     learn_the_pack(conn, cfg)
     st = make_status(cfg, now, voltage=52.5, soc=65)
     ok, why = g.check(55.0, 57.0, 52.0, 54.5, "solo top-up", now=now, status=st)
-    assert not ok
-    assert "no observed charge rate" in why
+    assert not ok and "140 A into the pack" in why and "assumed" in why
+
+
+def test_no_rate_and_no_assumption_points_at_the_defaults(conn, cfg, tmp_path,
+                                                          monkeypatch, now):
+    monkeypatch.setattr(cfgmod, "DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(cfgmod, "AUDIT_LOG", str(tmp_path / "audit.log"))
+    bare = dict(cfg, assumed_charge_a={})
+    g = guardmod.Guard(conn, bare, state_path=str(tmp_path / "s.json"))
+    open_the_gate(conn, bare, now)
+    learn_the_pack(conn, bare)
+    st = make_status(bare, now, voltage=52.5, soc=65)
+    ok, why = g.check(55.0, 57.0, 52.0, 54.5, "solo top-up", now=now, status=st)
+    assert not ok and "no observed charge rate" in why
     # The message must quote the configured defaults, whatever they are.
     assert str(cfg["default_start"]) in why and str(cfg["default_stop"]) in why
 
@@ -419,15 +433,18 @@ def test_the_ags_cap_binds_when_it_is_tighter_than_the_pi5(ready, cfg, now):
     assert "resting curve" in why, "and it says which curve said so"
 
 
-def test_solo_and_paired_rates_are_chosen_correctly(conn, cfg, g, now):
-    """Only the solo rate exists; a paired firing must still find a rate."""
+def test_a_paired_firing_does_not_borrow_the_solo_rates(conn, cfg, g, now):
+    """Only solo history exists. A pair of engines is not two solo runs, so
+    the pair falls to its own assumption rather than to their figures."""
     open_the_gate(conn, cfg, now)
     learn_the_pack(conn, cfg)
     add_rate(conn, cfg, "mep", 300.0, solo=1)
     add_rate(conn, cfg, "kubota", 300.0, solo=1)
-    st = make_status(cfg, now, voltage=54.0, soc=80)
+    # A one hour window: 220 A cannot make 80% into 95%, 300 A just can.
+    st = make_status(cfg, now, voltage=54.0, soc=80, max_runtime=60)
     ok, why = g.check(55.0, 57.0, 55.0, 57.0, "both fire", now=now, status=st)
-    assert ok, why
+    assert not ok and "220 A into the pack" in why and "assumed" in why
+    assert "both generators cannot lift the pack" in why
 
 
 # --- rule 5: rate limit -----------------------------------------------------

@@ -370,11 +370,17 @@ class Guard:
         # arithmetic is the load model's, so this refusal and the POLICY 5
         # line in the plan record cannot disagree about the same question.
         firing = [g for g in GEN_KEYS if want[g[1]] > v + EPS]
-        solo = len(firing) == 1
-        for gen, skey, pkey, cfg_key in firing:
-            window_h = min(live[cfg_key]["maxRuntime"] / 60.0,
-                           self.cfg["ags_max_run_hours"][gen])
-            reach = self.model.reach(gen, v, want[pkey], window_h, solo=solo,
+        if firing:
+            window_h = min(min(live[cfg_key]["maxRuntime"] / 60.0,
+                               self.cfg["ags_max_run_hours"][gen])
+                           for gen, _, _, cfg_key in firing)
+            # Both engines on one pack is one question, not two. Asking each
+            # alone would refuse a pair for a shortfall neither of them has.
+            solo = len(firing) == 1
+            gen = firing[0][0] if solo else None
+            who = firing[0][0] if solo else "both generators"
+            target = max(want[pkey] for _, _, pkey, _ in firing)
+            reach = self.model.reach(gen, v, target, window_h, solo=solo,
                                      soc_now=soc, now=now)
             if reach["hours"] is None:
                 return False, (
@@ -383,9 +389,8 @@ class Guard:
             if not reach["ok"]:
                 # The load model's own sentence, so this refusal and the
                 # POLICY line in the plan record cannot read differently.
-                return False, (f"{gen} cannot lift the pack from {v} V to "
-                               f"{want[pkey]} V in its run window: "
-                               f"{reach['why']}")
+                return False, (f"{who} cannot lift the pack from {v} V to "
+                               f"{target} V in its run window: {reach['why']}")
 
         return True, "permitted"
 

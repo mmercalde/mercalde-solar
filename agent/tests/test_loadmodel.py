@@ -480,10 +480,88 @@ def test_reach_says_no_with_the_arithmetic(cfg, reachable):
             "window is 2.0 h") in r["why"]
 
 
-def test_reach_without_a_rate_is_a_refusal_not_a_guess(conn, cfg, lm):
+def test_reach_without_a_rate_falls_back_to_the_assumed_one(conn, cfg, lm):
+    scraped(conn, {52.0: (40, 900), 57.0: (90, 900)})
+    add_capacity(conn, cfg, ah=2000)
+    r = lm.reach("mep", 54.0, 57.0, 2.0, solo=True,
+                 now=ts_at(cfg, "2026-08-20", 22))
+    assert "140 A into the pack" in r["why"] and "assumed" in r["why"]
+
+
+def test_no_rate_and_no_assumption_is_a_refusal_not_a_guess(conn, cfg, lm):
+    lm.cfg = dict(cfg, assumed_charge_a={})
     r = lm.reach("mep", 54.0, 57.0, 2.0)
     assert not r["ok"] and r["hours"] is None
     assert "no observed charge rate for mep" in r["why"]
+
+
+# --- a solo estimate is never the paired figure -----------------------------
+
+def test_a_paired_rate_is_never_used_for_one_generator(conn, cfg, lm):
+    """Last night's bug: the Kubota was sized at the pair's 214 A, ran its
+    full two hours and never reached its stop."""
+    add_run(conn, cfg, "kubota", "2026-08-10", 2, solo=0, amps=214.0)
+    add_capacity(conn, cfg, ah=2000)
+    now = ts_at(cfg, "2026-08-20", 12)
+    rate = lm._rate_for("kubota", True, now)
+    assert rate["a"] == 80.0 and rate["assumed"] is True
+    assert lm.charge_rate("kubota", solo=False, now=now)["a"] == 214.0
+
+
+def test_one_generators_rate_is_never_the_others(conn, cfg, lm):
+    add_run(conn, cfg, "mep", "2026-08-10", 2, solo=1, amps=150.0)
+    add_capacity(conn, cfg, ah=2000)
+    rate = lm._rate_for("kubota", True, ts_at(cfg, "2026-08-20", 12))
+    assert rate["a"] == 80.0 and rate["assumed"] is True
+
+
+def test_its_own_solo_history_beats_the_assumption(conn, cfg, lm):
+    add_run(conn, cfg, "kubota", "2026-08-10", 2, solo=1, amps=95.0)
+    add_capacity(conn, cfg, ah=2000)
+    rate = lm._rate_for("kubota", True, ts_at(cfg, "2026-08-20", 12))
+    assert rate["a"] == 95.0 and not rate.get("assumed")
+
+
+def test_the_pair_assumes_both_engines_when_it_has_no_history(conn, cfg, lm):
+    add_capacity(conn, cfg, ah=2000)
+    rate = lm._rate_for(None, False, ts_at(cfg, "2026-08-20", 12))
+    assert rate["a"] == 220.0 and rate["assumed"] is True
+
+
+# --- a run that had the window and fell short is evidence --------------------
+
+def test_a_capped_run_that_fell_short_refuses_that_target(conn, cfg, lm):
+    """Two hours, stopped at 55.8, so 57.0 is not reachable in two hours."""
+    for i in range(3):
+        add_charging_run(conn, cfg, f"2026-08-{10+i:02d}", 2, 120, 53.3, 55.8,
+                         gen="kubota", solo=1, soc_start=45, soc_end=70)
+    scraped(conn, {52.0: (40, 900), 57.0: (90, 900)})
+    now = ts_at(cfg, "2026-08-20", 22)
+    r = lm.reach("kubota", 53.3, 57.0, 2.0, solo=True, soc_now=45, now=now)
+    assert not r["ok"] and r["hours"] is None
+    assert "3 runs had the window and stopped at 55.8" in r["basis"]
+    assert "57.0 was not reached" in r["why"]
+
+
+def test_a_target_those_runs_did_reach_is_still_answered(conn, cfg, lm):
+    for i in range(3):
+        add_charging_run(conn, cfg, f"2026-08-{10+i:02d}", 2, 120, 53.3, 55.8,
+                         gen="kubota", solo=1, soc_start=45, soc_end=70)
+    now = ts_at(cfg, "2026-08-20", 22)
+    r = lm.reach("kubota", 53.3, 55.5, 2.0, solo=True, soc_now=45, now=now)
+    assert r["ok"] and r["basis"].startswith("observed while charging")
+
+
+def test_a_run_cut_short_of_the_window_is_not_evidence(conn, cfg, lm):
+    """Thirty minutes says nothing about what two hours would have done."""
+    for i in range(3):
+        add_charging_run(conn, cfg, f"2026-08-{10+i:02d}", 2, 30, 53.3, 54.2,
+                         gen="kubota", solo=1, soc_start=45, soc_end=52)
+    scraped(conn, {52.0: (40, 900), 57.0: (90, 900)})
+    add_capacity(conn, cfg, ah=2000)
+    now = ts_at(cfg, "2026-08-20", 22)
+    r = lm.reach("kubota", 53.3, 57.0, 2.0, solo=True, soc_now=45, now=now)
+    assert "had the window" not in (r["basis"] or "")
 
 
 def test_reach_off_the_end_of_the_curve_says_so(conn, cfg, lm):
