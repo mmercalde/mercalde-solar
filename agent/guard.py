@@ -86,7 +86,8 @@ class Guard:
         except (OSError, ValueError):
             return {"intended": None, "last_write_ts": 0,
                     "last_heartbeat_ts": 0, "override_until": 0,
-                    "override_adopted": None, "owner_baseline": None}
+                    "override_adopted": None, "owner_baseline": None,
+                    "raised_starts": {}}
 
     def _save_state(self):
         os.makedirs(os.path.dirname(self.state_path), exist_ok=True)
@@ -101,9 +102,29 @@ class Guard:
         Reading the values back means a Pi5 clamp cannot later be mistaken for
         the owner editing the thresholds by hand.
         """
+        now = int(now or time.time())
+        base = self.baseline()
+        raised = dict(self.state.get("raised_starts") or {})
+        for gen, skey, _, _ in GEN_KEYS:
+            if applied[skey] > base[skey] + EPS:
+                raised.setdefault(gen, {"since": now, "baseline": base[skey],
+                                        "start": applied[skey]})
+            else:
+                raised.pop(gen, None)
+        self.state["raised_starts"] = raised
         self.state["intended"] = dict(applied)
-        self.state["last_write_ts"] = int(now or time.time())
+        self.state["last_write_ts"] = now
         self._save_state()
+
+    def raised_starts(self):
+        """Generators whose start the agent has raised and not yet put back."""
+        return dict(self.state.get("raised_starts") or {})
+
+    def clear_raised(self, gen):
+        raised = dict(self.state.get("raised_starts") or {})
+        if raised.pop(gen, None) is not None:
+            self.state["raised_starts"] = raised
+            self._save_state()
 
     def note_heartbeat(self, applied, now=None):
         """Record a heartbeat re-send.
@@ -273,6 +294,8 @@ class Guard:
             self.state["override_adopted"] = live_now
             self.state["owner_baseline"] = dict(live_now)
             self.state["intended"] = dict(live_now)
+            # Their values are the baseline now; nothing of ours is raised.
+            self.state["raised_starts"] = {}
             self._save_state()
             log.warning("owner changed thresholds by hand; adopting %s and "
                         "standing down for 6 h", live_now)

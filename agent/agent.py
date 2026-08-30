@@ -430,6 +430,15 @@ class Agent:
         except Exception as e:                       # noqa: BLE001
             log.warning("store update failed, continuing: %s", e)
 
+        # Python's own write, before the model is asked anything: a start the
+        # agent raised comes back the moment the generator is confirmed running.
+        try:
+            if self.return_raised_starts(facts):
+                facts["config"] = history.fetch_config(self.cfg)
+                facts["thresholds"] = toolsmod.thresholds_from_config(facts["config"])
+        except Exception as e:                       # noqa: BLE001
+            log.warning("returning a raised start failed: %s", e)
+
         tools = self.tools(policy=facts["policy"])
         try:
             text, write_result = self.run_model(
@@ -465,6 +474,75 @@ class Agent:
         self.heartbeat(facts)
         log.info("tick done in %.1fs; %s", time.time() - started, applied)
         return record
+
+    def return_raised_starts(self, facts):
+        """Put a start the agent raised back to the owner's baseline.
+
+        Python's write, not the model's. Once the Pi5 has actually started the
+        generator, the start threshold has done its job and the Pi5 ignores
+        changes to it mid-run, so putting it back at that moment is free and
+        leaves no window where a raised start could start something the agent
+        did not ask for. Last night's 53.3 stood from 1:36 am until the Pi5
+        restarted the Kubota on it at 4:02.
+
+        If the running tick is missed - the agent restarts, the dashboard is
+        unreachable - the run having ended is the second chance.
+        """
+        raised = self.guard.raised_starts()
+        if not raised or self.dry_run:
+            return []
+        data, live = facts["data"], facts["config"]
+        base = self.guard.baseline()
+        want = dict(toolsmod.thresholds_from_config(live))
+        done, why = [], {}
+        for gen, note in raised.items():
+            skey = "mep_start" if gen == "mep" else "kub_start"
+            action = data.get("mep803aAction" if gen == "mep" else "kubotaAction")
+            running = action == history.GEN_RUNNING
+            ended = self._ran_since(gen, note.get("since", 0), facts["now"])
+            if not running and not ended:
+                continue
+            if want[skey] <= base[skey] + guardmod.EPS:
+                self.guard.clear_raised(gen)     # already back, nothing to write
+                continue
+            want[skey] = max(base[skey], guardmod.HARD_START_FLOOR)
+            done.append(gen)
+            why[gen] = "is running" if running else "has finished its run"
+        if not done:
+            return []
+
+        reason = ("; ".join(f"{g} {why[g]}, so its start returns to the owner's "
+                            f"{base['mep_start' if g == 'mep' else 'kub_start']}"
+                            for g in done))
+        allowed, refusal = self.guard.check(reason=reason, now=facts["now"],
+                                            status={"data": data, "config": live},
+                                            **want)
+        if not allowed:
+            log.warning("could not return the raised start: %s", refusal)
+            return []
+        try:
+            applied = toolsmod.thresholds_from_config(
+                toolsmod.apply_thresholds(self.cfg, want["mep_start"],
+                                          want["mep_stop"], want["kub_start"],
+                                          want["kub_stop"]))
+        except requests.RequestException as e:
+            log.warning("returning the raised start failed: %s", e)
+            return []
+        self.guard.note_write(applied, now=facts["now"])
+        for gen in done:
+            self.guard.clear_raised(gen)
+        telegram.send(self.cfg, toolsmod.write_message(
+            applied, reason, before=toolsmod.thresholds_from_config(live),
+            voltage=facts["voltage"], default_start=self.cfg["default_start"]))
+        log.info("returned raised start(s) %s to the baseline", ", ".join(done))
+        return done
+
+    def _ran_since(self, gen, since, now):
+        row = self.conn.execute(
+            "SELECT 1 FROM gen_runs WHERE gen=? AND stop_ts IS NOT NULL "
+            "AND stop_ts >= ? AND stop_ts <= ? LIMIT 1",
+            (gen, since, now)).fetchone()
+        return row is not None
 
     def heartbeat(self, facts):
         """SPEC section 9: re-send the intended thresholds, hourly."""

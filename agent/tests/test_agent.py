@@ -9,6 +9,7 @@ import pytest
 
 import agent as agentmod
 import history
+import tools as toolsmod
 import policy
 from stubs import StubModel
 
@@ -598,3 +599,128 @@ def test_the_overnight_report_is_twelve_hour(a, cfg, morning, monkeypatch):
     text = a.digest(evening=False)
     assert "3:08 am" in text and "6:00 am" in text
     assert not re.search(r"\b(1[3-9]|2[0-3]):[0-5]\d\b", text), text
+
+
+# --- a raised start comes back on its own ------------------------------------
+
+def running_facts(a, cfg, gen="kubota", start=53.3, running=True, v=53.1):
+    live = {"mep803a": {"startVoltage": 52.0, "stopVoltage": 56.0,
+                        "maxRuntime": 120},
+            "kubota": {"startVoltage": 52.0, "stopVoltage": 56.0,
+                       "maxRuntime": 120}}
+    key = "kubota" if gen == "kubota" else "mep803a"
+    live[key]["startVoltage"] = start
+    action = history.GEN_RUNNING if running else history.GEN_STOPPED
+    f = base_facts(cfg, gate_open=True)
+    f.update(voltage=v, config=live,
+             data={"mep803aAction": (action if gen == "mep" else history.GEN_STOPPED),
+                   "kubotaAction": (action if gen == "kubota" else history.GEN_STOPPED)},
+             thresholds=toolsmod.thresholds_from_config(live))
+    a.dry_run = False
+    a.guard.state["raised_starts"] = {gen: {"since": f["now"] - 3600,
+                                            "baseline": 52.0, "start": start}}
+    return f
+
+
+@pytest.fixture
+def wrote(monkeypatch):
+    """Captures the one write the return makes."""
+    calls = []
+    monkeypatch.setattr(agentmod.toolsmod, "apply_thresholds",
+                        lambda cfg, *v, **k: calls.append(v) or {
+                            "mep803a": {"startVoltage": v[0], "stopVoltage": v[1]},
+                            "kubota": {"startVoltage": v[2], "stopVoltage": v[3]}})
+    monkeypatch.setattr(agentmod.telegram, "send", lambda *a, **k: True)
+    return calls
+
+
+def test_the_start_returns_as_soon_as_the_generator_is_running(a, cfg, wrote):
+    """The Pi5 ignores start changes mid-run, so there is no window at all."""
+    f = running_facts(a, cfg)
+    monkey = a.guard.check
+    a.guard.check = lambda **kw: (True, "permitted")
+    assert a.return_raised_starts(f) == ["kubota"]
+    a.guard.check = monkey
+    assert wrote == [(52.0, 56.0, 52.0, 56.0)]
+    assert a.guard.raised_starts() == {}
+
+
+def test_it_waits_while_the_generator_has_not_started(a, cfg, wrote):
+    f = running_facts(a, cfg, running=False)
+    assert a.return_raised_starts(f) == []
+    assert wrote == []
+    assert "kubota" in a.guard.raised_starts(), "still outstanding"
+
+
+def test_a_missed_tick_is_caught_once_the_run_has_ended(a, cfg, wrote, conn):
+    f = running_facts(a, cfg, running=False)
+    since = a.guard.raised_starts()["kubota"]["since"]
+    conn.execute("INSERT INTO gen_runs (gen, start_ts, stop_ts, duration_min, "
+                 "kind) VALUES ('kubota', ?, ?, 30, 'agent')",
+                 (since + 60, since + 60 + 1800))
+    conn.commit()
+    a.guard.check = lambda **kw: (True, "permitted")
+    assert a.return_raised_starts(f) == ["kubota"]
+    assert wrote == [(52.0, 56.0, 52.0, 56.0)]
+
+
+def test_only_the_raised_generators_start_moves(a, cfg, wrote):
+    f = running_facts(a, cfg, gen="mep", start=54.4)
+    f["config"]["mep803a"]["stopVoltage"] = 56.4
+    f["thresholds"] = toolsmod.thresholds_from_config(f["config"])
+    a.guard.check = lambda **kw: (True, "permitted")
+    a.return_raised_starts(f)
+    assert wrote == [(52.0, 56.4, 52.0, 56.0)], "the stop it charges to stays"
+
+
+def test_a_start_already_back_is_just_forgotten(a, cfg, wrote):
+    f = running_facts(a, cfg, start=52.0)
+    assert a.return_raised_starts(f) == []
+    assert wrote == [] and a.guard.raised_starts() == {}
+
+
+def test_a_dry_run_returns_nothing(a, cfg, wrote):
+    f = running_facts(a, cfg)
+    a.dry_run = True
+    assert a.return_raised_starts(f) == []
+    assert wrote == []
+
+
+def test_a_guard_refusal_leaves_it_outstanding(a, cfg, wrote, caplog):
+    f = running_facts(a, cfg)
+    a.guard.check = lambda **kw: (False, "dashboard data is 900s old")
+    assert a.return_raised_starts(f) == []
+    assert wrote == []
+    assert "kubota" in a.guard.raised_starts(), "to be tried again next tick"
+    assert "could not return the raised start" in caplog.text
+
+
+def test_the_write_is_recorded_as_a_raise_when_it_is_one(a, cfg):
+    a.guard.note_write({"mep_start": 54.4, "mep_stop": 56.4,
+                        "kub_start": 52.0, "kub_stop": 56.0}, now=1000)
+    assert set(a.guard.raised_starts()) == {"mep"}
+    a.guard.note_write({"mep_start": 52.0, "mep_stop": 56.4,
+                        "kub_start": 52.0, "kub_stop": 56.0}, now=2000)
+    assert a.guard.raised_starts() == {}
+
+
+def test_an_owner_edit_cancels_an_outstanding_raise(a, cfg, conn, monkeypatch):
+    """Their values are the baseline now; nothing of the agent's is raised."""
+    monkeypatch.setattr(agentmod.guardmod.Guard, "_save_state", lambda self: None)
+    monkeypatch.setattr(a.guard.model, "learning_status",
+                        lambda **k: {"open": True})
+    a.guard.state["raised_starts"] = {"kubota": {"since": 0, "baseline": 52.0,
+                                                 "start": 53.3}}
+    a.guard.state["intended"] = {"mep_start": 52.0, "mep_stop": 56.0,
+                                 "kub_start": 53.3, "kub_stop": 56.0}
+    live = {"mep803a": {"startVoltage": 52.0, "stopVoltage": 55.0,
+                        "maxRuntime": 120},
+            "kubota": {"startVoltage": 52.0, "stopVoltage": 55.0,
+                       "maxRuntime": 120}}
+    a.guard._evaluate({"mep_start": 52.0, "mep_stop": 56.0,
+                       "kub_start": 52.0, "kub_stop": 56.0},
+                      {"battMonitorOnline": True, "clockTime": "22:00:00",
+                       "batteryVoltage": 54.0}, live, 54.0, 80,
+                      int(datetime(2026, 8, 28, 22, tzinfo=history.tzinfo(cfg))
+                          .timestamp()))
+    assert a.guard.raised_starts() == {}
