@@ -1061,3 +1061,24 @@ def test_intended_thresholds_survive_a_restart(conn, cfg, ready, now, tmp_path):
     reborn = guardmod.Guard(conn, cfg, state_path=str(tmp_path / "guard_state.json"))
     assert reborn.intended()["mep_start"] == 55.0
     assert reborn.state["last_write_ts"] == now
+
+
+def test_housekeeping_does_not_start_the_rate_limit_hour_again(ready, cfg, now):
+    """Putting a raised start back is the agent tidying up after itself. If it
+    reset the clock, every top-up would buy an hour of silence behind it."""
+    ready.note_write({"mep_start": 54.4, "mep_stop": 56.4,
+                      "kub_start": 52.0, "kub_stop": 56.0}, now=now - 3700)
+    ready.note_write({"mep_start": 52.0, "mep_stop": 56.4,
+                      "kub_start": 52.0, "kub_stop": 56.0}, now=now - 60,
+                     housekeeping=True)
+    assert ready.state["last_write_ts"] == now - 3700
+    st = make_status(cfg, now, mep_stop=56.4, kub_stop=56.0)
+    ok, why = ready.check(52.0, 54.5, 52.0, 54.5, "pre-dawn stop", now=now,
+                          status=st)
+    assert ok, why
+
+
+def test_an_ordinary_write_still_starts_the_hour(ready, cfg, now):
+    ready.note_write({"mep_start": 52.0, "mep_stop": 56.0,
+                      "kub_start": 52.0, "kub_stop": 56.0}, now=now - 60)
+    assert ready.state["last_write_ts"] == now - 60

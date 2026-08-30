@@ -97,11 +97,17 @@ class Guard:
             json.dump(self.state, f, indent=2)
         os.replace(tmp, self.state_path)
 
-    def note_write(self, applied, now=None):
+    def note_write(self, applied, now=None, housekeeping=False):
         """Record what the dashboard reports after a successful write.
 
         Reading the values back means a Pi5 clamp cannot later be mistaken for
         the owner editing the thresholds by hand.
+
+        `housekeeping` leaves the rate-limit clock where it was. Putting a
+        raised start back is the agent tidying up after itself, not a decision
+        about the night, and letting it start the hour again would mean every
+        top-up bought an hour of silence afterwards - which the replay of the
+        first night showed swallowing the pre-dawn stop that followed it.
         """
         now = int(now or time.time())
         base = self.baseline()
@@ -114,7 +120,8 @@ class Guard:
                 raised.pop(gen, None)
         self.state["raised_starts"] = raised
         self.state["intended"] = dict(applied)
-        self.state["last_write_ts"] = now
+        if not housekeeping:
+            self.state["last_write_ts"] = now
         self._save_state()
 
     def raised_starts(self):

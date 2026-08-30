@@ -258,14 +258,13 @@ def solo_top_up(cfg, f, model):
             if tried:
                 parts.append("stepped up past " + "; ".join(tried))
             parts.append(f"{band}: {reach['why']}")
+
             parts.append(f"start {start:.1f} is above the pack's {v:.1f} V, so "
                          f"the run begins now")
             return _rule(4, name, True, "; ".join(parts),
                          _proposal(cfg, gens, target, start, baseline),
                          gen="+".join(gens), target=target, mode=label.lower(),
                          deficit_wh=deficit, start=start)
-        if not tried:
-            parts += note
         tried.append(f"{band} {reach['why']}")
         index += 1
 

@@ -528,7 +528,7 @@ class Agent:
         except requests.RequestException as e:
             log.warning("returning the raised start failed: %s", e)
             return []
-        self.guard.note_write(applied, now=facts["now"])
+        self.guard.note_write(applied, now=facts["now"], housekeeping=True)
         for gen in done:
             self.guard.clear_raised(gen)
         telegram.send(self.cfg, toolsmod.write_message(
