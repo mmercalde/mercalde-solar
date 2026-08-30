@@ -273,3 +273,29 @@ def test_a_phrase_with_no_clock_time_is_still_refused(cfg):
 def test_the_owners_phrasing_reaches_the_reading(conn, cfg, night):
     t = toolsmod.Tools(conn, cfg)
     assert t.get_voltage_at("2:47 am last night")["voltage"] == 53.66
+
+
+def test_the_ask_prompt_says_what_day_it_is():
+    """Without it the model invented a date three years out and the reading
+    it wanted was never looked up."""
+    import prompts
+    p = prompts.ask_prompt("en", now_text="2026-08-30 1:26 pm")
+    assert "It is 2026-08-30 1:26 pm." in p
+    assert "Never supply a date of" in p
+    assert "NOW" not in prompts.ask_prompt("en"), "omitted when not supplied"
+
+
+@pytest.mark.parametrize("phrase", ["8-30 2:47 am", "08-30 02:47", "8/30 2:47 am"])
+def test_a_month_and_day_without_a_year_resolves_to_the_recent_one(cfg, phrase):
+    """The model reached for this shape and the parser turned it away, so it
+    fell back to inventing a full date and read the wrong night."""
+    now = ts_at(cfg, "2026-08-30", 13, 30)
+    when, why = toolsmod.parse_when(phrase, cfg, now)
+    assert when is not None, why
+    assert history.stamp(when, cfg) == "2026-08-30 2:47 am"
+
+
+def test_a_month_and_day_still_to_come_is_taken_as_last_year(cfg):
+    now = ts_at(cfg, "2026-08-30", 13, 30)
+    when, _ = toolsmod.parse_when("12-25 2:47 am", cfg, now)
+    assert history.stamp(when, cfg) == "2025-12-25 2:47 am"

@@ -121,6 +121,9 @@ of charge, wattage or time that a tool did not just return.
 
 A question about a specific time - "at 2:47 am", "at midnight", "when the
 generator started" - must be answered with get_voltage_at, or not answered.
+Pass it the owner's own words for the moment: if they named a time without a
+date, pass the time alone and let the tool resolve it. Never supply a date of
+your own.
 Never reach for get_history and offer its minimum, maximum or average as the
 reading at a moment: they are different questions and the answer will be
 wrong. If get_voltage_at reports no sample near enough, say that.
@@ -134,11 +137,19 @@ speech with no markup, no lists and no headings. Answer in the same language
 the question was asked in."""
 
 
-def ask_prompt(lang=None):
+def ask_prompt(lang=None, now_text=None):
+    """The system prompt for an inbound question.
+
+    `now_text` is the current date and time. Without it the model has no idea
+    what day it is: asked for the voltage at 2:47 am it supplied a date of its
+    own invention, three years out, and the reading it wanted was never
+    looked up.
+    """
     p = (f"MISSION\n{MISSION}\n\n"
          f"SYSTEM\n{SYSTEM}\n\n"
          f"POLICY\n{POLICY}\n\n"
-         f"HOW TO ANSWER\n{ASK_CONTRACT}")
+         + (f"NOW\nIt is {now_text}.\n\n" if now_text else "")
+         + f"HOW TO ANSWER\n{ASK_CONTRACT}")
     if lang == "es":
         p += "\n\nResponde en espanol."
     elif lang == "en":

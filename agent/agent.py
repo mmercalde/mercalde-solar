@@ -687,12 +687,14 @@ class Agent:
         with self.lock:
             tools = self.tools()
             try:
-                reply, _ = self.run_model(prompts.ask_prompt(lang), text, tools,
+                now_text = history.stamp(int(time.time()), self.cfg)
+                reply, _ = self.run_model(prompts.ask_prompt(lang, now_text),
+                                          text, tools,
                                           max_rounds=MAX_TOOL_ROUNDS)
                 if not tools.calls:
                     log.warning("answer was ungrounded; retrying with a nudge")
                     reply, _ = self.run_model(
-                        prompts.ask_prompt(lang),
+                        prompts.ask_prompt(lang, now_text),
                         text + "\n\n(You have not called a tool yet. Call the "
                                "tool that answers this before replying.)",
                         tools)

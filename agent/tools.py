@@ -153,6 +153,12 @@ def refusal_message(refusals):
 # morning, not tomorrow.
 WHEN_FORMATS_DATED = ("%Y-%m-%d %I:%M %p", "%Y-%m-%d %I:%M%p", "%Y-%m-%d %H:%M",
                       "%Y-%m-%dT%H:%M", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S")
+# A month and day with no year: the model reaches for these when the owner
+# named a night without one. The year is the most recent that puts the moment
+# in the past.
+WHEN_FORMATS_MONTHDAY = ("%m-%d %I:%M %p", "%m-%d %I:%M%p", "%m-%d %H:%M",
+                         "%m/%d %I:%M %p", "%m/%d %I:%M%p", "%m/%d %H:%M",
+                         "%b %d %I:%M %p", "%d %b %I:%M %p")
 WHEN_FORMATS_TIME = ("%I:%M %p", "%I:%M%p", "%H:%M")
 # A sample further from the moment asked about than this is not an answer to
 # the question; the pack can move a long way in five minutes under load.
@@ -210,6 +216,16 @@ def parse_when(text, cfg, now=None):
             when = datetime.strptime(cleaned, fmt).replace(tzinfo=tz)
         except ValueError:
             continue
+        return int((when - timedelta(days=days_back)).timestamp()), None
+    for fmt in WHEN_FORMATS_MONTHDAY:
+        try:
+            t = datetime.strptime(cleaned, fmt)
+        except ValueError:
+            continue
+        here = history.local(now, cfg)
+        when = t.replace(year=here.year, tzinfo=tz)
+        if when.timestamp() > now:          # never a date still to come
+            when = when.replace(year=here.year - 1)
         return int((when - timedelta(days=days_back)).timestamp()), None
     for fmt in WHEN_FORMATS_TIME:
         try:
@@ -468,6 +484,10 @@ class Tools:
         """
         when, why = parse_when(timestamp, self.cfg)
         if when is None:
+            # Worth seeing: a timestamp the parser cannot read is a question
+            # the owner asked and did not get an answer to.
+            log.warning("get_voltage_at could not read timestamp %r: %s",
+                        timestamp, why)
             return {"error": why}
         row = self.conn.execute(
             "SELECT * FROM samples "
