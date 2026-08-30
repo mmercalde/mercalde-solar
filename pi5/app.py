@@ -954,10 +954,10 @@ body::before{
 .dot.stale{background:var(--warn)}
 .dot.off{background:var(--dim2)}
 .askbox{display:inline-flex;align-items:center;gap:4px}
-.askbox input{width:11rem;background:rgba(255,255,255,.06);color:var(--txt);
-  border:1px solid var(--line,#2a2f3a);border-radius:7px;padding:3px 7px;
+.askbox input{width:11rem;background:rgba(255,255,255,.10);color:var(--txt);
+  border:1px solid rgba(255,255,255,.22);border-radius:7px;padding:4px 8px;
   font:inherit;font-size:.72rem}
-.askbox input::placeholder{color:var(--dim2)}
+.askbox input::placeholder{color:#8fa2b6}
 .askbox input:focus{outline:none;border-color:var(--batt)}
 /* An answer is a block in the log, not a line: it keeps its own paragraphs. */
 .ask-q{color:var(--batt);padding-top:6px!important;white-space:pre-wrap;
@@ -966,14 +966,22 @@ body::before{
   border-left:2px solid var(--line,#2a2f3a);padding-left:8px!important;
   margin:2px 0 6px}
 .ask-wait{color:var(--dim2);font-style:italic}
-.agentb{cursor:pointer;user-select:none;position:relative}
+.agentb{cursor:pointer;user-select:none}
 .agentb:hover{color:var(--batt)}
 /* The plan popover hangs off the badge; the badge is its positioning parent. */
-.agentpop{position:absolute;top:calc(100% + 8px);right:0;z-index:60;
-  width:min(30rem,calc(100vw - 2rem));max-height:min(32rem,70vh);overflow:auto;
-  background:var(--panel,#12151b);color:var(--txt);border:1px solid var(--line,#2a2f3a);
-  border-radius:10px;padding:.7rem .8rem;text-align:left;cursor:default;
-  box-shadow:0 10px 30px rgba(0,0,0,.45);font-size:.72rem;line-height:1.45}
+/* Opaque, deliberately: --panel is rgba(255,255,255,.035), which is a tint
+   for a card sitting on the page background and not a colour anything can be
+   read against. This is what the Event & Error Log renders as once its
+   rgba(0,0,0,.42) is composited over the card and the page beneath it, so the
+   panel matches the log while owing nothing to what is behind it. */
+.agentpop{position:fixed;top:80px;right:18px;z-index:200;
+  width:min(34rem,calc(100vw - 2rem));max-height:70vh;overflow-y:auto;
+  background:#0c0d10;color:var(--txt);border:1px solid rgba(255,255,255,.16);
+  border-radius:12px;padding:.8rem .9rem;text-align:left;cursor:default;
+  box-shadow:0 18px 48px rgba(0,0,0,.72),0 2px 8px rgba(0,0,0,.5);
+  font-size:.72rem;line-height:1.45}
+.agentpop::-webkit-scrollbar{width:7px}
+.agentpop::-webkit-scrollbar-thumb{background:rgba(255,255,255,.16);border-radius:9px}
 .agentpop h4{margin:0 0 .4rem;font-size:.68rem;letter-spacing:.08em;
   text-transform:uppercase;color:var(--dim2)}
 .agentpop .pl{white-space:pre-wrap;word-break:break-word;font-family:ui-monospace,
@@ -1267,7 +1275,7 @@ input[type=range]::-moz-range-thumb{width:14px;height:14px;border-radius:50%;bac
   <div class='hud hud-tr'>
     <span><span class='dot' id='liveDot'></span>&nbsp;<span class='num' id='lastUpdate_value'>--:--:--</span></span>
     <span>Errors <strong class='num' id='pollErrors_value' style='color:var(--txt)'>0</strong></span>
-    <span class='agentb' id='agentBadge' onclick='toggleAgentPlan(event)' title='Show the latest agent plan'><span class='dot off' id='agentDot'></span>&nbsp;<span id='agentText'>Agent &hellip;</span><span class='agentpop' id='agentPop' hidden onclick='event.stopPropagation()'></span></span>
+    <span class='agentb' id='agentBadge' onclick='toggleAgentPlan(event)' title='Show the latest agent plan'><span class='dot off' id='agentDot'></span>&nbsp;<span id='agentText'>Agent &hellip;</span></span>
     <span class='askbox'>
       <input id='askInput' type='text' placeholder='Ask the agent&hellip;' autocomplete='off'
              onkeydown='if(event.key===\"Enter\"){event.preventDefault();askAgent();}'>
@@ -1517,6 +1525,12 @@ input[type=range]::-moz-range-thumb{width:14px;height:14px;border-radius:50%;bac
 <div class='foot'>Pi 5 &middot; Dashboard V2.8 &middot; uptime <span class='num' id='uptime_value'>--:--:--</span></div>
 </div>
 
+<!-- The agent plan panel lives at the top level, not inside the header.
+     The header sits in .stage, which is overflow:hidden and only 72vh tall,
+     and .hud carries a backdrop-filter, which makes it the containing block
+     for any fixed child. Anchored inside it the panel was both clipped and
+     stuck behind the scene; out here it is neither. -->
+<div class='agentpop' id='agentPop' hidden onclick='event.stopPropagation()'></div>
 <div id='toasts'></div>
 
 <script>
@@ -2101,9 +2115,18 @@ function renderAgent(d){
 /* The plan goes in a popover anchored to the badge, not into the event log:
    the log is for the dashboard's own events, and a plan record buried in it
    scrolls away as soon as anything else happens. */
+function placeAgentPlan(){
+  const pop=document.getElementById('agentPop'),badge=document.getElementById('agentBadge');
+  if(!pop||!badge)return;
+  const r=badge.getBoundingClientRect();
+  pop.style.top=Math.round(r.bottom+10)+'px';
+  pop.style.right=Math.max(12,Math.round(innerWidth-r.right))+'px';
+}
+
 function showAgentPlan(){
   const pop=document.getElementById('agentPop');
   if(!pop)return;
+  placeAgentPlan();
   pop.innerHTML='';
   const head=document.createElement('h4');
   head.textContent='Latest plan';
@@ -2158,6 +2181,7 @@ document.addEventListener('click',function(){if(agentPlanShown)hideAgentPlan();}
 document.addEventListener('keydown',function(e){
   if(e.key==='Escape'&&agentPlanShown)hideAgentPlan();
 });
+addEventListener('resize',function(){if(agentPlanShown)placeAgentPlan();});
 
 /* pause polling when tab hidden, resume immediately on return */
 let dataTimer,cfgTimer,agentTimer;
