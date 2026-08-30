@@ -351,9 +351,13 @@ class Guard:
         if self._same(want, live_now):
             return False, "those are already the live thresholds; nothing to change"
 
-        # Rule 5: rate limit.
+        # Rule 5: rate limit. It exists to stop the agent churning the
+        # thresholds upward; a write that only moves them back toward the
+        # owner's baseline is the opposite of churn and waiting an hour to
+        # make it just leaves a raised start standing for that hour.
         since = now - self.state.get("last_write_ts", 0)
-        if self.state.get("last_write_ts") and since < RATE_LIMIT_SECONDS:
+        if (self.state.get("last_write_ts") and since < RATE_LIMIT_SECONDS
+                and not self.toward_baseline(want, live_now)):
             return False, (f"last write was {int(since / 60)} minutes ago; "
                            f"at most one write per "
                            f"{int(RATE_LIMIT_SECONDS / 60)} minutes")
@@ -393,6 +397,24 @@ class Guard:
                                f"{target} V in its run window: {reach['why']}")
 
         return True, "permitted"
+
+    def toward_baseline(self, want, live):
+        """Does every value move toward the owner's baseline, and one reach it?
+
+        "Toward" is measured as distance from the baseline, so lowering a
+        raised start counts and so does lifting a stop that was dropped below
+        it. Anything that takes a value further away is an ordinary write and
+        waits its turn.
+        """
+        base = self.baseline()
+        closer = False
+        for key in ("mep_start", "mep_stop", "kub_start", "kub_stop"):
+            was, now_ = abs(live[key] - base[key]), abs(want[key] - base[key])
+            if now_ > was + EPS:
+                return False
+            if now_ < was - EPS:
+                closer = True
+        return closer
 
     def _daylight(self, now):
         """(sunrise, sunset) if `now` is between them, else None.

@@ -450,10 +450,11 @@ def test_a_paired_firing_does_not_borrow_the_solo_rates(conn, cfg, g, now):
 # --- rule 5: rate limit -----------------------------------------------------
 
 def test_a_second_write_within_the_hour_is_refused(ready, cfg, now):
-    ready.note_write({"mep_start": 52.0, "mep_stop": 54.5,
-                      "kub_start": 52.0, "kub_stop": 54.5}, now=now - 1800)
-    ok, why = ready.check(52.0, 56.0, 52.0, 56.0, "x",
-                          now=now, status=make_status(cfg, now))
+    """Away from the baseline, which is what the limit is there to slow."""
+    ready.note_write({"mep_start": 52.0, "mep_stop": 56.0,
+                      "kub_start": 52.0, "kub_stop": 56.0}, now=now - 1800)
+    st = make_status(cfg, now, mep_stop=56.0, kub_stop=56.0)
+    ok, why = ready.check(52.0, 57.0, 52.0, 57.0, "x", now=now, status=st)
     assert not ok and "30 minutes ago" in why
 
 
@@ -469,6 +470,65 @@ def test_the_first_write_is_not_rate_limited(ready, cfg, now):
     ok, why = ready.check(52.0, 56.0, 52.0, 56.0, "x",
                           now=now, status=make_status(cfg, now))
     assert ok, why
+
+
+# The limit exists to stop churn upward, so a write that only walks values
+# back toward the owner's baseline does not wait for it.
+
+def test_a_write_back_toward_the_baseline_is_not_rate_limited(ready, cfg, now):
+    """A raised start standing for another hour is the harm, not the fix."""
+    ready.note_write({"mep_start": 54.4, "mep_stop": 56.4,
+                      "kub_start": 52.0, "kub_stop": 56.0}, now=now - 300)
+    st = make_status(cfg, now, mep_start=54.4, mep_stop=56.4, kub_stop=56.0)
+    ok, why = ready.check(52.0, 56.4, 52.0, 56.0, "the run is under way",
+                          now=now, status=st)
+    assert ok, why
+
+
+def test_lowering_a_stop_toward_the_baseline_is_not_rate_limited(ready, cfg, now):
+    ready.note_write({"mep_start": 52.0, "mep_stop": 57.0,
+                      "kub_start": 52.0, "kub_stop": 57.0}, now=now - 300)
+    st = make_status(cfg, now, mep_stop=57.0, kub_stop=57.0)
+    ok, why = ready.check(52.0, 56.0, 52.0, 56.0, "the storm has passed",
+                          now=now, status=st)
+    assert ok, why
+
+
+def test_a_write_away_from_the_baseline_still_waits(ready, cfg, now):
+    ready.note_write({"mep_start": 52.0, "mep_stop": 56.0,
+                      "kub_start": 52.0, "kub_stop": 56.0}, now=now - 300)
+    ok, why = ready.check(52.0, 57.0, 52.0, 57.0, "storm tomorrow", now=now,
+                          status=make_status(cfg, now, mep_stop=56.0,
+                                             kub_stop=56.0))
+    assert not ok and "at most one write per 60 minutes" in why
+
+
+def test_a_write_that_moves_one_each_way_still_waits(ready, cfg, now):
+    """Trading a step back for a step out is not a return."""
+    ready.note_write({"mep_start": 54.0, "mep_stop": 56.0,
+                      "kub_start": 52.0, "kub_stop": 56.0}, now=now - 300)
+    st = make_status(cfg, now, mep_start=54.0, mep_stop=56.0, kub_stop=56.0)
+    ok, why = ready.check(52.0, 56.0, 52.0, 57.0, "one back, one out",
+                          now=now, status=st)
+    assert not ok and "at most one write per 60 minutes" in why
+
+
+def test_toward_the_baseline_needs_something_to_actually_move(ready, cfg):
+    live = {"mep_start": 52.0, "mep_stop": 56.0,
+            "kub_start": 52.0, "kub_stop": 56.0}
+    assert not ready.toward_baseline(dict(live), live), "a no-op moves nothing"
+
+
+def test_toward_an_owner_baseline_not_the_config_default(after_owner_edit, cfg,
+                                                          now):
+    """The owner's 55.0 stops are the baseline; 56.0 is away from them."""
+    after_owner_edit.note_write(dict(OWNER), now=now - 300)
+    assert after_owner_edit.toward_baseline(
+        {"mep_start": 52.0, "mep_stop": 55.0, "kub_start": 52.0, "kub_stop": 55.0},
+        {"mep_start": 52.0, "mep_stop": 56.0, "kub_start": 52.0, "kub_stop": 55.0})
+    assert not after_owner_edit.toward_baseline(
+        {"mep_start": 52.0, "mep_stop": 56.5, "kub_start": 52.0, "kub_stop": 55.0},
+        {"mep_start": 52.0, "mep_stop": 55.0, "kub_start": 52.0, "kub_stop": 55.0})
 
 
 # --- rule 6: learning gate --------------------------------------------------
