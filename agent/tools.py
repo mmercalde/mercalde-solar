@@ -159,22 +159,58 @@ WHEN_FORMATS_TIME = ("%I:%M %p", "%I:%M%p", "%H:%M")
 SAMPLE_WINDOW_SECONDS = 300
 
 
+# Day words the owner and the model both use around a clock time, and how far
+# back each one puts it. "last night" needs no shift: 2:47 am asked about in
+# the afternoon is already the most recent 2:47 am there was.
+DAY_WORDS = (
+    ("the day before yesterday", 2), ("day before yesterday", 2),
+    ("yesterday morning", 1), ("yesterday evening", 1),
+    ("yesterday night", 1), ("yesterday", 1),
+    ("last night", 0), ("overnight", 0), ("tonight", 0),
+    ("this morning", 0), ("this afternoon", 0), ("this evening", 0),
+    ("early this morning", 0), ("today", 0), ("at", 0), ("around", 0),
+    ("exactly", 0), ("about", 0), ("on", 0),
+)
+
+
 def parse_when(text, cfg, now=None):
-    """(timestamp, None) for a moment the owner named, or (None, why not)."""
+    """(timestamp, None) for a moment the owner named, or (None, why not).
+
+    Tolerant of the way the question was actually asked. The model relays the
+    owner's own words - "2:47 am last night" - and a parser that took only a
+    bare clock time turned a question with an answer in the database into an
+    apology about timestamp formats.
+    """
     now = int(now or time.time())
     raw = str(text or "").strip()
     if not raw:
         return None, "no time was given"
     if raw.isdigit():
         return int(raw), None
-    cleaned = " ".join(raw.replace(",", " ").split())
     tz = history.tzinfo(cfg)
+    try:
+        parsed = datetime.fromisoformat(raw)
+        return int((parsed if parsed.tzinfo else parsed.replace(tzinfo=tz))
+                   .timestamp()), None
+    except ValueError:
+        pass
+
+    cleaned = " ".join(raw.lower().replace(",", " ").replace("(", " ")
+                       .replace(")", " ").replace("a.m.", "am")
+                       .replace("p.m.", "pm").replace("o'clock", "").split())
+    days_back = 0
+    for word, back in DAY_WORDS:
+        if word in cleaned:
+            cleaned = " ".join(cleaned.replace(word, " ").split())
+            days_back = max(days_back, back)
+    if not cleaned:
+        return None, f"no clock time in {raw!r}"
     for fmt in WHEN_FORMATS_DATED:
         try:
-            return int(datetime.strptime(cleaned, fmt).replace(tzinfo=tz)
-                       .timestamp()), None
+            when = datetime.strptime(cleaned, fmt).replace(tzinfo=tz)
         except ValueError:
             continue
+        return int((when - timedelta(days=days_back)).timestamp()), None
     for fmt in WHEN_FORMATS_TIME:
         try:
             t = datetime.strptime(cleaned, fmt)
@@ -185,7 +221,7 @@ def parse_when(text, cfg, now=None):
         # The most recent time it was that o'clock, never a future one.
         if local.timestamp() > now:
             local -= timedelta(days=1)
-        return int(local.timestamp()), None
+        return int((local - timedelta(days=days_back)).timestamp()), None
     return None, (f"could not read {raw!r} as a time; use 'HH:MM', "
                   f"'H:MM am' or 'YYYY-MM-DD H:MM am'")
 

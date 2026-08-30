@@ -235,3 +235,41 @@ def test_a_refusal_passes_only_when_there_is_nothing_to_report():
     present = {"asked_for": "x", "voltage": 53.66, "sample_at": "2:47 am"}
     ok, why = eval_cases.grade_voltage_at("I don't have that reading.", present)
     assert not ok and "declined, but the sample" in why
+
+
+# --- the question is asked in the owner's words, not a format ---------------
+
+@pytest.mark.parametrize("phrase,expect_day", [
+    ("2:47 am", "2026-08-30"),
+    ("2:47 a.m.", "2026-08-30"),
+    ("last night 2:47 am", "2026-08-30"),
+    ("2:47 am last night", "2026-08-30"),
+    ("at 2:47 am last night", "2026-08-30"),
+    ("2:47 am (last night)", "2026-08-30"),
+    ("exactly 2:47 am", "2026-08-30"),
+    ("this morning 2:47 am", "2026-08-30"),
+    ("yesterday 2:47 am", "2026-08-29"),
+    ("yesterday morning 2:47 am", "2026-08-29"),
+    ("the day before yesterday 2:47 am", "2026-08-28"),
+    ("2026-08-29 2:47 AM", "2026-08-29"),
+    ("2026-08-30T02:47:00-07:00", "2026-08-30"),
+])
+def test_the_time_is_read_however_the_question_put_it(cfg, phrase, expect_day):
+    """The model relays the owner's own words. A parser that took only a bare
+    clock time turned an answerable question into an apology about formats."""
+    now = ts_at(cfg, "2026-08-30", 13, 30)
+    when, why = toolsmod.parse_when(phrase, cfg, now)
+    assert when is not None, why
+    assert history.stamp(when, cfg) == f"{expect_day} 2:47 am"
+
+
+def test_a_phrase_with_no_clock_time_is_still_refused(cfg):
+    now = ts_at(cfg, "2026-08-30", 13, 30)
+    for phrase in ("half past two", "last night", "some time before dawn"):
+        when, why = toolsmod.parse_when(phrase, cfg, now)
+        assert when is None and why
+
+
+def test_the_owners_phrasing_reaches_the_reading(conn, cfg, night):
+    t = toolsmod.Tools(conn, cfg)
+    assert t.get_voltage_at("2:47 am last night")["voltage"] == 53.66
