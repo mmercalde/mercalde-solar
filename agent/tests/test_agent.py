@@ -14,22 +14,6 @@ import policy
 from stubs import StubModel
 
 
-@pytest.fixture
-def a(cfg, conn, monkeypatch, tmp_path):
-    # Agent resolves a connection per thread; hand every thread the same
-    # in-memory one. `connect` is only used once, to create the schema, and
-    # its result is closed, so it must not be the shared connection.
-    monkeypatch.setattr(agentmod.history, "connect",
-                        lambda *a, **k: sqlite3.connect(":memory:"))
-    monkeypatch.setattr(agentmod.history, "thread_connection", lambda *a, **k: conn)
-    # DATA_DIR before the Agent is built, not the state path after: the guard
-    # reads its state file in __init__, so redirecting it afterwards leaves
-    # the test holding whatever the last real run left on disk.
-    monkeypatch.setattr(agentmod.config, "DATA_DIR", str(tmp_path))
-    monkeypatch.setattr(agentmod.guardmod.Guard, "_save_state", lambda self: None)
-    return agentmod.Agent(cfg, dry_run=True)
-
-
 def base_facts(cfg, gate_open=False, model=None):
     now = int(datetime(2026, 8, 28, 16, 0,
                        tzinfo=history.tzinfo(cfg)).timestamp())

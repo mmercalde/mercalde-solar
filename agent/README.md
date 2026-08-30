@@ -54,7 +54,8 @@ Every 15 minutes, day and night:
 | `agent.py` | the tick loop, plan record, digests, Telegram inbound, anomalies |
 | `policy.py` | the numeric POLICY rules, computed rather than left to the model |
 | `guard.py` | the hard rules; every write passes through it |
-| `tools.py` | the seven read tools and the single write, as OpenAI schemas |
+| `tools.py` | the eight read tools and the single write, as OpenAI schemas |
+| `eval_cases.py` | Q&A cases and their graders, for `model_eval.py --exam` |
 | `prompts.py` | MISSION / SYSTEM / POLICY, meant to be edited by hand |
 | `history.py` | SQLite store, the 60 s sampler, rollups, generator-run derivation |
 | `loadmodel.py` | load profile, solar yield, charge rates, projections, learning gate |
@@ -278,6 +279,23 @@ qwen3-14b @ 127.0.0.1:8082      20    95%     51        1          0     11     
 `clean` is the share of ticks with no fault of any kind. Every fault is
 printed underneath the table with its timestamp, so a number in it can be
 chased back to the tick that produced it. `--json` emits the rows instead.
+
+### The exam
+
+`--exam` is the other half: it puts the questions in `eval_cases.py` to the
+running agent over `POST /ask` and marks each answer against the database.
+
+```bash
+agent/venv/bin/python agent/model_eval.py --exam
+agent/venv/bin/python agent/model_eval.py --exam --case voltage_at_247
+```
+
+Every case is a question the agent has answered wrongly at least once, so the
+file is also the regression record for the ask path: a raised start threshold
+mistaken for a flat battery, a window minimum offered as the reading at a
+named minute, the plan record paraphrased instead of quoted. The ground truth
+is computed from the database each run rather than written down, so a case
+does not quietly stop testing anything when the pack moves.
 
 Both servers want their own weights in RAM. The KAMRUI has enough for an 8B
 and a 14B at Q4 at the same time, but not much else; stop the candidate when

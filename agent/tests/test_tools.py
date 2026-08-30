@@ -311,7 +311,7 @@ def test_a_telegram_failure_does_not_undo_the_write(conn, cfg, monkeypatch):
 def test_schemas_cover_every_tool_and_nothing_else():
     named = {s["function"]["name"] for s in tools.SCHEMAS}
     assert named == tools.READ_TOOLS | tools.WRITE_TOOLS
-    assert len(named) == 8
+    assert len(named) == 9
 
 
 def test_every_schema_is_a_valid_openai_function():

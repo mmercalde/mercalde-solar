@@ -36,7 +36,10 @@ import re
 import sys
 import time
 
+import requests
+
 import config
+import eval_cases
 import history
 import llm as llmmod
 import loadmodel
@@ -363,6 +366,48 @@ def faults(results, cfg, limit=12):
     return "\n".join(out)
 
 
+# --- the exam: questions put to the running agent ----------------------------
+
+def ask(url, question, timeout=90):
+    """POST one question to the agent's own /ask, as Alexa and the dashboard do."""
+    r = requests.post(url, json={"text": question}, timeout=timeout)
+    r.raise_for_status()
+    return r.text.strip()
+
+
+def exam(url, cfg, conn, timeout=90, only=None):
+    """Run the Q&A cases against a live agent and mark each one."""
+    now = int(time.time())
+    rows = []
+    for case in eval_cases.CASES:
+        if only and case["id"] not in only:
+            continue
+        truth = case["truth"](conn, cfg, now)
+        try:
+            reply = ask(url, case["question"], timeout=timeout)
+            passed, why = case["grade"](reply, truth)
+        except requests.RequestException as e:
+            reply, passed, why = "", False, f"the agent did not answer: {e}"
+        rows.append({"id": case["id"], "question": case["question"],
+                     "about": case["about"], "reply": reply,
+                     "pass": passed, "why": why, "truth": truth})
+    return rows
+
+
+def exam_report(rows):
+    out = []
+    for r in rows:
+        out.append(f"\n{'PASS' if r['pass'] else 'FAIL'}  {r['id']}"
+                   f"  ({r['about']})")
+        out.append(f"  Q: {r['question']}")
+        for line in (r["reply"] or "(no reply)").splitlines() or [""]:
+            out.append(f"  A: {line}")
+        out.append(f"  -> {r['why']}")
+    passed = sum(bool(r["pass"]) for r in rows)
+    out.append(f"\n{passed}/{len(rows)} passed")
+    return "\n".join(out)
+
+
 def parse_candidate(spec):
     """`url=name`, or just a url to reuse the configured model name."""
     url, _, name = spec.partition("=")
@@ -383,6 +428,13 @@ def main():
     ap.add_argument("--timeout", type=int, default=180)
     ap.add_argument("--rounds", type=int, default=4, help="tool-call budget")
     ap.add_argument("--json", action="store_true", help="emit the rows as JSON")
+    ap.add_argument("--exam", action="store_true",
+                    help="put the Q&A cases in eval_cases.py to the running "
+                         "agent over POST /ask and mark them")
+    ap.add_argument("--ask-url", help="the agent's /ask (default: the "
+                                      "configured bind address and port)")
+    ap.add_argument("--case", action="append", default=[],
+                    help="run only these exam cases; repeatable")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
 
@@ -390,6 +442,18 @@ def main():
                         format="%(levelname)s %(name)s %(message)s")
     cfg = config.load()
     conn = history.connect()
+
+    if args.exam:
+        import ask_server
+        url = args.ask_url or f"http://{ask_server.BIND_HOST}:{cfg['ask_port']}/ask"
+        print(f"asking {url}")
+        rows = exam(url, cfg, conn, timeout=args.timeout, only=args.case or None)
+        if args.json:
+            print(json.dumps(rows, indent=1, default=str))
+        else:
+            print(exam_report(rows))
+        return 0 if all(r["pass"] for r in rows) else 1
+
     ticks = load_ticks(conn, args.ticks)
     if not ticks:
         print("No recorded prompts to replay. The agent stores one with every "

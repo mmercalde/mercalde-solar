@@ -61,6 +61,26 @@ ANOMALY_HINTS = {
 }
 RECOMMEND_RE = re.compile(r"^\s*recommend:\s*(.+)$", re.IGNORECASE | re.MULTILINE)
 
+# Asking for the plan is asking for the plan record. The model paraphrasing it
+# is a worse answer than the record itself and can be wrong about it: asked
+# "what is tonight's plan" it improvised from the thresholds and left out both
+# the 9:48 pm projection and the top-up held until sunset.
+PLAN_QUESTION_RE = re.compile(
+    r"^(?:what(?:'?s| is| was)\s+)?"
+    r"(?:the\s+|your\s+|our\s+)?"
+    r"(?:tonight'?s?\s+|today'?s?\s+|current\s+|latest\s+|last\s+)?"
+    r"plan"
+    r"(?:\s+for\s+(?:tonight|today|the\s+night))?$"
+    r"|^/plan$"
+    r"|^(?:cual\s+es\s+)?(?:el\s+)?plan(?:\s+de\s+esta\s+noche|\s+de\s+hoy)?$",
+    re.IGNORECASE)
+
+
+def is_plan_question(text):
+    """Is this a request for the plan record itself?"""
+    cleaned = " ".join(str(text or "").strip().strip("?!.¿ ").lower().split())
+    return bool(PLAN_QUESTION_RE.match(cleaned))
+
 
 def _fmt(v, places=1, dash="?"):
     return dash if v is None else f"{v:.{places}f}"
@@ -659,7 +679,9 @@ class Agent:
         look, Python answers from /data instead of letting a made-up voltage
         reach the owner or Alexa.
         """
-        if text.strip().lower() in ("plan", "/plan", "el plan"):
+        # Both the Telegram inbound loop and POST /ask arrive here, so this
+        # covers each of them.
+        if is_plan_question(text):
             plan = history.latest_plan(self.conn)
             return plan["text"] if plan else "No plan has been recorded yet."
         with self.lock:
