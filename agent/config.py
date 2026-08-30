@@ -5,7 +5,10 @@ Every module takes the resulting dict; nothing reads the file more than once.
 """
 
 import json
+import logging
 import os
+
+log = logging.getLogger(__name__)
 
 AGENT_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(AGENT_DIR, "config.json")
@@ -45,5 +48,33 @@ def load(path=None):
     missing = [k for k in REQUIRED if cfg.get(k) in (None, "")]
     if missing:
         raise SystemExit("config.json is missing required keys: " + ", ".join(missing))
+    clamp_to_hard_limits(cfg)
     os.makedirs(DATA_DIR, exist_ok=True)
+    return cfg
+
+
+def clamp_to_hard_limits(cfg):
+    """Pull the configured bounds inside the guard's absolute limits.
+
+    Config may make the permitted range tighter than the pack's hard limits.
+    It may not make it looser, and an edit that tries to is a mistake worth
+    saying out loud rather than silently obeying or silently ignoring. The
+    guard refuses such a write anyway; this stops config and the guard from
+    disagreeing about what is permitted in the first place.
+
+    guard is imported here rather than at the top because it imports config:
+    by the time load() runs, this module is built and the cycle cannot bite.
+    """
+    import guard
+
+    if cfg["start_voltage_min"] < guard.HARD_START_FLOOR:
+        log.warning("config start_voltage_min %s is below the hard floor %s; "
+                    "using the floor", cfg["start_voltage_min"],
+                    guard.HARD_START_FLOOR)
+        cfg["start_voltage_min"] = guard.HARD_START_FLOOR
+    if cfg["stop_voltage_max"] > guard.HARD_STOP_CEILING:
+        log.warning("config stop_voltage_max %s is above the hard ceiling %s; "
+                    "using the ceiling", cfg["stop_voltage_max"],
+                    guard.HARD_STOP_CEILING)
+        cfg["stop_voltage_max"] = guard.HARD_STOP_CEILING
     return cfg

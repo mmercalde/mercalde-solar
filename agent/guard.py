@@ -27,6 +27,22 @@ import sun as sunmod
 
 log = logging.getLogger(__name__)
 
+# Absolute limits on the pack. Not read from config.json, not relaxable by a
+# POLICY rule, not overridable by the owner's baseline, and checked before
+# anything else on every write the agent makes: a start below the floor asks
+# the pack to sit lower than the bank is meant to go, and a stop above the
+# ceiling charges it harder than it is meant to be charged. config.py clamps
+# its own bounds to these at load, and pi5/agent_watchdog.sh carries the same
+# two numbers so a reset cannot land outside them either.
+#
+# Config's start_voltage_min / stop_voltage_max may be tighter than these and
+# often are. They may never be looser.
+HARD_START_FLOOR = 52.0
+HARD_STOP_CEILING = 57.0
+# Float noise only. These are hard limits, so nothing is rounded into them:
+# a start of 51.9 is below the floor, not close enough to it.
+HARD_EPS = 1e-9
+
 MIN_STOP_MINUS_START = 2.0
 STALE_SECONDS = 300
 RATE_LIMIT_SECONDS = 3600
@@ -200,7 +216,32 @@ class Guard:
         allowed, why = self._evaluate(want, data, live, v, soc, now, reason, policy)
         return self._audit(args, allowed, why, v, soc, now)
 
+    @staticmethod
+    def hard_limits(want):
+        """(ok, reason) for the two absolute limits. No state, no config.
+
+        First, and separately from rule 1's configured bounds, so that no
+        later rule, no owner baseline and no edit to config.json can produce a
+        write outside them.
+        """
+        for gen, skey, pkey, _ in GEN_KEYS:
+            if want[skey] < HARD_START_FLOOR - HARD_EPS:
+                return False, (f"floor {HARD_START_FLOOR}: {gen} start "
+                               f"{want[skey]} is below it, and the floor is "
+                               f"absolute")
+            if want[pkey] > HARD_STOP_CEILING + HARD_EPS:
+                return False, (f"ceiling {HARD_STOP_CEILING}: {gen} stop "
+                               f"{want[pkey]} is above it, and the ceiling is "
+                               f"absolute")
+        return True, "within the hard limits"
+
     def _evaluate(self, want, data, live, v, soc, now, reason="", policy=None):
+        # The hard limits, before anything else and regardless of everything
+        # else. Nothing below can widen them.
+        ok, why = self.hard_limits(want)
+        if not ok:
+            return False, why
+
         # Rule 7: stale data. Nothing below can be trusted without this.
         if not data.get("battMonitorOnline"):
             return False, ("battery monitor is offline, so state of charge and "
@@ -379,7 +420,14 @@ class Guard:
             return False, None, (f"the thresholds were last sent "
                                  f"{int((now - last) / 60)} minutes ago; the "
                                  f"heartbeat is hourly")
-        return True, self.intended(), "heartbeat"
+        values = self.intended()
+        # The heartbeat is a write too. Values adopted from an owner edit are
+        # whatever the dashboard had, which may be outside the hard limits;
+        # the agent records them but will not put them back.
+        ok, why = self.hard_limits(values)
+        if not ok:
+            return False, None, f"heartbeat withheld: {why}"
+        return True, values, "heartbeat"
 
     # --- rule 9: audit ------------------------------------------------------
 

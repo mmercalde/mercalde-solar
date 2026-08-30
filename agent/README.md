@@ -9,6 +9,14 @@ talks to the owner over Telegram and Alexa.
 agent has exactly one lever: the four generator threshold voltages. It never
 starts or stops a generator itself.
 
+Two of those four numbers have absolute limits: a start is never written
+below 52.0 V and a stop never above 57.0 V. They live in `guard.py` as
+constants, are checked before every other rule on every write, and are not
+reachable from `config.json`, a POLICY rule or the owner's own baseline.
+`config.py` clamps its configured bounds to them at load, and
+`pi5/agent_watchdog.sh` carries its own copy so a reset cannot land outside
+them either.
+
 ## How a tick works
 
 Every 15 minutes, day and night:

@@ -144,11 +144,132 @@ def test_a_sound_write_is_permitted(ready, cfg, now):
     assert ok, why
 
 
+# --- the hard limits --------------------------------------------------------
+#
+# Absolute: not from config, not relaxable by a rule, not by the owner.
+
+@pytest.mark.parametrize("start", [51.9, 51.0, 40.0, 0.0, -5.0])
+def test_a_start_below_the_floor_is_refused(ready, cfg, now, start):
+    ok, why = ready.check(start, 56.0, 52.0, 56.0, "x", now=now,
+                          status=make_status(cfg, now))
+    assert not ok and why.startswith("floor 52.0")
+    assert "mep start" in why and "absolute" in why
+
+
+@pytest.mark.parametrize("stop", [57.1, 58.0, 60.0, 99.0])
+def test_a_stop_above_the_ceiling_is_refused(ready, cfg, now, stop):
+    ok, why = ready.check(52.0, stop, 52.0, 56.0, "x", now=now,
+                          status=make_status(cfg, now))
+    assert not ok and why.startswith("ceiling 57.0")
+    assert "mep stop" in why and "absolute" in why
+
+
+def test_the_kubota_is_held_to_the_same_limits(ready, cfg, now):
+    ok, why = ready.check(52.0, 56.0, 51.5, 56.0, "x", now=now,
+                          status=make_status(cfg, now))
+    assert not ok and why.startswith("floor 52.0") and "kubota start" in why
+    ok, why = ready.check(52.0, 56.0, 52.0, 57.5, "x", now=now,
+                          status=make_status(cfg, now))
+    assert not ok and why.startswith("ceiling 57.0") and "kubota stop" in why
+
+
+def test_the_limits_themselves_are_permitted(ready, cfg, now):
+    """The floor and the ceiling are inside, not outside."""
+    ok, why = ready.check(guardmod.HARD_START_FLOOR, guardmod.HARD_STOP_CEILING,
+                          guardmod.HARD_START_FLOOR, guardmod.HARD_STOP_CEILING,
+                          "the edges", now=now, status=make_status(cfg, now))
+    assert ok, why
+
+
+def test_a_firing_policy_rule_cannot_widen_them(ready, cfg, now):
+    ok, why = ready.check(51.5, 57.5, 52.0, 56.0, "POLICY 4 solo top-up",
+                          now=now, status=make_status(cfg, now),
+                          policy=a_firing_rule(cfg, now))
+    assert not ok and why.startswith("floor 52.0")
+
+
+def test_an_owner_baseline_cannot_widen_them(after_owner_edit, cfg, now):
+    """Even returning to the owner's own values, if they are outside."""
+    after_owner_edit.state["owner_baseline"] = {
+        "mep_start": 51.0, "mep_stop": 58.0,
+        "kub_start": 51.0, "kub_stop": 58.0}
+    ok, why = after_owner_edit.check(51.0, 58.0, 51.0, 58.0, "the owner's own",
+                                     now=now, status=owner_status(cfg, now))
+    assert not ok and why.startswith("floor 52.0")
+
+
+def test_a_loosened_config_cannot_widen_them(conn, cfg, tmp_path, monkeypatch,
+                                             now):
+    """config.json is data. These two numbers are not."""
+    monkeypatch.setattr(cfgmod, "DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(cfgmod, "AUDIT_LOG", str(tmp_path / "audit.log"))
+    loose = dict(cfg, start_voltage_min=40.0, stop_voltage_max=60.0)
+    g = guardmod.Guard(conn, loose, state_path=str(tmp_path / "s.json"))
+    open_the_gate(conn, loose, now)
+    learn_the_pack(conn, loose)
+    add_rate(conn, loose, "mep", 150.0, solo=1)
+    ok, why = g.check(50.0, 59.0, 52.0, 56.0, "x", now=now,
+                      status=make_status(loose, now))
+    assert not ok and why.startswith("floor 52.0")
+
+
+def test_the_limits_are_checked_before_anything_else(g, cfg, now):
+    """No learning gate, no dashboard, no rules - and still refused, with the
+    limit as the reason rather than whatever would have refused it anyway."""
+    ok, why = g.check(51.0, 58.0, 51.0, 58.0, "x", now=now,
+                      status=make_status(cfg, now))
+    assert not ok and why.startswith("floor 52.0")
+    assert "learning phase" not in why
+
+
+def test_hard_limits_needs_no_state_at_all():
+    ok, why = guardmod.Guard.hard_limits(
+        {"mep_start": 52.0, "mep_stop": 57.0,
+         "kub_start": 52.0, "kub_stop": 57.0})
+    assert ok and why == "within the hard limits"
+
+
+def test_a_refused_limit_is_audited(ready, conn, cfg, now, tmp_path):
+    ready.check(51.0, 56.0, 52.0, 56.0, "x", now=now, status=make_status(cfg, now))
+    row = conn.execute("SELECT * FROM actions ORDER BY ts DESC LIMIT 1").fetchone()
+    assert row["allowed"] == 0 and row["reason"].startswith("floor 52.0")
+    assert "floor 52.0" in (tmp_path / "audit.log").read_text()
+
+
+def test_the_heartbeat_will_not_re_send_values_outside_the_limits(ready, now):
+    """An owner edit to 51.0 in the dashboard is adopted as observed, and
+    never written back by the hourly re-send."""
+    ready.state["intended"] = {"mep_start": 51.0, "mep_stop": 56.0,
+                               "kub_start": 51.0, "kub_stop": 56.0}
+    send, values, why = ready.heartbeat(now=now)
+    assert not send and values is None
+    assert why == "heartbeat withheld: floor 52.0: mep start 51.0 is below it, " \
+                  "and the floor is absolute"
+
+
+def test_the_heartbeat_sends_values_inside_the_limits(ready, now):
+    ready.state["intended"] = {"mep_start": 52.0, "mep_stop": 57.0,
+                               "kub_start": 52.0, "kub_stop": 57.0}
+    send, values, _ = ready.heartbeat(now=now)
+    assert send and values["mep_stop"] == 57.0
+
+
 # --- rule 1: bounds ---------------------------------------------------------
 
-def test_start_below_the_floor_is_refused(ready, cfg, now):
-    ok, why = ready.check(51.0, 54.5, 52.0, 54.5, "x",
-                          now=now, status=make_status(cfg, now))
+# Config may narrow the permitted range but never widen it, so rule 1 only
+# ever fires strictly inside the hard limits: a start under 52.0 or a stop
+# over 57.0 is refused by the floor and the ceiling before rule 1 is reached.
+
+def test_start_below_the_configured_minimum_is_refused(conn, cfg, tmp_path,
+                                                       monkeypatch, now):
+    monkeypatch.setattr(cfgmod, "DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(cfgmod, "AUDIT_LOG", str(tmp_path / "audit.log"))
+    tight = dict(cfg, start_voltage_min=53.0)
+    g = guardmod.Guard(conn, tight, state_path=str(tmp_path / "s.json"))
+    open_the_gate(conn, tight, now)
+    learn_the_pack(conn, tight)
+    ok, why = g.check(52.5, 54.5, 53.0, 54.5, "x",
+                      now=now, status=make_status(tight, now))
     assert not ok and "outside the permitted" in why and "mep start" in why
 
 
@@ -158,13 +279,10 @@ def test_start_above_the_ceiling_is_refused(ready, cfg, now):
     assert not ok and "kubota start" in why
 
 
-def test_stop_outside_bounds_is_refused(ready, cfg, now):
-    ok, why = ready.check(52.0, 58.0, 52.0, 54.5, "x",
-                          now=now, status=make_status(cfg, now))
-    assert not ok and "mep stop" in why
+def test_stop_below_the_configured_minimum_is_refused(ready, cfg, now):
     ok, why = ready.check(52.0, 54.0, 52.0, 54.5, "x",
                           now=now, status=make_status(cfg, now))
-    assert not ok and "mep stop" in why
+    assert not ok and "mep stop" in why and "outside the permitted" in why
 
 
 def test_stop_must_clear_start_by_two_volts(ready, cfg, now):
@@ -672,12 +790,12 @@ def test_a_daylight_refusal_is_audited(ready, conn, cfg, tmp_path):
 # --- rule 9: audit ----------------------------------------------------------
 
 def test_a_refusal_is_audited(conn, g, cfg, now, tmp_path):
-    g.check(51.0, 54.5, 52.0, 54.5, "bad", now=now, status=make_status(cfg, now))
+    g.check(52.0, 54.5, 52.0, 54.5, "bad", now=now, status=make_status(cfg, now))
     row = conn.execute("SELECT * FROM actions ORDER BY ts DESC LIMIT 1").fetchone()
     assert row["allowed"] == 0 and row["tool"] == "set_gen_thresholds"
     assert row["voltage"] == 54.0 and row["soc"] == 80
-    assert json.loads(row["args"])["mep_start"] == 51.0
-    assert "learning phase" in row["reason"] or "outside" in row["reason"]
+    assert json.loads(row["args"])["mep_start"] == 52.0
+    assert "learning phase" in row["reason"]
 
 
 def test_a_permitted_write_is_audited(conn, ready, cfg, now, tmp_path):

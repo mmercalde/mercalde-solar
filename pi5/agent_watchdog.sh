@@ -51,6 +51,14 @@ STATE_FILE="/home/michael/solar_dashboard/.agent_watchdog_state"
 FALLBACK_START="52.0"
 FALLBACK_STOP="56.0"
 
+# Absolute limits on the pack, the same two numbers as agent/guard.py's
+# HARD_START_FLOOR and HARD_STOP_CEILING. Deliberately a second copy: this
+# script exists to act when the agent is not answering, so it cannot ask the
+# agent what its limits are, and a watchdog that trusted the thing it watches
+# would be no watchdog. A reset outside these is refused, whatever /plan said.
+HARD_START_FLOOR="52.0"
+HARD_STOP_CEILING="57.0"
+
 # Telegram: reuse the dashboard's own credentials rather than storing a copy.
 DASH_CONFIG="/home/michael/solar_dashboard/config.json"
 
@@ -100,6 +108,24 @@ send_telegram() {
         "https://api.telegram.org/bot${token}/sendMessage" \
         && log "Telegram sent: ${text}"
 }
+
+within_hard_limits() {  # within_hard_limits <start> <stop>  -> 0 if both are inside
+    python3 -c "
+import sys
+try:
+    start, stop = float(sys.argv[1]), float(sys.argv[2])
+except (ValueError, IndexError):
+    sys.exit(1)
+sys.exit(0 if start >= $HARD_START_FLOOR - 1e-9
+              and stop <= $HARD_STOP_CEILING + 1e-9 else 1)
+" "${1:-}" "${2:-}" 2>/dev/null
+}
+
+# Sourcing with WATCHDOG_LIB_ONLY=1 stops here, so the helpers above can be
+# exercised without any of the network calls below.
+if [ -n "${WATCHDOG_LIB_ONLY:-}" ]; then
+    return 0 2>/dev/null || true
+fi
 
 now=$(date +%s)
 
@@ -172,6 +198,15 @@ DEFAULT_START=$(pyjson "$STATE_FILE" "d.get('default_start')")
 DEFAULT_STOP=$(pyjson  "$STATE_FILE" "d.get('default_stop')")
 [ -n "$DEFAULT_START" ] || DEFAULT_START="$FALLBACK_START"
 [ -n "$DEFAULT_STOP" ]  || DEFAULT_STOP="$FALLBACK_STOP"
+
+# The agent reported these on /plan and they were cached; they are still not
+# trusted past the hard limits. Refusing is right where clamping is not: a
+# value outside them means the agent or the state file is wrong about
+# something, and the thresholds already in force are safer than a guess.
+if ! within_hard_limits "$DEFAULT_START" "$DEFAULT_STOP"; then
+    log "refusing to reset to ${DEFAULT_START}/${DEFAULT_STOP}: outside the hard limits (start >= ${HARD_START_FLOOR}, stop <= ${HARD_STOP_CEILING}); leaving the thresholds alone"
+    exit 1
+fi
 
 cfg=$(curl -s -m 10 "${DASHBOARD}/config" 2>/dev/null)
 if [ -z "$cfg" ]; then
