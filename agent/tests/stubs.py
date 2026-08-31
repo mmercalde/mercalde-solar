@@ -23,11 +23,13 @@ class StubModel:
     """
 
     def __init__(self, rates=None, pair=None, soc_at_52=40.0, soc_per_v=10.0,
-                 basis="resting curve, 0 charging runs on record"):
+                 basis="resting curve, 0 charging runs on record",
+                 expected_load_w=1900):
         self.basis = basis
+        self.expected_load = expected_load_w
         self.rates = rates if rates is not None else {
-            "mep": {"a": 90.0, "soc_per_h": 15.0},
-            "kubota": {"a": 60.0, "soc_per_h": 10.0}}
+            "mep": {"gross_w": 18100, "soc_per_h": 15.0},
+            "kubota": {"gross_w": 12100, "soc_per_h": 10.0}}
         self.pair = pair
         self.soc_at_52, self.soc_per_v = soc_at_52, soc_per_v
 
@@ -51,7 +53,9 @@ class StubModel:
         soc = self._soc(from_v) if soc_now is None else soc_now
         hours = max(0.0, (self._soc(target_v) - soc) / rate["soc_per_h"])
         ok = hours <= window_h + 1e-9
-        phrase = loadmodel.rate_phrase(rate)
+        phrase = loadmodel.rate_phrase(rate, self.expected_load,
+                                       rate["gross_w"] - self.expected_load,
+                                       rate["soc_per_h"])
         return {"ok": ok, "rate": rate, "hours": hours, "basis": self.basis,
                 "why": (f"{target_v:.1f} reachable in {hours:.1f} h at {phrase}"
                         if ok else

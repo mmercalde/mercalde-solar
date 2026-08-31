@@ -118,7 +118,7 @@ def test_an_unknown_deficit_says_why(cfg, night, model):
 
 def test_a_target_is_never_above_the_ceiling(cfg, night):
     """40 kWh would want 66 V. The ceiling is the ceiling."""
-    model = StubModel(pair={"a": 400.0, "soc_per_h": 40.0})
+    model = StubModel(pair={"gross_w": 41900, "soc_per_h": 40.0})
     night["deficit"] = dict(night["deficit"], deficit_wh=40000)
     r = policy.solo_top_up(cfg, night, model)
     assert r["fires"] and r["target"] == cfg["solo_target"] == 57.0
@@ -135,8 +135,8 @@ def test_a_full_pack_cannot_have_a_run_started_now(cfg, night, model):
 # --- POLICY 4: which generators, by how big the deficit is -------------------
 
 def test_a_small_deficit_picks_the_kubota(cfg, night):
-    model = StubModel(rates={"kubota": {"a": 90.0, "soc_per_h": 12.0},
-                             "mep": {"a": 120.0, "soc_per_h": 15.0}})
+    model = StubModel(rates={"kubota": {"gross_w": 13900, "soc_per_h": 12.0},
+                             "mep": {"gross_w": 16900, "soc_per_h": 15.0}})
     night["deficit"] = dict(night["deficit"], deficit_wh=7000)
     r = policy.solo_top_up(cfg, night, model)
     assert r["fires"] and r["gen"] == "kubota" and r["mode"] == "kubota"
@@ -151,7 +151,7 @@ def test_a_middling_deficit_picks_the_mep(cfg, night, model):
 
 
 def test_a_large_deficit_takes_both(cfg, night):
-    model = StubModel(pair={"a": 200.0, "soc_per_h": 30.0})
+    model = StubModel(pair={"gross_w": 31900, "soc_per_h": 30.0})
     night["deficit"] = dict(night["deficit"], deficit_wh=20000)
     r = policy.solo_top_up(cfg, night, model)
     assert r["fires"] and r["gen"] == "mep+kubota" and r["mode"] == "both"
@@ -162,8 +162,8 @@ def test_a_large_deficit_takes_both(cfg, night):
 def test_a_band_that_cannot_deliver_steps_up(cfg, night):
     """7,000 Wh is the Kubota's band, but at 3 points an hour it cannot make
     the target in two hours, so the MEP takes it."""
-    model = StubModel(rates={"kubota": {"a": 20.0, "soc_per_h": 3.0},
-                             "mep": {"a": 90.0, "soc_per_h": 15.0}})
+    model = StubModel(rates={"kubota": {"gross_w": 4900, "soc_per_h": 3.0},
+                             "mep": {"gross_w": 16900, "soc_per_h": 15.0}})
     night["deficit"] = dict(night["deficit"], deficit_wh=7000)
     r = policy.solo_top_up(cfg, night, model)
     assert r["fires"] and r["gen"] == "mep"
@@ -172,9 +172,9 @@ def test_a_band_that_cannot_deliver_steps_up(cfg, night):
 
 
 def test_stepping_up_can_reach_both(cfg, night):
-    model = StubModel(rates={"kubota": {"a": 20.0, "soc_per_h": 3.0},
-                             "mep": {"a": 30.0, "soc_per_h": 4.0}},
-                      pair={"a": 200.0, "soc_per_h": 30.0})
+    model = StubModel(rates={"kubota": {"gross_w": 4900, "soc_per_h": 3.0},
+                             "mep": {"gross_w": 5900, "soc_per_h": 4.0}},
+                      pair={"gross_w": 31900, "soc_per_h": 30.0})
     night["deficit"] = dict(night["deficit"], deficit_wh=7000)
     r = policy.solo_top_up(cfg, night, model)
     assert r["fires"] and r["gen"] == "mep+kubota"
@@ -186,9 +186,9 @@ def test_when_no_band_reaches_it_both_take_what_they_can(cfg, night):
     """The deadlock decision still stands: a target out of reach is a reason
     to ask for less, not to do nothing. Two hours at 12 points an hour takes
     63% to 87%, which is 56.7."""
-    model = StubModel(rates={"kubota": {"a": 20.0, "soc_per_h": 3.0},
-                             "mep": {"a": 30.0, "soc_per_h": 4.0}},
-                      pair={"a": 90.0, "soc_per_h": 12.0})
+    model = StubModel(rates={"kubota": {"gross_w": 4900, "soc_per_h": 3.0},
+                             "mep": {"gross_w": 5900, "soc_per_h": 4.0}},
+                      pair={"gross_w": 13900, "soc_per_h": 12.0})
     night["deficit"] = dict(night["deficit"], deficit_wh=20000)
     r = policy.solo_top_up(cfg, night, model)
     assert r["fires"] and r["gen"] == "mep+kubota"
@@ -198,8 +198,8 @@ def test_when_no_band_reaches_it_both_take_what_they_can(cfg, night):
 
 
 def test_nothing_fires_when_even_both_cannot_clear_the_start(cfg, night):
-    model = StubModel(rates={"mep": {"a": 10.0, "soc_per_h": 1.0}},
-                      pair={"a": 14.0, "soc_per_h": 1.5})
+    model = StubModel(rates={"mep": {"gross_w": 2900, "soc_per_h": 1.0}},
+                      pair={"gross_w": 3400, "soc_per_h": 1.5})
     night["deficit"] = dict(night["deficit"], deficit_wh=20000)
     r = policy.solo_top_up(cfg, night, model)
     assert not r["fires"] and "cannot reach 56.4" in r["detail"]

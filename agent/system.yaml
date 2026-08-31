@@ -45,16 +45,20 @@ inverters:
     role: paralleled with the master through the PDP
 
 generators:
-  # Effective charge is what the pack actually receives, not the engine's
-  # nameplate. The agent learns each generator's real figure from the shunt
-  # and falls back to assumed_charge_a until it has three runs of its own.
+  # A generator's learned rate is its GROSS delivery: what went into the pack
+  # plus what the house took at the same minute, which is a property of the
+  # engine rather than of the evening. At decision time the expected house
+  # load for the run window is subtracted to get what will actually reach the
+  # pack. assumed_charge_a is the fallback until a generator has runs of its
+  # own, and is already a net figure - conservative, allowing for an ordinary
+  # house - so it is not netted a second time.
   mep:
     label: MEP-803A
     ags_slave: 51
     nameplate_kw: 10
     charge_rate_pct: 100
     feeds: [xw_pro_master, xw_pro_slave]
-    assumed_charge_a: 140          # conservative, ~7.4 kW at 53 V
+    assumed_charge_a: 140          # net, conservative, ~7.4 kW at 53 V
     exercise: {every_days: 5, at: "09:00", minutes: 30}
   kubota:
     label: Kubota
@@ -62,13 +66,13 @@ generators:
     nameplate_kw: 7
     charge_rate_pct: 70
     feeds: [xw_plus_5548]
-    assumed_charge_a: 80           # conservative, ~4.2 kW at 53 V
+    assumed_charge_a: 80           # net, conservative, ~4.2 kW at 53 V
     exercise: {every_days: 3, at: "09:00", minutes: 30}
     # The Kubota's runs also drive a Magnum MS4048 inverter/charger that is
     # not on Modbus. Nothing the Schneider units report includes what the
     # Magnum is doing, so anything summed from their registers understates a
-    # Kubota run. The shunt's net current into the pack is the only correct
-    # measure of what a Kubota run delivers, and it is what the agent uses.
+    # Kubota run. Gross is measured at the shunt and at the inverters' load
+    # output, so it counts whatever the Magnum put in without seeing it.
     # The 70% charge-rate cap exists because of this parallel charger.
     magnum: {model: Magnum MS4048, on_modbus: false}
   max_run:

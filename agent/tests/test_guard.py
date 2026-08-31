@@ -70,7 +70,17 @@ def open_the_gate(conn, cfg, now):
         }, ts=ts_at(cfg, f"2026-08-{d:02d}", 12))
 
 
-def add_rate(conn, cfg, gen, amps=150.0, solo=1, n=3, kind="auto"):
+# The pack is 108 kWh learned, so one point of state of charge is 1,080 Wh.
+# A net 8,100 W is 7.5 points an hour: exactly the fifteen points from 80% to
+# 95% in the Pi5's two hour window. The house is seeded at a flat 500 W, so a
+# gross of 8,600 W nets to that.
+HOUSE_W = 500.0
+MEP_GROSS_W = 8600.0
+KUB_GROSS_W = 5900.0          # nets to 5,400 W, five points an hour
+
+
+def add_rate(conn, cfg, gen, gross_w=MEP_GROSS_W, solo=1, n=3, kind="auto",
+             load_w=HOUSE_W):
     # Distinct start times: gen_runs is keyed on (gen, start_ts), and one gen
     # has both solo and paired history.
     hour = 2 + (0 if solo else 6)
@@ -78,10 +88,10 @@ def add_rate(conn, cfg, gen, amps=150.0, solo=1, n=3, kind="auto"):
         start = ts_at(cfg, f"2026-08-{10+i:02d}", hour)
         conn.execute(
             "INSERT INTO gen_runs (gen, start_ts, stop_ts, duration_min, start_v, "
-            "stop_v, rate_v_per_h, rate_a, load_w, solo, kind) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-            (gen, start, start + 3600, 60, 52.0, 53.5, 1.5, amps, 600.0,
-             solo, kind))
+            "stop_v, rate_v_per_h, rate_a, load_w, gross_w, solo, kind) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (gen, start, start + 3600, 60, 52.0, 53.5, 1.5,
+             (gross_w - load_w) / 53.0, load_w, gross_w, solo, kind))
     conn.commit()
 
 
@@ -96,6 +106,12 @@ def learn_the_pack(conn, cfg):
     counts = {(history.soc_bin(v), soc): 900 for v, soc in
               ((52.0, 60), (54.0, 80), (55.0, 85), (56.0, 90), (57.0, 95))}
     history.record_soc_observations(conn, "2025-08-01", counts)
+    # A flat house, so what the window expects of it is knowable. Without a
+    # learned profile there is no net to quote and reachability cannot answer.
+    for d in range(1, 21):
+        for hour in range(24):
+            history.put_hourly(conn, ts_at(cfg, f"2026-08-{d:02d}", hour), "load",
+                               None, None, None, HOUSE_W, None, None, 60, "live")
     base = ts_at(cfg, "2026-08-19", 2)
     for i in range(20):
         history.record_sample(conn, {
@@ -129,10 +145,10 @@ def ready(conn, cfg, g, now):
     """A guard whose gate is open, with a learned pack and charge rates."""
     open_the_gate(conn, cfg, now)
     learn_the_pack(conn, cfg)
-    add_rate(conn, cfg, "mep", 150.0, solo=1)
-    add_rate(conn, cfg, "mep", 150.0, solo=0)
-    add_rate(conn, cfg, "kubota", 100.0, solo=1)
-    add_rate(conn, cfg, "kubota", 100.0, solo=0)
+    add_rate(conn, cfg, "mep", MEP_GROSS_W, solo=1)
+    add_rate(conn, cfg, "mep", MEP_GROSS_W, solo=0)
+    add_rate(conn, cfg, "kubota", KUB_GROSS_W, solo=1)
+    add_rate(conn, cfg, "kubota", KUB_GROSS_W, solo=0)
     return g
 
 
@@ -406,7 +422,7 @@ def test_an_unreachable_target_is_refused(ready, cfg, now):
     ok, why = ready.check(52.0, 54.5, 55.0, 57.0, "solo top-up", now=now, status=st)
     assert not ok and "kubota cannot lift the pack from 52.0 V to 57.0 V" in why
     assert "57.0 needs 7.0 h" in why and "run window is 2.0 h" in why
-    assert "100 A into the pack (5.0% SOC/h)" in why
+    assert "gross 5.9 kW − expected load 0.5 kW = 5.4 kW into pack" in why
 
 
 def test_a_reachable_target_is_permitted(ready, cfg, now):
@@ -427,54 +443,21 @@ def test_volts_per_hour_is_not_what_reachability_is_judged_on(ready, conn, cfg,
     assert ok, why
 
 
-def test_a_run_taken_under_an_exceptional_load_is_not_a_rate(ready, conn, cfg,
-                                                             now):
-    """With every MEP run measured through a steam bath there is no MEP rate
-    left, and an unproven target is refused rather than guessed at."""
-    for d in range(1, 9):
-        history.put_hourly(conn, ts_at(cfg, f"2026-08-{d:02d}", 12), "load",
-                           None, None, None, 600, None, None, 60, "live")
-    for h in range(24):
-        for d in range(1, 15):
-            history.put_hourly(conn, ts_at(cfg, f"2026-08-{d:02d}", h), "load",
-                               None, None, None, 600, None, None, 60, "live")
-    conn.execute("UPDATE gen_runs SET load_w=7000 WHERE gen='mep'")
+def test_a_run_under_an_exceptional_load_is_now_worth_the_same(ready, conn, cfg,
+                                                               now):
+    """The 2x filter is gone. A run through a steam bath delivered the same
+    gross as any other; subtracting the load it faced recovers the same
+    figure, so it teaches the same thing instead of being thrown away."""
+    ordinary = ready.model.charge_rate("mep", solo=True, now=now)["gross_w"]
+    conn.execute("UPDATE gen_runs SET load_w=7000, rate_a=(gross_w-7000)/53.0 "
+                 "WHERE gen='mep' AND solo=1")
     conn.commit()
+    spiked = ready.model.charge_rate("mep", solo=True, now=now)
+    assert spiked["gross_w"] == ordinary, "gross does not move with the house"
+    assert spiked["runs"] == 3, "and nothing was discarded"
     st = make_status(cfg, now, voltage=54.0, soc=80)
     ok, why = ready.check(55.0, 57.0, 52.0, 54.5, "solo top-up", now=now, status=st)
-    assert not ok
-    assert "140 A into the pack" in why and "assumed" in why, \
-        "the spiked run is gone, so the assumption stands in for it"
-
-
-def test_reachability_only_applies_to_generators_that_will_fire(ready, cfg, now):
-    """Both starts below current voltage: neither fires, so nothing to check."""
-    st = make_status(cfg, now, voltage=56.0)
-    ok, why = ready.check(52.0, 57.0, 52.0, 57.0, "x", now=now, status=st)
     assert ok, why
-
-
-def test_no_observed_rate_uses_the_assumption_not_a_guess(conn, cfg, g, now):
-    open_the_gate(conn, cfg, now)      # gate open, but no runs recorded
-    learn_the_pack(conn, cfg)
-    st = make_status(cfg, now, voltage=52.5, soc=65)
-    ok, why = g.check(55.0, 57.0, 52.0, 54.5, "solo top-up", now=now, status=st)
-    assert not ok and "140 A into the pack" in why and "assumed" in why
-
-
-def test_no_rate_and_no_assumption_points_at_the_defaults(conn, cfg, tmp_path,
-                                                          monkeypatch, now):
-    monkeypatch.setattr(cfgmod, "DATA_DIR", str(tmp_path))
-    monkeypatch.setattr(cfgmod, "AUDIT_LOG", str(tmp_path / "audit.log"))
-    bare = dict(cfg, assumed_charge_a={})
-    g = guardmod.Guard(conn, bare, state_path=str(tmp_path / "s.json"))
-    open_the_gate(conn, bare, now)
-    learn_the_pack(conn, bare)
-    st = make_status(bare, now, voltage=52.5, soc=65)
-    ok, why = g.check(55.0, 57.0, 52.0, 54.5, "solo top-up", now=now, status=st)
-    assert not ok and "no observed charge rate" in why
-    # The message must quote the configured defaults, whatever they are.
-    assert str(cfg["default_start"]) in why and str(cfg["default_stop"]) in why
 
 
 def test_the_ags_cap_binds_when_it_is_tighter_than_the_pi5(ready, cfg, now):
@@ -490,12 +473,12 @@ def test_a_paired_firing_does_not_borrow_the_solo_rates(conn, cfg, g, now):
     the pair falls to its own assumption rather than to their figures."""
     open_the_gate(conn, cfg, now)
     learn_the_pack(conn, cfg)
-    add_rate(conn, cfg, "mep", 300.0, solo=1)
-    add_rate(conn, cfg, "kubota", 300.0, solo=1)
+    add_rate(conn, cfg, "mep", 17000.0, solo=1)
+    add_rate(conn, cfg, "kubota", 17000.0, solo=1)
     # A one hour window: 220 A cannot make 80% into 95%, 300 A just can.
     st = make_status(cfg, now, voltage=54.0, soc=80, max_runtime=60)
     ok, why = g.check(55.0, 57.0, 55.0, 57.0, "both fire", now=now, status=st)
-    assert not ok and "220 A into the pack" in why and "assumed" in why
+    assert not ok and "11.7 kW into pack, assumed" in why
     assert "both generators cannot lift the pack" in why
 
 

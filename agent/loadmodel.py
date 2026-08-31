@@ -36,11 +36,6 @@ MIN_NIGHTS_PER_TIER = 3
 # The cleaned hourly rows are built once and reused until the table changes,
 # rather than once per hour of every forecast walk.
 MIN_DAYS_FOR_SOLAR_FIT = 8
-# A run taken while the house drew more than this multiple of its mean load
-# says more about the load than about the generator, so it is left out of the
-# learned rate. The 20:09 MEP run on the first live night was one of these: a
-# 7 kW steam bath against a mean nearer 1.5 kW.
-LOAD_SPIKE_MULTIPLE = 2.0
 # A run shorter than this cannot say anything about a rate.
 MIN_RUN_MINUTES = 10
 # Runs needed before the charge-side curve is trusted over the resting one.
@@ -90,15 +85,30 @@ def _isotonic(points):
     return out
 
 
-def rate_phrase(rate):
-    """How a charge rate is written wherever the owner or the model sees one."""
-    if not rate or rate.get("a") is None:
+def _kw(watts):
+    return f"{watts / 1000.0:.1f} kW"
+
+
+def rate_phrase(rate, expected_load_w=None, net_w=None, soc_per_h=None):
+    """How a charge rate is written wherever the owner or the model sees one.
+
+    Both halves, always: what the generator delivers and what the house is
+    expected to take out of it, because the difference is the whole reason a
+    run that looked slow once was slow.
+    """
+    if not rate or rate.get("gross_w") is None:
         return "no observed rate"
     assumed = ", assumed" if rate.get("assumed") else ""
-    if rate.get("soc_per_h") is None:
-        return f"{rate['a']:.0f} A into the pack{assumed}"
-    return (f"{rate['a']:.0f} A into the pack "
-            f"({rate['soc_per_h']:.1f}% SOC/h{assumed})")
+    if rate.get("assumed_net"):
+        head = f"{_kw(rate['gross_w'])} into pack{assumed}"
+    elif expected_load_w is None or net_w is None:
+        return f"gross {_kw(rate['gross_w'])}{assumed}"
+    else:
+        head = (f"gross {_kw(rate['gross_w'])} − expected load "
+                f"{_kw(expected_load_w)} = {_kw(net_w)} into pack{assumed}")
+    if soc_per_h is not None:
+        head += f" ({soc_per_h:.1f}% SOC/h)"
+    return head
 
 
 def _weighted_median(pairs):
@@ -202,27 +212,63 @@ class ChargeCurve:
                 out.append(t)
         return out
 
-    def minutes_between(self, from_v, to_v):
-        """Observed minutes from one terminal voltage to another."""
+    @staticmethod
+    def _load_scale(t, expected_load_w):
+        """How much longer this run would have taken under a different load.
+
+        A run delivering gross G against load L put G - L into the pack. Under
+        the load the window ahead expects it would put in G - L', so it would
+        take (G - L) / (G - L') times as long. None where the run's own
+        figures are missing or the arithmetic is not credible.
+        """
+        if expected_load_w is None:
+            return 1.0
+        gross, load = t.get("gross_w"), t.get("load_w")
+        if gross is None or load is None:
+            return None
+        then, now_ = gross - load, gross - expected_load_w
+        if then <= 0 or now_ <= 0:
+            return None
+        scale = then / now_
+        # Beyond this the two loads are too far apart for one run to speak
+        # about the other.
+        return scale if 0.25 <= scale <= 4.0 else None
+
+    def minutes_between(self, from_v, to_v, expected_load_w=None):
+        """Observed minutes from one terminal voltage to another.
+
+        Timed against the load each run actually faced, then rescaled to the
+        load the window ahead expects.
+        """
         deltas = []
         for t in self._usable(from_v):
             a = self._arrival(t["trace"], from_v)
             b = self._arrival(t["trace"], to_v)
             if a is None or b is None or b < a:
                 continue
-            deltas.append(b - a)
+            scale = self._load_scale(t, expected_load_w)
+            if scale is None:
+                continue
+            deltas.append((b - a) * scale)
         if len(deltas) < MIN_CHARGE_CURVE_RUNS:
             return None
         return _median(deltas), len(deltas)
 
-    def voltage_after(self, from_v, hours):
-        """The terminal voltage reached `hours` after passing from_v."""
+    def voltage_after(self, from_v, hours, expected_load_w=None):
+        """The terminal voltage reached `hours` after passing from_v.
+
+        Under a heavier load than the run faced the same wall-clock hour buys
+        less charge, so the budget is scaled the other way from the minutes.
+        """
         reached = []
         for t in self._usable(from_v):
             a = self._arrival(t["trace"], from_v)
             if a is None:
                 continue
-            v = self._voltage_by(t["trace"], a + hours * 60.0)
+            scale = self._load_scale(t, expected_load_w)
+            if scale is None:
+                continue
+            v = self._voltage_by(t["trace"], a + hours * 60.0 / scale)
             if v is not None:
                 reached.append(v)
         if len(reached) < MIN_CHARGE_CURVE_RUNS:
@@ -489,33 +535,32 @@ class LoadModel:
     # --- generators ---------------------------------------------------------
 
     def charge_rate(self, gen=None, solo=None, days=180, now=None):
-        """Observed charge rate, as current into the pack.
+        """What a generator delivers, gross, in watts.
 
-        Volts per hour is not a generator's rate. It is the generator minus
-        whatever the house happened to be drawing, and on the first live night
-        the MEP's 20:09 run was measured through a 7 kW steam bath and came
-        out at 0.864 V/h - a number about the bath, not the generator. The
-        shunt's net current is Ah/h into the pack, which against the learned
-        capacity is a state-of-charge rate, and the learned voltage/SOC curve
-        turns that into volts when a target needs one.
+        Gross is what came out of the engine: what went into the pack plus
+        what the house took at the same minute. That is a property of the
+        generator. The net figure the shunt alone reports is not - it is the
+        generator minus whatever the house happened to be doing, which is why
+        the MEP's 20:09 run through a 7 kW steam bath once measured as
+        0.864 V/h and a Kubota top-up was sized at the pair's 214 A.
 
-        Runs taken while the house drew more than LOAD_SPIKE_MULTIPLE times
-        its mean load are still not the generator's rate, so they are left
-        out. Exercise runs are too: 30 minutes at 09:00 with the sun already
-        up says nothing about lifting the pack at night.
+        Learning gross means a run under an unusual load is no longer a run to
+        throw away: subtracting the load it actually faced recovers the same
+        figure as any other run. There is no load filter any more.
 
-        The Kubota's runs also drive a Magnum MS4048 charger, which is not on
-        Modbus and so contributes nothing the inverters can report. The
-        shunt's current into the pack is the only correct measure of what a
-        Kubota run delivers - anything summed from the Schneider registers
-        would understate it by whatever the Magnum was doing.
+        Exercise runs are still excluded: 30 minutes at 09:00 with the sun up
+        says nothing about lifting the pack at night.
+
+        The Kubota's runs also drive a Magnum MS4048, which is not on Modbus.
+        Gross is measured at the shunt and at the inverters' load output, so
+        it includes whatever the Magnum put in without needing to see it.
 
         `gen` of None pools every generator's runs, which is how the two of
         them running together are measured.
         """
         now = int(now or time.time())
-        sql = ("SELECT gen, rate_v_per_h, rate_a, load_w, duration_min "
-               "FROM gen_runs WHERE kind != 'exercise' AND rate_a IS NOT NULL "
+        sql = ("SELECT gen, rate_v_per_h, rate_a, load_w, gross_w, duration_min "
+               "FROM gen_runs WHERE kind != 'exercise' AND gross_w IS NOT NULL "
                "AND start_ts >= ?")
         args = [now - days * 86400]
         if gen is not None:
@@ -525,33 +570,67 @@ class LoadModel:
             sql += " AND solo=?"
             args.append(int(solo))
         rows = [r for r in self.conn.execute(sql, args).fetchall()
-                if r["duration_min"] >= MIN_RUN_MINUTES and r["rate_a"] > 0]
-
-        mean_load = self.mean_load_w(now=now)
-        spikes = 0
-        if mean_load:
-            ceiling = LOAD_SPIKE_MULTIPLE * mean_load
-            kept = [r for r in rows if r["load_w"] is None or r["load_w"] <= ceiling]
-            spikes = len(rows) - len(kept)
-            rows = kept
+                if r["duration_min"] >= MIN_RUN_MINUTES and r["gross_w"] > 0]
         if not rows:
             return None
 
-        amps = _median([r["rate_a"] for r in rows])
-        capacity_ah = self.capacity_ah()
+        gross = _median([r["gross_w"] for r in rows])
+        loads = [r["load_w"] for r in rows if r["load_w"] is not None]
         observed_v = [r["rate_v_per_h"] for r in rows if r["rate_v_per_h"] is not None]
         return {
             "gen": gen, "solo": solo, "runs": len(rows),
-            "a": round(amps, 1),
-            "capacity_ah": capacity_ah,
-            "soc_per_h": (round(100.0 * amps / capacity_ah, 2)
-                          if capacity_ah else None),
-            "mean_load_w": round(mean_load) if mean_load else None,
-            "excluded_load_spikes": spikes,
-            # Recorded because it happened. Nothing plans from it.
+            "gross_w": round(gross),
+            "capacity_wh": self.capacity_wh(),
+            "run_load_w": round(_median(loads)) if loads else None,
+            # Recorded because they happened. Nothing plans from either: both
+            # are the generator minus the house on the day.
+            "observed_net_a": (round(_median([r["rate_a"] for r in rows
+                                              if r["rate_a"] is not None]), 1)
+                               if any(r["rate_a"] is not None for r in rows)
+                               else None),
             "observed_v_per_h": (round(_median(observed_v), 3)
                                  if observed_v else None),
         }
+
+    def expected_load_w(self, now=None, hours=2.0):
+        """Mean house load over the next `hours`, from the learned profile.
+
+        The profile is by hour of day and weekday against weekend, so a run
+        starting at nine on a Saturday is netted against a Saturday evening
+        rather than against the year's average.
+        """
+        now = int(now or time.time())
+        tz = history.tzinfo(self.cfg)
+        whole = max(1, int(round(hours)))
+        seen = []
+        for i in range(whole):
+            t = datetime.fromtimestamp(now + i * 3600, tz)
+            p = self.load_profile(month=t.month, weekend=t.weekday() >= 5, now=now)
+            wh = p["profile"].get(t.hour)
+            if wh is None:
+                wh = _median(list(p["profile"].values()))
+            if wh is not None:
+                seen.append(wh)
+        return round(sum(seen) / len(seen)) if seen else None
+
+    def net_from_gross(self, rate, expected_load_w):
+        """(net watts into the pack, %SOC per hour) for a rate and a load.
+
+        None where the generator cannot keep up with the load the window
+        expects: there is no charge rate to quote when nothing is going in.
+        """
+        if not rate or rate.get("gross_w") is None:
+            return None, None
+        if rate.get("assumed_net"):
+            net = rate["gross_w"]            # the assumption is already net
+        elif expected_load_w is None:
+            return None, None
+        else:
+            net = rate["gross_w"] - expected_load_w
+        if net <= 0:
+            return net, None
+        capacity = rate.get("capacity_wh") or self.capacity_wh()
+        return net, (round(100.0 * net / capacity, 2) if capacity else None)
 
     def charge_rates(self, now=None):
         out = {}
@@ -801,19 +880,17 @@ class LoadModel:
         now = int(now or time.time())
         rows = history.charge_samples(self.conn, gen=gen, solo=solo,
                                       since=now - days * 86400)
-        ceiling = None
-        mean_load = self.mean_load_w(now=now)
-        if mean_load:
-            ceiling = LOAD_SPIKE_MULTIPLE * mean_load
-
         traces, counts = {}, {}
         for r in rows:
-            if ceiling is not None and r["load_w"] is not None and r["load_w"] > ceiling:
-                continue
             t = traces.get(r["run_id"])
             if t is None:
+                # A run's own load and gross travel with it, so its timings
+                # can be read against a different load rather than discarded
+                # for having faced an unusual one.
                 t = traces[r["run_id"]] = {"start_v": r["start_v"], "trace": {},
-                                           "minutes": 0.0, "max_v": r["battery_v"]}
+                                           "minutes": 0.0, "max_v": r["battery_v"],
+                                           "load_w": r["load_w"],
+                                           "gross_w": r["gross_w"]}
             v_bin = history.soc_bin(r["battery_v"])
             minutes = (r["ts"] - r["start_ts"]) / 60.0
             t["minutes"] = max(t["minutes"], minutes)
@@ -853,11 +930,13 @@ class LoadModel:
                 else assumed.get(gen))
         if not amps:
             return None
-        capacity_ah = self.capacity_ah()
-        return {"gen": gen, "solo": solo, "runs": 0, "a": float(amps),
-                "capacity_ah": capacity_ah, "assumed": True,
-                "soc_per_h": (round(100.0 * amps / capacity_ah, 2)
-                              if capacity_ah else None)}
+        # The configured assumption is a conservative net figure - it already
+        # allows for an ordinary house - so it is not netted a second time.
+        volts = self.cfg.get("default_stop", 56.0) - 3.0
+        return {"gen": gen, "solo": solo, "runs": 0,
+                "gross_w": round(float(amps) * volts),
+                "capacity_wh": self.capacity_wh(),
+                "assumed": True, "assumed_net": True}
 
     def hours_to_target(self, from_v, target_v, rate, soc_now=None):
         """Hours for `rate` to lift the pack from from_v to target_v.
@@ -896,9 +975,11 @@ class LoadModel:
         curve, which is what the Pi5 stops on only after the charge is over
         and so reads a target as harder than it is. `basis` says which.
         """
+        now = int(now or time.time())
         curve = self.charge_curve(gen, solo=solo, now=now)
+        expected_load = self.expected_load_w(now=now, hours=window_h)
         base = {"gen": gen, "window_h": window_h, "target_v": target_v,
-                "curve": curve}
+                "curve": curve, "expected_load_w": expected_load}
 
         short = curve.fell_short(from_v, target_v, window_h)
         if short:
@@ -911,7 +992,8 @@ class LoadModel:
                         why=f"{target_v:.1f} was not reached — {basis}")
 
         if curve.learned:
-            observed = curve.minutes_between(from_v, target_v)
+            observed = curve.minutes_between(from_v, target_v,
+                                             expected_load_w=expected_load)
             if observed is not None:
                 minutes, n = observed
                 hours = minutes / 60.0
@@ -924,12 +1006,25 @@ class LoadModel:
                                  f"but the run window is {window_h:.1f} h"))
 
         rate = self._rate_for(gen, solo, now)
-        if rate is None or not rate.get("soc_per_h"):
-            missing = ("no observed charge rate" if rate is None
-                       else "the pack capacity is not learned")
+        net_w, soc_per_h = self.net_from_gross(rate, expected_load)
+        if rate is None:
             return dict(base, ok=False, rate=rate, hours=None, basis=None,
-                        why=f"{missing} for {gen}, so {target_v:.1f} V cannot "
-                            f"be shown to be reachable")
+                        why=f"no observed charge rate for {gen}, so "
+                            f"{target_v:.1f} V cannot be shown to be reachable")
+        if net_w is not None and net_w <= 0:
+            return dict(base, ok=False, rate=rate, hours=None, basis=None,
+                        net_w=net_w,
+                        why=f"{gen} delivers {_kw(rate['gross_w'])} and the "
+                            f"house is expected to take {_kw(expected_load)}, "
+                            f"so nothing would go into the pack")
+        if soc_per_h is None:
+            missing = ("the pack capacity is not learned"
+                       if expected_load is not None
+                       else "the load profile is not learned")
+            return dict(base, ok=False, rate=rate, hours=None, basis=None,
+                        why=f"{missing}, so {target_v:.1f} V cannot be shown "
+                            f"to be reachable for {gen}")
+        rate = dict(rate, soc_per_h=soc_per_h, net_w=net_w)
 
         # A learned charge curve still cannot speak for a voltage no run has
         # ever reached, and 57.0 is exactly that until a run is allowed to go
@@ -951,11 +1046,13 @@ class LoadModel:
                             f"reaches {target_v:.1f} V, so it cannot be shown "
                             f"to be reachable")
         ok = hours <= window_h + 1e-9
+        phrase = rate_phrase(rate, expected_load, net_w, soc_per_h)
         return dict(base, ok=ok, rate=rate, hours=hours, basis=basis,
+                    net_w=net_w,
                     why=(f"{target_v:.1f} reachable in {hours:.1f} h at "
-                         f"{rate_phrase(rate)}, {basis}" if ok else
+                         f"{phrase}, {basis}" if ok else
                          f"{target_v:.1f} needs {hours:.1f} h at "
-                         f"{rate_phrase(rate)} but the run window is "
+                         f"{phrase} but the run window is "
                          f"{window_h:.1f} h, {basis}"))
 
     def _hours_from(self, soc_target, from_v, rate, soc_now):
@@ -969,14 +1066,16 @@ class LoadModel:
             return 0.0
         return (soc_target - soc_now) / rate["soc_per_h"]
 
-    def voltage_after(self, from_v, hours, rate, soc_now=None, curve=None):
+    def voltage_after(self, from_v, hours, rate, soc_now=None, curve=None,
+                      soc_per_h=None):
         """The voltage the pack reaches after `hours` at this rate."""
-        if not rate or not rate.get("soc_per_h"):
+        per_h = soc_per_h if soc_per_h is not None else (rate or {}).get("soc_per_h")
+        if not rate or not per_h:
             return None
         soc = soc_now if soc_now is not None else self.soc_for_voltage(from_v)
         if soc is None:
             return None
-        soc = min(100.0, soc + rate["soc_per_h"] * hours)
+        soc = min(100.0, soc + per_h * hours)
         if curve is not None and curve.learned:
             return curve.volts_for_soc(soc)
         return self.volts_for_soc(soc)
@@ -990,12 +1089,16 @@ class LoadModel:
         curve. None when even `floor` is out of reach, so a caller cannot
         propose a target that is not worth running for.
         """
+        now = int(now or time.time())
         curve = self.charge_curve(gen, solo=solo, now=now)
-        v = curve.voltage_after(from_v, window_h) if curve.learned else None
+        expected_load = self.expected_load_w(now=now, hours=window_h)
+        v = (curve.voltage_after(from_v, window_h, expected_load_w=expected_load)
+             if curve.learned else None)
         if v is None:
             rate = self._rate_for(gen, solo, now)
+            _, soc_per_h = self.net_from_gross(rate, expected_load)
             v = self.voltage_after(from_v, window_h, rate, soc_now=soc_now,
-                                   curve=curve)
+                                   curve=curve, soc_per_h=soc_per_h)
         if v is None:
             return None
         v = math.floor(min(v, ceiling) / step) * step

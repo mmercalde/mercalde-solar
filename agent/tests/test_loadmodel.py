@@ -92,14 +92,16 @@ def test_load_forecast_reports_ignorance_with_no_history(lm):
 # --- charge rates -----------------------------------------------------------
 
 def add_run(conn, cfg, gen, day, hour, kind="auto", solo=1,
-            rate=1.5, amps=90.0, minutes=60, load_w=600.0):
+            rate=1.5, gross_w=5400.0, minutes=60, load_w=600.0):
+    """One recorded run. gross_w is what the generator delivered; load_w is
+    what the house took while it did."""
     start = ts_at(cfg, day, hour)
     conn.execute(
         "INSERT INTO gen_runs (gen, start_ts, stop_ts, duration_min, start_v, "
-        "stop_v, rate_v_per_h, rate_a, load_w, solo, kind) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        "stop_v, rate_v_per_h, rate_a, load_w, gross_w, solo, kind) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
         (gen, start, start + minutes * 60, minutes, 52.0, 52.0 + rate,
-         rate, amps, load_w, solo, kind))
+         rate, (gross_w - load_w) / 53.0, load_w, gross_w, solo, kind))
     conn.commit()
 
 
@@ -110,98 +112,107 @@ def add_capacity(conn, cfg, ah=2000, day="2026-08-19"):
         add_sample(conn, cfg, base + i * 60, 53.0, 50, -1200, ah=ah / 2)
 
 
-def test_a_charge_rate_is_amps_into_the_pack(conn, cfg, lm):
-    for i, amps in enumerate([80.0, 90.0, 100.0]):
-        add_run(conn, cfg, "mep", f"2026-08-{10+i:02d}", 2, amps=amps)
-    add_capacity(conn, cfg, ah=2000)
+def test_a_charge_rate_is_what_the_generator_delivers(conn, cfg, lm):
+    """Gross: into the pack plus out to the house at the same minute."""
+    for i, gross in enumerate([5000.0, 5400.0, 5800.0]):
+        add_run(conn, cfg, "mep", f"2026-08-{10+i:02d}", 2, gross_w=gross)
     r = lm.charge_rate("mep", now=ts_at(cfg, "2026-08-20", 12))
-    assert r["a"] == 90.0 and r["runs"] == 3
-    assert r["capacity_ah"] == 2000
-    assert r["soc_per_h"] == 4.5, "90 A into 2000 Ah is 4.5% an hour"
+    assert r["gross_w"] == 5400 and r["runs"] == 3
+    assert r["run_load_w"] == 600
 
 
-def test_the_rate_is_not_volts_per_hour(conn, cfg, lm):
-    """The 20:09 MEP run: a real 90 A into the pack, but the terminal voltage
-    barely moved because the house was drawing 7 kW at the time."""
-    add_run(conn, cfg, "mep", "2026-08-10", 20, rate=0.864, amps=90.0)
-    add_capacity(conn, cfg, ah=2000)
+def test_the_rate_does_not_move_with_the_house(conn, cfg, lm):
+    """The whole point. The same engine under a 7 kW load and under 600 W
+    delivers the same gross, so both runs teach the same figure."""
+    add_run(conn, cfg, "mep", "2026-08-10", 2, gross_w=5400.0, load_w=600.0)
+    add_run(conn, cfg, "mep", "2026-08-11", 20, gross_w=5400.0, load_w=7000.0)
+    add_run(conn, cfg, "mep", "2026-08-12", 2, gross_w=5400.0, load_w=1500.0)
     r = lm.charge_rate("mep", now=ts_at(cfg, "2026-08-20", 12))
-    assert r["soc_per_h"] == 4.5
-    assert r["observed_v_per_h"] == 0.864, "recorded, but not what is planned from"
+    assert r["gross_w"] == 5400 and r["runs"] == 3, "no run is thrown away"
 
 
-def test_a_run_under_an_exceptional_load_is_left_out(conn, cfg, lm):
-    """Mean load is 650 W here, so a 7 kW run is well past twice it."""
+def test_there_is_no_load_filter_any_more(conn, cfg, lm):
     build_load_history(conn, cfg, days=30, start="2026-08-01",
                        night_wh=900, day_wh=400)
-    add_run(conn, cfg, "mep", "2026-08-10", 2, amps=90.0, load_w=600.0)
-    add_run(conn, cfg, "mep", "2026-08-11", 20, amps=20.0, load_w=7000.0)
-    add_capacity(conn, cfg, ah=2000)
+    add_run(conn, cfg, "mep", "2026-08-10", 2, gross_w=5400.0, load_w=600.0)
+    add_run(conn, cfg, "mep", "2026-08-11", 20, gross_w=5400.0, load_w=9000.0)
     r = lm.charge_rate("mep", now=ts_at(cfg, "2026-08-20", 12))
-    assert r["runs"] == 1 and r["a"] == 90.0
-    assert r["excluded_load_spikes"] == 1
-    assert r["mean_load_w"] == 650
+    assert r["runs"] == 2
+    assert "excluded_load_spikes" not in r
 
 
-def test_an_ordinary_load_is_not_a_spike(conn, cfg, lm):
+def test_the_net_is_the_gross_less_what_the_window_expects(conn, cfg, lm):
+    add_run(conn, cfg, "mep", "2026-08-10", 2, gross_w=7100.0)
+    add_capacity(conn, cfg, ah=2000)
+    rate = lm.charge_rate("mep", now=ts_at(cfg, "2026-08-20", 12))
+    net, soc_per_h = lm.net_from_gross(rate, 1900)
+    assert net == 5200
+    assert soc_per_h == round(100.0 * 5200 / rate["capacity_wh"], 2)
+
+
+def test_a_generator_the_house_outruns_has_no_rate_to_quote(conn, cfg, lm):
+    add_run(conn, cfg, "kubota", "2026-08-10", 2, gross_w=4000.0)
+    add_capacity(conn, cfg, ah=2000)
+    rate = lm.charge_rate("kubota", now=ts_at(cfg, "2026-08-20", 12))
+    net, soc_per_h = lm.net_from_gross(rate, 4500)
+    assert net == -500 and soc_per_h is None
+
+
+def test_the_expected_load_comes_from_the_hour_and_the_day(conn, cfg, lm):
+    """Night hours are 900 Wh here and daylight 400, by hour of day."""
     build_load_history(conn, cfg, days=30, start="2026-08-01",
                        night_wh=900, day_wh=400)
-    add_run(conn, cfg, "mep", "2026-08-10", 2, amps=90.0, load_w=600.0)
-    add_run(conn, cfg, "mep", "2026-08-11", 2, amps=70.0, load_w=1290.0)
-    add_capacity(conn, cfg, ah=2000)
-    r = lm.charge_rate("mep", now=ts_at(cfg, "2026-08-20", 12))
-    assert r["runs"] == 2 and r["excluded_load_spikes"] == 0
+    assert lm.expected_load_w(now=ts_at(cfg, "2026-08-20", 20), hours=2) == 900
+    assert lm.expected_load_w(now=ts_at(cfg, "2026-08-20", 12), hours=2) == 400
 
 
-def test_without_a_learned_profile_nothing_can_be_called_a_spike(conn, cfg, lm):
-    add_run(conn, cfg, "mep", "2026-08-10", 2, amps=90.0, load_w=7000.0)
-    add_capacity(conn, cfg, ah=2000)
-    r = lm.charge_rate("mep", now=ts_at(cfg, "2026-08-20", 12))
-    assert r["runs"] == 1 and r["mean_load_w"] is None
+def test_no_learned_profile_means_no_expected_load(conn, cfg, lm):
+    assert lm.expected_load_w(now=ts_at(cfg, "2026-08-20", 20), hours=2) is None
 
 
 def test_a_rate_without_a_learned_capacity_has_no_soc_rate(conn, cfg, lm):
-    add_run(conn, cfg, "mep", "2026-08-10", 2, amps=90.0)
-    r = lm.charge_rate("mep", now=ts_at(cfg, "2026-08-20", 12))
-    assert r["a"] == 90.0 and r["soc_per_h"] is None
+    add_run(conn, cfg, "mep", "2026-08-10", 2, gross_w=5400.0)
+    rate = lm.charge_rate("mep", now=ts_at(cfg, "2026-08-20", 12))
+    assert rate["gross_w"] == 5400
+    assert lm.net_from_gross(rate, 600)[1] is None
 
 
 def test_exercise_runs_do_not_inform_charge_rate(conn, cfg, lm):
-    add_run(conn, cfg, "kubota", "2026-08-10", 2, amps=60.0)
+    add_run(conn, cfg, "kubota", "2026-08-10", 2, gross_w=4000.0)
     for i in range(5):
         add_run(conn, cfg, "kubota", f"2026-08-{11+i:02d}", 9,
-                kind="exercise", amps=200.0, minutes=30)
+                kind="exercise", gross_w=20000.0, minutes=30)
     r = lm.charge_rate("kubota", now=ts_at(cfg, "2026-08-20", 12))
-    assert r["runs"] == 1 and r["a"] == 60.0
+    assert r["runs"] == 1 and r["gross_w"] == 4000
 
 
 def test_solo_and_paired_rates_are_kept_apart(conn, cfg, lm):
-    add_run(conn, cfg, "mep", "2026-08-10", 2, solo=1, amps=90.0)
-    add_run(conn, cfg, "mep", "2026-08-11", 2, solo=0, amps=150.0)
+    add_run(conn, cfg, "mep", "2026-08-10", 2, solo=1, gross_w=5400.0)
+    add_run(conn, cfg, "mep", "2026-08-11", 2, solo=0, gross_w=12000.0)
     now = ts_at(cfg, "2026-08-20", 12)
-    assert lm.charge_rate("mep", solo=True, now=now)["a"] == 90.0
-    assert lm.charge_rate("mep", solo=False, now=now)["a"] == 150.0
-    assert lm.charge_rates(now=now)["mep_solo"]["a"] == 90.0
+    assert lm.charge_rate("mep", solo=True, now=now)["gross_w"] == 5400
+    assert lm.charge_rate("mep", solo=False, now=now)["gross_w"] == 12000
+    assert lm.charge_rates(now=now)["mep_solo"]["gross_w"] == 5400
 
 
 def test_both_running_pools_every_generators_paired_runs(conn, cfg, lm):
     """A paired run measures the pack, not one engine, so either gen's rows
     describe the same thing."""
-    add_run(conn, cfg, "mep", "2026-08-10", 2, solo=0, amps=140.0)
-    add_run(conn, cfg, "kubota", "2026-08-10", 2, solo=0, amps=160.0)
+    add_run(conn, cfg, "mep", "2026-08-10", 2, solo=0, gross_w=11000.0)
+    add_run(conn, cfg, "kubota", "2026-08-10", 2, solo=0, gross_w=13000.0)
     now = ts_at(cfg, "2026-08-20", 12)
     both = lm.charge_rate(None, solo=False, now=now)
-    assert both["runs"] == 2 and both["a"] == 150.0
-    assert lm.charge_rates(now=now)["both_running"]["a"] == 150.0
+    assert both["runs"] == 2 and both["gross_w"] == 12000
+    assert lm.charge_rates(now=now)["both_running"]["gross_w"] == 12000
 
 
 def test_runs_too_short_to_move_the_pack_are_ignored(conn, cfg, lm):
-    add_run(conn, cfg, "mep", "2026-08-10", 2, minutes=5, amps=200.0)
+    add_run(conn, cfg, "mep", "2026-08-10", 2, minutes=5, gross_w=20000.0)
     assert lm.charge_rate("mep", now=ts_at(cfg, "2026-08-20", 12)) is None
 
 
-def test_a_run_that_lost_charge_is_not_a_charge_rate(conn, cfg, lm):
-    add_run(conn, cfg, "mep", "2026-08-10", 2, amps=-30.0)
+def test_a_run_that_delivered_nothing_is_not_a_charge_rate(conn, cfg, lm):
+    add_run(conn, cfg, "mep", "2026-08-10", 2, gross_w=-100.0)
     assert lm.charge_rate("mep", now=ts_at(cfg, "2026-08-20", 12)) is None
 
 
@@ -209,11 +220,14 @@ def test_no_runs_means_no_rate(lm):
     assert lm.charge_rate("mep") is None
 
 
-def test_the_rate_phrase_reads_the_same_everywhere():
-    assert loadmodel.rate_phrase({"a": 90.0, "soc_per_h": 4.5}) == \
-        "90 A into the pack (4.5% SOC/h)"
-    assert loadmodel.rate_phrase({"a": 90.0, "soc_per_h": None}) == \
-        "90 A into the pack"
+def test_the_rate_phrase_shows_both_halves():
+    """The owner sees what the engine gives and what the house takes."""
+    assert loadmodel.rate_phrase({"gross_w": 7100}, 1900, 5200, 4.9) == \
+        "gross 7.1 kW − expected load 1.9 kW = 5.2 kW into pack (4.9% SOC/h)"
+    assert loadmodel.rate_phrase({"gross_w": 7100}) == "gross 7.1 kW"
+    assert loadmodel.rate_phrase(
+        {"gross_w": 7400, "assumed": True, "assumed_net": True},
+        1900, 7400, 7.0) == "7.4 kW into pack, assumed (7.0% SOC/h)"
     assert loadmodel.rate_phrase(None) == "no observed rate"
 
 
@@ -430,66 +444,80 @@ def test_a_projection_missing_its_label_is_derived_not_dashed(conn, cfg, lm):
 
 @pytest.fixture
 def reachable(conn, cfg, lm):
-    """A pack whose curve, capacity and MEP rate are all learned.
+    """A pack whose curve, capacity, house and MEP rate are all learned.
 
     The curve runs 52.0 V at 40% to 57.0 V at 90%, so a volt is ten points of
-    state of charge; the MEP puts 90 A into a 2000 Ah pack, which is 4.5% an
-    hour, or a volt every 2.2 hours.
+    state of charge. The house takes a flat 600 W, and the MEP delivers a
+    gross 5,370 W, so 4,770 W goes into a ~108 kWh pack: 4.4 points an hour.
     """
     scraped(conn, {52.0: (40, 900), 54.0: (60, 900),
                    56.0: (80, 900), 57.0: (90, 900)})
     add_capacity(conn, cfg, ah=2000)
-    add_run(conn, cfg, "mep", "2026-08-10", 2, amps=90.0)
+    build_load_history(conn, cfg, days=30, start="2026-08-01",
+                       night_wh=600, day_wh=600)
+    add_run(conn, cfg, "mep", "2026-08-10", 2, gross_w=5370.0, load_w=600.0)
     return lm
+
+
+def netted(lm, gen, now, expected_load_w=600):
+    """The rate as reach() uses it: gross netted against the window's load."""
+    rate = lm.charge_rate(gen, now=now)
+    net, soc_per_h = lm.net_from_gross(rate, expected_load_w)
+    return dict(rate, net_w=net, soc_per_h=soc_per_h), soc_per_h
 
 
 def test_hours_to_target_is_state_of_charge_not_volts(cfg, reachable):
     now = ts_at(cfg, "2026-08-20", 22)
-    rate = reachable.charge_rate("mep", now=now)
-    # 54.0 V is 60%, 57.0 V is 90%: 30 points at 4.5 an hour.
+    rate, per_h = netted(reachable, "mep", now)
+    # 54.0 V is 60%, 57.0 V is 90%: thirty points at the netted rate.
     hours = reachable.hours_to_target(54.0, 57.0, rate)
-    assert round(hours, 2) == round(30 / 4.5, 2)
+    assert round(hours, 2) == round(30 / per_h, 2)
 
 
 def test_the_measured_state_of_charge_beats_the_curve_when_it_is_known(cfg,
                                                                        reachable):
     now = ts_at(cfg, "2026-08-20", 22)
-    rate = reachable.charge_rate("mep", now=now)
+    rate, _ = netted(reachable, "mep", now)
     assert (reachable.hours_to_target(54.0, 57.0, rate, soc_now=80)
             < reachable.hours_to_target(54.0, 57.0, rate))
 
 
 def test_a_target_already_reached_takes_no_time(cfg, reachable):
     now = ts_at(cfg, "2026-08-20", 22)
-    rate = reachable.charge_rate("mep", now=now)
+    rate, _ = netted(reachable, "mep", now)
     assert reachable.hours_to_target(57.0, 54.0, rate) == 0.0
 
 
 def test_reach_says_yes_with_the_arithmetic(cfg, reachable):
     now = ts_at(cfg, "2026-08-20", 22)
     r = reachable.reach("mep", 56.0, 57.0, 3.0, soc_now=80, now=now)
-    assert r["ok"] and round(r["hours"], 2) == round(10 / 4.5, 2)
-    assert "57.0 reachable in 2.2 h at 90 A into the pack (4.5% SOC/h)" in r["why"]
+    assert r["ok"] and r["net_w"] == 4770
+    assert ("reachable in 2.2 h at gross 5.4 kW − expected load 0.6 kW = "
+            "4.8 kW into pack") in r["why"]
 
 
 def test_reach_says_no_with_the_arithmetic(cfg, reachable):
     now = ts_at(cfg, "2026-08-20", 22)
     r = reachable.reach("mep", 52.0, 57.0, 2.0, soc_now=40, now=now)
     assert not r["ok"]
-    assert ("57.0 needs 11.1 h at 90 A into the pack (4.5% SOC/h) but the run "
-            "window is 2.0 h") in r["why"]
+    assert "57.0 needs 11.1 h at gross 5.4 kW − expected load 0.6 kW" in r["why"]
+    assert "but the run window is 2.0 h" in r["why"]
 
 
 def test_reach_without_a_rate_falls_back_to_the_assumed_one(conn, cfg, lm):
+    build_load_history(conn, cfg, days=30, start="2026-08-01",
+                       night_wh=600, day_wh=600)
     scraped(conn, {52.0: (40, 900), 57.0: (90, 900)})
     add_capacity(conn, cfg, ah=2000)
     r = lm.reach("mep", 54.0, 57.0, 2.0, solo=True,
                  now=ts_at(cfg, "2026-08-20", 22))
-    assert "140 A into the pack" in r["why"] and "assumed" in r["why"]
+    assert "7.4 kW into pack, assumed" in r["why"]
 
 
 def test_no_rate_and_no_assumption_is_a_refusal_not_a_guess(conn, cfg, lm):
-    lm.cfg = dict(cfg, assumed_charge_a={})
+    build_load_history(conn, cfg, days=30, start="2026-08-01",
+                       night_wh=600, day_wh=600)
+    lm.cfg = dict(lm.cfg, assumed_charge_a={})
     r = lm.reach("mep", 54.0, 57.0, 2.0)
     assert not r["ok"] and r["hours"] is None
     assert "no observed charge rate for mep" in r["why"]
@@ -500,38 +528,40 @@ def test_no_rate_and_no_assumption_is_a_refusal_not_a_guess(conn, cfg, lm):
 def test_a_paired_rate_is_never_used_for_one_generator(conn, cfg, lm):
     """Last night's bug: the Kubota was sized at the pair's 214 A, ran its
     full two hours and never reached its stop."""
-    add_run(conn, cfg, "kubota", "2026-08-10", 2, solo=0, amps=214.0)
+    add_run(conn, cfg, "kubota", "2026-08-10", 2, solo=0, gross_w=11942.0)
     add_capacity(conn, cfg, ah=2000)
     now = ts_at(cfg, "2026-08-20", 12)
     rate = lm._rate_for("kubota", True, now)
-    assert rate["a"] == 80.0 and rate["assumed"] is True
-    assert lm.charge_rate("kubota", solo=False, now=now)["a"] == 214.0
+    assert rate["gross_w"] == round(80.0 * 53.0) and rate["assumed"] is True
+    assert lm.charge_rate("kubota", solo=False, now=now)["gross_w"] == 11942
 
 
 def test_one_generators_rate_is_never_the_others(conn, cfg, lm):
-    add_run(conn, cfg, "mep", "2026-08-10", 2, solo=1, amps=150.0)
+    add_run(conn, cfg, "mep", "2026-08-10", 2, solo=1, gross_w=8550.0)
     add_capacity(conn, cfg, ah=2000)
     rate = lm._rate_for("kubota", True, ts_at(cfg, "2026-08-20", 12))
-    assert rate["a"] == 80.0 and rate["assumed"] is True
+    assert rate["gross_w"] == round(80.0 * 53.0) and rate["assumed"] is True
 
 
 def test_its_own_solo_history_beats_the_assumption(conn, cfg, lm):
-    add_run(conn, cfg, "kubota", "2026-08-10", 2, solo=1, amps=95.0)
+    add_run(conn, cfg, "kubota", "2026-08-10", 2, solo=1, gross_w=5635.0)
     add_capacity(conn, cfg, ah=2000)
     rate = lm._rate_for("kubota", True, ts_at(cfg, "2026-08-20", 12))
-    assert rate["a"] == 95.0 and not rate.get("assumed")
+    assert rate["gross_w"] == 5635 and not rate.get("assumed")
 
 
 def test_the_pair_assumes_both_engines_when_it_has_no_history(conn, cfg, lm):
     add_capacity(conn, cfg, ah=2000)
     rate = lm._rate_for(None, False, ts_at(cfg, "2026-08-20", 12))
-    assert rate["a"] == 220.0 and rate["assumed"] is True
+    assert rate["gross_w"] == round(220.0 * 53.0) and rate["assumed"] is True
 
 
 # --- a run that had the window and fell short is evidence --------------------
 
 def test_a_capped_run_that_fell_short_refuses_that_target(conn, cfg, lm):
     """Two hours, stopped at 55.8, so 57.0 is not reachable in two hours."""
+    build_load_history(conn, cfg, days=30, start="2026-08-01",
+                       night_wh=600, day_wh=600)
     for i in range(3):
         add_charging_run(conn, cfg, f"2026-08-{10+i:02d}", 2, 120, 53.3, 55.8,
                          gen="kubota", solo=1, soc_start=45, soc_end=70)
@@ -554,6 +584,8 @@ def test_a_target_those_runs_did_reach_is_still_answered(conn, cfg, lm):
 
 def test_a_run_cut_short_of_the_window_is_not_evidence(conn, cfg, lm):
     """Thirty minutes says nothing about what two hours would have done."""
+    build_load_history(conn, cfg, days=30, start="2026-08-01",
+                       night_wh=600, day_wh=600)
     for i in range(3):
         add_charging_run(conn, cfg, f"2026-08-{10+i:02d}", 2, 30, 53.3, 54.2,
                          gen="kubota", solo=1, soc_start=45, soc_end=52)
@@ -565,9 +597,11 @@ def test_a_run_cut_short_of_the_window_is_not_evidence(conn, cfg, lm):
 
 
 def test_reach_off_the_end_of_the_curve_says_so(conn, cfg, lm):
+    build_load_history(conn, cfg, days=30, start="2026-08-01",
+                       night_wh=600, day_wh=600)
     scraped(conn, {52.0: (40, 900), 53.0: (50, 900)})
     add_capacity(conn, cfg, ah=2000)
-    add_run(conn, cfg, "mep", "2026-08-10", 2, amps=90.0)
+    add_run(conn, cfg, "mep", "2026-08-10", 2, gross_w=5370.0)
     r = lm.reach("mep", 52.0, 57.0, 2.0, now=ts_at(cfg, "2026-08-20", 22))
     assert not r["ok"] and r["hours"] is None
     assert "neither the charging nor the resting curve reaches 57.0 V" in r["why"]
@@ -638,16 +672,19 @@ def add_charging_run(conn, cfg, day, hour, minutes, v_start, v_end, gen="mep",
         }, ts=start + i * 60)
     conn.execute(
         "INSERT INTO gen_runs (gen, start_ts, stop_ts, duration_min, start_v, "
-        "stop_v, rate_v_per_h, rate_a, load_w, solo, kind) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        "stop_v, rate_v_per_h, rate_a, load_w, gross_w, solo, kind) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
         (gen, start, start + minutes * 60, minutes, v_start, v_end,
-         (v_end - v_start) / (minutes / 60.0), amps, load_w, solo, kind))
+         (v_end - v_start) / (minutes / 60.0), amps, load_w,
+         amps * 53.0 + load_w, solo, kind))
     conn.commit()
     return start
 
 
 def this_morning(conn, cfg, n=3, minutes=70):
     """Both generators, 52.0 to 56.0, in 70 minutes. What actually happened."""
+    build_load_history(conn, cfg, days=30, start="2026-08-01",
+                       night_wh=600, day_wh=600)
     for i in range(n):
         add_charging_run(conn, cfg, f"2026-08-{10+i:02d}", 2, minutes, 52.0, 56.0,
                          gen="mep", solo=0, soc_start=40, soc_end=62)
@@ -692,6 +729,8 @@ def test_the_charge_curve_gives_the_state_of_charge_a_voltage_really_costs(conn,
 
 
 def runs_to_57(conn, cfg, n=3, minutes=100):
+    build_load_history(conn, cfg, days=30, start="2026-08-01",
+                       night_wh=600, day_wh=600)
     for i in range(n):
         add_charging_run(conn, cfg, f"2026-08-{10+i:02d}", 2, minutes, 52.0, 57.0,
                          gen="mep", solo=0, soc_start=40, soc_end=70)
@@ -746,7 +785,7 @@ def test_the_charge_side_estimate_is_shorter_than_the_resting_one(conn, cfg, lm)
     same 52.0 to 57.0 is 1.7 h of observed run and over 7 h of resting
     arithmetic."""
     runs_to_57(conn, cfg)
-    add_run(conn, cfg, "mep", "2026-08-15", 6, amps=150.0, solo=1)
+    add_run(conn, cfg, "mep", "2026-08-15", 6, gross_w=8550.0, solo=1)
     scraped(conn, {52.0: (40, 900), 56.0: (85, 900), 57.0: (95, 900)})
     now = ts_at(cfg, "2026-08-20", 12)
     charging = lm.reach(None, 52.0, 57.0, 8.0, solo=False, soc_now=40, now=now)
@@ -756,15 +795,39 @@ def test_the_charge_side_estimate_is_shorter_than_the_resting_one(conn, cfg, lm)
     assert charging["hours"] < resting["hours"] / 3
 
 
-def test_a_run_under_an_exceptional_load_does_not_shape_the_curve(conn, cfg, lm):
-    """Its terminal voltage is the house's, not the generator's."""
-    build_load_history(conn, cfg, days=30, start="2026-08-01",
-                       night_wh=900, day_wh=400)
+def test_a_run_under_an_exceptional_load_now_shapes_the_curve_too(conn, cfg, lm):
+    """No filter any more. The steam-bath run is kept, and its timings are
+    read against the load it faced rather than thrown away."""
     this_morning(conn, cfg)
-    add_charging_run(conn, cfg, "2026-08-14", 20, 70, 52.0, 52.6, gen="mep",
+    add_charging_run(conn, cfg, "2026-08-14", 20, 100, 52.0, 55.0, gen="mep",
                      solo=0, load_w=7000.0)
     curve = lm.charge_curve(None, solo=False, now=ts_at(cfg, "2026-08-20", 12))
-    assert curve.runs == 3, "the steam-bath run is not one of them"
+    assert curve.runs == 4, "the heavy run is evidence like any other"
+
+
+def test_a_slow_run_under_a_heavy_load_is_rescaled_not_believed(conn, cfg, lm):
+    """It took 100 minutes against 7 kW of house. Against 600 W the same
+    gross would have done it far quicker, and that is what is quoted."""
+    for i in range(3):
+        add_charging_run(conn, cfg, f"2026-08-{10+i:02d}", 2, 100, 52.0, 56.0,
+                         gen="mep", solo=1, load_w=7000.0, amps=150.0)
+    curve = lm.charge_curve("mep", solo=True, now=ts_at(cfg, "2026-08-20", 12))
+    heavy, _ = curve.minutes_between(52.0, 56.0, expected_load_w=7000)
+    light, _ = curve.minutes_between(52.0, 56.0, expected_load_w=600)
+    assert heavy > light, "a lighter house finishes the same run sooner"
+    assert round(light) == round(heavy * (150.0 * 53.0) / (150.0 * 53.0 + 6400))
+
+
+def test_two_loads_too_far_apart_do_not_speak_for_each_other(conn, cfg, lm):
+    """A run that put 1.1 kW into the pack against a 5 kW house says almost
+    nothing about the same engine against a 100 W one - the rescale would be
+    nearly sixfold, which is further than one run can be stretched."""
+    for i in range(3):
+        add_charging_run(conn, cfg, f"2026-08-{10+i:02d}", 2, 100, 52.0, 56.0,
+                         gen="mep", solo=1, load_w=5000.0, amps=20.0)
+    curve = lm.charge_curve("mep", solo=True, now=ts_at(cfg, "2026-08-20", 12))
+    assert curve.minutes_between(52.0, 56.0, expected_load_w=100) is None
+    assert curve.minutes_between(52.0, 56.0, expected_load_w=4500) is not None
 
 
 def test_a_run_that_started_above_the_question_is_not_evidence_for_it(conn, cfg,

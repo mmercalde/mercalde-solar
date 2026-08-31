@@ -27,9 +27,9 @@ Every 15 minutes, day and night:
    previous process's stored intent is a memory, not evidence about now.
 2. `policy.py` computes every POLICY rule whose condition is arithmetic and
    says, with the numbers, whether it fires. Whether a target is reachable is
-   `loadmodel.py`'s answer, in amps into the pack against the learned capacity
-   and voltage/SOC curve — never in volts per hour, which measures the
-   generator minus the house. The curve is the charge-side one, learned from
+   `loadmodel.py`'s answer, from each generator's learned gross delivery less
+   the load the run window expects — never in volts per hour or in the shunt
+   alone, both of which measure the generator minus the house. The curve is the charge-side one, learned from
    the minute samples inside real runs, because the Pi5 stops on the terminal
    voltage during a charge and not on the settled resting voltage.
 3. The model sees those facts and that evaluation, may call up to 4 tools, and

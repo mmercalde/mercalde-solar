@@ -43,9 +43,12 @@ POLICY = """\
    others at the owner's baseline as a backstop. 57.0 is the ceiling of this
    calculation, not its purpose: charge what the night needs, not to full.
 5. A target is only valid if it is reachable within the run window at that
-   generator's observed charge rate. A charge rate is current into the pack,
-   in amps and the state of charge per hour it gives. Volts per hour is not a
-   rate: it is the generator minus whatever the house was drawing at the time.
+   generator's observed charge rate. A charge rate is learned gross - what
+   went into the pack plus what the house took at the same minute - and the
+   load the window ahead expects is subtracted from it to get what will
+   actually reach the pack. Both halves are shown. Volts per hour is not a
+   rate, and neither is the shunt alone: both are the generator minus
+   whatever the house happened to be doing.
    Reachability is judged on what the pack does while charging, from real
    runs, because that is the voltage the Pi5 stops on; the settled resting
    voltage is only a fallback until a generator has three runs on record. The

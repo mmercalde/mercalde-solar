@@ -109,9 +109,13 @@ CREATE TABLE IF NOT EXISTS gen_runs (
   -- Mean net shunt current over the run, in A. This is Ah/h into the pack and
   -- is what actually moves the state of charge.
   rate_a REAL,
-  -- Mean house AC load over the run, in W, so a run taken under an
-  -- exceptional load can be left out of the learned rate.
+  -- Mean house AC load over the run, in W.
   load_w REAL,
+  -- Mean gross delivery over the run, in W: what the generator actually put
+  -- out, being what went into the pack plus what the house took at the same
+  -- minute. Unlike rate_a this does not move with the house's behaviour, so
+  -- it is what a rate is learned from.
+  gross_w REAL,
   solo INTEGER, kind TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS gen_runs_key ON gen_runs (gen, start_ts);
@@ -147,7 +151,8 @@ CREATE INDEX IF NOT EXISTS actions_ts ON actions (ts);
 
 # Columns added after a table shipped. CREATE TABLE IF NOT EXISTS leaves an
 # existing table alone, so a live database only gains them here.
-MIGRATIONS = [("gen_runs", "load_w", "REAL")]
+MIGRATIONS = [("gen_runs", "load_w", "REAL"),
+              ("gen_runs", "gross_w", "REAL")]
 
 
 def migrate(conn):
@@ -354,7 +359,7 @@ def derive_gen_runs(conn, cfg, since=None):
             start_from = (row["t"] or 0) + 1
         rows = conn.execute(
             f"SELECT ts, {col} AS act, {other_col} AS other, {mode_col} AS mode, "
-            "battery_v, batt_current, ac_power1, ac_power2 "
+            "battery_v, batt_current, batt_power, ac_power1, ac_power2 "
             "FROM samples WHERE ts >= ? ORDER BY ts",
             (start_from,)).fetchall()
 
@@ -365,7 +370,7 @@ def derive_gen_runs(conn, cfg, since=None):
                 if open_run is None:
                     open_run = {"start_ts": r["ts"], "start_v": r["battery_v"],
                                 "mode": r["mode"], "solo": True,
-                                "currents": [], "loads": []}
+                                "currents": [], "loads": [], "gross": []}
                 if r["other"] == GEN_RUNNING:
                     open_run["solo"] = False
                 # Only samples taken while this gen was running describe its charge rate.
@@ -374,8 +379,12 @@ def derive_gen_runs(conn, cfg, since=None):
                 # REG_AC_POWER is the inverters' AC load power, which is the
                 # house whether the generator or the battery is feeding it.
                 if r["ac_power1"] is not None or r["ac_power2"] is not None:
-                    open_run["loads"].append((r["ac_power1"] or 0)
-                                             + (r["ac_power2"] or 0))
+                    load = (r["ac_power1"] or 0) + (r["ac_power2"] or 0)
+                    open_run["loads"].append(load)
+                    # Gross delivery, minute by minute: into the pack plus out
+                    # to the house. battPower is positive when charging.
+                    if r["batt_power"] is not None:
+                        open_run["gross"].append(r["batt_power"] + load)
             elif open_run is not None:
                 added += _close_run(conn, cfg, gen, open_run, r)
                 open_run = None
@@ -397,13 +406,14 @@ def _close_run(conn, cfg, gen, run, stop_row):
     # so the net is what moved the state of charge.
     rate_a = sum(run["currents"]) / len(run["currents"]) if run["currents"] else None
     load_w = sum(run["loads"]) / len(run["loads"]) if run["loads"] else None
+    gross_w = sum(run["gross"]) / len(run["gross"]) if run["gross"] else None
     kind = _classify(conn, gen, run["start_ts"], duration_min, run["mode"], cfg)
     cur = conn.execute(
         "INSERT OR IGNORE INTO gen_runs "
         "(gen, start_ts, stop_ts, duration_min, start_v, stop_v, rate_v_per_h, "
-        "rate_a, load_w, solo, kind) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        "rate_a, load_w, gross_w, solo, kind) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
         (gen, run["start_ts"], stop_row["ts"], round(duration_min, 2), start_v, stop_v,
-         rate_v_per_h, rate_a, load_w, int(run["solo"]), kind))
+         rate_v_per_h, rate_a, load_w, gross_w, int(run["solo"]), kind))
     return cur.rowcount
 
 
@@ -733,7 +743,7 @@ def charge_samples(conn, gen=None, solo=None, since=0, include_exercise=False):
     is read straight off them. `samples` is purged at 90 days, so this sees
     the runs of the last quarter whatever `since` asks for.
     """
-    sql = ("SELECT r.id AS run_id, r.start_ts, r.start_v, r.load_w, "
+    sql = ("SELECT r.id AS run_id, r.start_ts, r.start_v, r.load_w, r.gross_w, "
            "s.ts, s.battery_v, s.batt_soc "
            "FROM gen_runs r JOIN samples s "
            "  ON s.ts >= r.start_ts AND s.ts <= r.stop_ts "
