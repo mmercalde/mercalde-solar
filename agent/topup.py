@@ -91,6 +91,11 @@ class TopUp:
         self.cfg = cfg
         self.path = path or os.path.join(config.DATA_DIR, "topup_state.json")
         self.state = self._load()
+        # Every move this object has made, in order. advance() returns the
+        # ones it caused itself, but the guard moves the machine too - a
+        # raised start, an owner's edit - and the replay wants all of them in
+        # one place. Nothing depends on it; it is a record, not state.
+        self.moves = []
 
     # --- persistence --------------------------------------------------------
 
@@ -192,8 +197,10 @@ class TopUp:
                 entry[key] = self.entry(gen)[key]
         self.state["gens"][gen] = entry
         log.info("top-up %s: %s → %s (%s)", gen, was, state, why)
-        return {"gen": gen, "from": was, "to": state, "ts": int(now),
-                "why": why, "entry": dict(entry)}
+        moved = {"gen": gen, "from": was, "to": state, "ts": int(now),
+                 "why": why, "entry": dict(entry)}
+        self.moves.append(moved)
+        return moved
 
     def request(self, gen, start, stop, now, detail=""):
         """The agent has raised this generator's start. Once per night."""

@@ -344,10 +344,24 @@ def _invert(curve, target_soc):
 
 
 class LoadModel:
-    def __init__(self, conn, cfg):
+    def __init__(self, conn, cfg, as_of=False):
+        # `as_of` makes every query respect the `now` it is given rather than
+        # the newest row in the table. Only replay sets it: live, "now" and
+        # "the newest row" are the same moment, and the extra bounds would
+        # only cost query time.
+        self.as_of = as_of
         # `conn` may be a connection or a provider of one; see history.resolve.
         self._conn = conn
         self.cfg = cfg
+
+    def _at(self, now):
+        """The moment a "newest row" question is asked as of, or None.
+
+        None live, where the newest row and now are the same moment. Replay
+        sets `as_of` and gets the newest row at or before the tick being
+        replayed instead.
+        """
+        return int(now) if self.as_of and now else None
 
     @property
     def conn(self):
@@ -839,7 +853,7 @@ class LoadModel:
         target_v. Returns None with a reason when the inputs are not learned.
         """
         now = int(now or time.time())
-        sample = history.latest_sample(self.conn)
+        sample = history.latest_sample(self.conn, at=self._at(now))
         if not sample or sample["batt_soc"] is None:
             return {"reached": None, "reason": "no battery monitor sample"}
 
@@ -920,7 +934,8 @@ class LoadModel:
         """
         now = int(now or time.time())
         rows = history.charge_samples(self.conn, gen=gen, solo=solo,
-                                      since=now - days * 86400)
+                                      since=now - days * 86400,
+                                      until=now if self.as_of else None)
         traces, counts = {}, {}
         for r in rows:
             t = traces.get(r["run_id"])
@@ -1269,7 +1284,7 @@ class LoadModel:
         now = int(now or time.time())
         if not until or until <= now:
             return {"deficit_wh": None, "reason": "no sunrise to reach"}
-        sample = history.latest_sample(self.conn)
+        sample = history.latest_sample(self.conn, at=self._at(now))
         if not sample or sample["batt_soc"] is None:
             return {"deficit_wh": None, "reason": "no battery monitor sample"}
         soc_floor = self.soc_for_voltage(floor_v)

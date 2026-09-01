@@ -597,8 +597,18 @@ def solar_peak(conn, cfg, day, now=None):
     return row["p"] if row else None
 
 
-def latest_sample(conn):
-    return conn.execute("SELECT * FROM samples ORDER BY ts DESC LIMIT 1").fetchone()
+def latest_sample(conn, at=None):
+    """The newest sample, or the newest one at or before `at`.
+
+    `at` is for replay: the load model asks this what the pack holds now, and
+    replaying a night that has already happened must not let it see the rest
+    of the night.
+    """
+    if at is None:
+        return conn.execute(
+            "SELECT * FROM samples ORDER BY ts DESC LIMIT 1").fetchone()
+    return conn.execute("SELECT * FROM samples WHERE ts <= ? "
+                        "ORDER BY ts DESC LIMIT 1", (int(at),)).fetchone()
 
 
 def summary(conn, hours, now=None):
@@ -734,7 +744,8 @@ def record_action(conn, tool, args, allowed, reason, voltage, soc, result, ts=No
     return ts
 
 
-def charge_samples(conn, gen=None, solo=None, since=0, include_exercise=False):
+def charge_samples(conn, gen=None, solo=None, since=0, include_exercise=False,
+                   until=None):
     """Every sample taken during a generator run, tagged with its run.
 
     The charge-side behaviour of the pack is not in gen_runs - that table
@@ -742,6 +753,10 @@ def charge_samples(conn, gen=None, solo=None, since=0, include_exercise=False):
     terminal voltage against state of charge and against minutes into the run
     is read straight off them. `samples` is purged at 90 days, so this sees
     the runs of the last quarter whatever `since` asks for.
+
+    `until` bounds the other end, which only replay needs: a curve built
+    for a moment in a night that has already happened must not be built
+    out of the runs that came after it.
     """
     sql = ("SELECT r.id AS run_id, r.start_ts, r.start_v, r.load_w, r.gross_w, "
            "s.ts, s.battery_v, s.batt_soc "
@@ -750,6 +765,9 @@ def charge_samples(conn, gen=None, solo=None, since=0, include_exercise=False):
            "WHERE r.stop_ts IS NOT NULL AND r.start_ts >= ? "
            "  AND s.battery_v IS NOT NULL")
     args = [since]
+    if until is not None:
+        sql += " AND r.stop_ts <= ? AND s.ts <= ?"
+        args += [int(until), int(until)]
     if not include_exercise:
         sql += " AND r.kind != 'exercise'"
     if gen is not None:

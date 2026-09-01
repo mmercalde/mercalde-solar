@@ -82,6 +82,7 @@ Every 15 minutes, day and night:
 | `ask_server.py` | `POST /ask` and `GET /plan` for Alexa |
 | `llm.py`, `llm_probe.py` | llama-server client, and a probe to check it |
 | `model_eval.py` | replay recorded ticks against a candidate model and score it |
+| `replay_topup.py` | replay a night's samples through the state machine and the guard |
 | `config.py` | config loading |
 | `schneider_modbus.py` | copied from `pi5/` |
 
@@ -311,6 +312,40 @@ agent/venv/bin/python agent/llm_probe.py                # check llama-server
 agent/venv/bin/python agent/counters.py                 # dump energy counters
 agent/venv/bin/python agent/model_eval.py -n 20         # score the live model
 ```
+
+## Replaying a night
+
+`model_eval.py` replays what the *model* said. `replay_topup.py` replays what
+Python decided: it walks a night's minute samples, moves the top-up state
+machine on what the generators actually did, evaluates POLICY 4 at the same
+moments the live agent evaluated it, puts anything that fires through the
+guard, and prints every transition and every write it would have made.
+
+```bash
+agent/venv/bin/python agent/replay_topup.py \
+    --from "2026-08-30 19:00" --to "2026-08-31 00:00"
+```
+
+No model, no network, no writes. The database is copied first and the load
+model is built with `as_of`, so what the pack holds and what the charging
+curves know are read at the tick being replayed rather than from the rest of
+the night. Tomorrow's cloud comes from each tick's own plan record, because
+today's forecast has nothing to say about a night in the past.
+
+Two flags matter for a faithful answer. `--config` takes the `config.json`
+the night actually ran under: a replay under a different `learning_live_days`
+is answering a different question. `--owner-writes` takes a JSON list of
+`/config` writes the agent did not make —
+`{"at": "2026-08-30 21:12", "mep_stop": 56.6}` — applied to the simulated
+dashboard at that minute; without it the replay shows what the agent alone
+would have done.
+
+It says where it stopped being the night that ran. Once the replay writes
+something different from what was really in force, the recorded generator
+actions are evidence about the real thresholds and not about these, so a
+generator the replay asked for and the night never started reads as
+`failed_to_start` for that reason alone. The report prints the time that
+happened.
 
 ## Comparing models
 

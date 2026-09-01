@@ -110,7 +110,6 @@ class Agent:
         self.array_low_since = {}
         self.last_poll_errors = None
         self.telegram_offset = None
-        self.adopted = False
         self.stop_event = threading.Event()
 
     def connection(self):
@@ -132,12 +131,14 @@ class Agent:
         now = int(now or time.time())
         data = history.fetch_data(self.cfg)
         live = history.fetch_config(self.cfg)
-        # Before this process writes anything, what is actually in force
-        # becomes the baseline. A previous run's stored intent says nothing
-        # about the present and must never be re-asserted.
-        if not self.adopted:
-            self.guard.adopt_live(toolsmod.thresholds_from_config(live), now=now)
-            self.adopted = True
+        # Every tick, not only the first. adopt_live compares what is in
+        # force with what this agent last wrote: the same values are its own
+        # and nothing happens, different ones were put there by the owner and
+        # are adopted as the baseline with the six hour stand-down. Asking
+        # once at startup meant an owner who moved the thresholds mid-evening
+        # was not noticed until the agent next tried to write - which, on a
+        # night where no rule fires, is never.
+        self.guard.adopt_live(toolsmod.thresholds_from_config(live), now=now)
         today = history.local_day(now, self.cfg)
 
         solar_w = sum(data.get(k) or 0 for k in

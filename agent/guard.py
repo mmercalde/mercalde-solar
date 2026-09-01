@@ -210,7 +210,7 @@ class Guard:
                 return self.baseline()
             return self.adopt_owner(
                 values, now, changed,
-                "the thresholds were changed while the agent was not running")
+                "the live thresholds are not what the agent last wrote")
         # Nothing has ever been written, so there is nothing to compare and
         # everything in force is the owner's.
         self.state["owner_baseline"] = dict(values)
@@ -415,7 +415,14 @@ class Guard:
         # config's defaults.
         fired = policymod.firing(policy or [])
         owner = self.owner_baseline()
-        if RESTORE_DEFAULT_RE.search(reason or "") and not fired:
+        # "Returning to the baseline" is a direction, not a destination. The
+        # start of a generator that has just begun running comes back on its
+        # own, and its stop stays where the top-up put it - so the write is
+        # not equal to the baseline and never will be, and testing equality
+        # refused it every fifteen minutes on 2026-08-30 while a start the
+        # agent had raised stood over the owner's.
+        homeward = self.toward_baseline(want, live_now)
+        if RESTORE_DEFAULT_RE.search(reason or "") and not fired and not homeward:
             back_to = self.baseline()
             if not self._same(want, back_to):
                 return False, (
@@ -425,7 +432,7 @@ class Guard:
                     f"to return to; those are MEP {back_to['mep_start']}/"
                     f"{back_to['mep_stop']}, Kubota {back_to['kub_start']}/"
                     f"{back_to['kub_stop']}")
-        if owner and not self._same(want, owner) and not fired:
+        if owner and not self._same(want, owner) and not fired and not homeward:
             return False, (
                 f"the owner set MEP {owner['mep_start']}/{owner['mep_stop']}, "
                 f"Kubota {owner['kub_start']}/{owner['kub_stop']} by hand, and "

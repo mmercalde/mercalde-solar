@@ -262,8 +262,7 @@ def solo_top_up(cfg, f, model):
     that calculation rather than its purpose.
     """
     name = "top-up"
-    held = _held_for_daylight(cfg, f) or _held_for_autogen(f) \
-        or _held_by_state(cfg, f)
+    held = _held_for_daylight(cfg, f) or _held_by_state(cfg, f)
     if held:
         d = f.get("deficit") or {}
         seen = (f"deficit {d['deficit_wh']:,} Wh; "
@@ -298,6 +297,12 @@ def solo_top_up(cfg, f, model):
     margin = cfg["topup_margin_pct"]
     parts = [f"deficit {deficit:,} Wh to sunrise above {floor_v:.1f} V "
              f"(needs {d.get('needed_wh', 0):,}, holds {d.get('available_wh', 0):,})"]
+
+    # Asked only once a run is known to be wanted. A night with charge to
+    # spare is not "held because auto-gen is off"; it is simply not short.
+    autogen = _held_for_autogen(f)
+    if autogen:
+        return _rule(4, name, False, "; ".join(parts + [autogen]), held=True)
 
     # The run has to begin now, so the start goes above the pack - and the
     # stop has to clear that start by the separation the guard requires,
@@ -363,24 +368,28 @@ def solo_top_up(cfg, f, model):
     # are allowed still beats letting the pack fall through the floor, so the
     # top band takes the most it can reach.
     label, gens, _ = bands[-1]
+    solo = len(gens) == 1
+    gen = gens[0] if solo else None
+    who = label if solo else "both together"
     parts.append("no band reaches it: " + "; ".join(tried))
-    lower = model.best_reachable_target(None, v, _window_for(f, gens),
+    lower = model.best_reachable_target(gen, v, _window_for(f, gens),
                                         ceiling=ceiling,
                                         floor=max(cfg["solo_target_floor"],
                                                   least_stop),
-                                        soc_now=soc, solo=False)
+                                        soc_now=soc, solo=solo)
     if lower is None:
         return _rule(4, name, False, "; ".join(parts + [
-            f"and both together cannot reach {least_stop:.1f}"]))
-    parts.append(f"both together to {lower:.1f}, the most they can reach")
+            f"and {who} cannot reach {least_stop:.1f}"]))
+    parts.append(f"{who} to {lower:.1f}, the most "
+                 f"{'it' if solo else 'they'} can reach")
     parts.append(f"start {start:.1f} is above the pack's {v:.1f} V, so the run "
                  f"begins now")
     return _rule(4, name, True, "; ".join(parts),
                  _proposal(cfg, gens, lower, start, baseline),
-                 gen="+".join(gens), target=lower, mode="both",
+                 gen="+".join(gens), target=lower, mode=label.lower(),
                  deficit_wh=deficit, start=start,
-                 **_numbers(margin, None, f"{label} band, the most they reach",
-                            None))
+                 **_numbers(margin, None, f"{label} band, the most "
+                            f"{'it' if solo else 'they'} reach", None))
 
 
 # --- POLICY 3: the two stop-voltage cases -----------------------------------

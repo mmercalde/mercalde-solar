@@ -1158,3 +1158,48 @@ def test_an_ordinary_write_still_starts_the_hour(ready, cfg, now):
     ready.note_write({"mep_start": 52.0, "mep_stop": 56.0,
                       "kub_start": 52.0, "kub_stop": 56.0}, now=now - 60)
     assert ready.state["last_write_ts"] == now - 60
+
+
+def test_an_owner_edit_is_noticed_without_waiting_for_a_write(ready, cfg, now,
+                                                              tmp_path):
+    """adopt_live runs every tick, so an owner who moves the thresholds on a
+    night when no rule fires is still noticed. Asking only inside check()
+    meant the agent had to be about to write before it could see them."""
+    import topup as topupmod
+    ready.topup = topupmod.TopUp(cfg, path=str(tmp_path / "topup.json"))
+    ready.topup.roll(now)
+    ready.note_write({"mep_start": 52.0, "mep_stop": 56.0,
+                      "kub_start": 54.0, "kub_stop": 56.0}, now=now - 3600)
+    ready.adopt_live({"mep_start": 52.0, "mep_stop": 56.0,
+                      "kub_start": 52.0, "kub_stop": 56.0}, now=now)
+    assert ready.topup.status("kubota") == topupmod.STOPPED_BY_OWNER
+    assert ready.state["override_until"] == now + guardmod.OWNER_OVERRIDE_SECONDS
+    assert ready.baseline()["kub_start"] == 52.0
+
+
+def test_a_start_that_only_comes_back_is_not_a_move_off_the_baseline(ready, cfg,
+                                                                     now):
+    """The start of a generator that has just started running comes back on
+    its own; its stop stays where the top-up put it. That write is never
+    equal to the baseline, and testing equality refused it every fifteen
+    minutes on 2026-08-30."""
+    ready.state["owner_baseline"] = {"mep_start": 52.0, "mep_stop": 56.0,
+                                     "kub_start": 52.0, "kub_stop": 56.0}
+    ready.note_write({"mep_start": 54.1, "mep_stop": 57.0,
+                      "kub_start": 52.0, "kub_stop": 56.0}, now=now - 600)
+    st = make_status(cfg, now, mep_start=54.1, mep_stop=57.0, kub_stop=56.0)
+    ok, why = ready.check(52.0, 57.0, 52.0, 56.0,
+                          "mep is running, so its start returns to the baseline",
+                          now=now, status=st)
+    assert ok, why
+
+
+def test_a_write_that_moves_away_from_the_baseline_still_needs_a_rule(ready, cfg,
+                                                                      now):
+    ready.state["owner_baseline"] = {"mep_start": 52.0, "mep_stop": 56.0,
+                                     "kub_start": 52.0, "kub_stop": 56.0}
+    ready.note_write({"mep_start": 54.1, "mep_stop": 57.0,
+                      "kub_start": 52.0, "kub_stop": 56.0}, now=now - 600)
+    st = make_status(cfg, now, mep_start=54.1, mep_stop=57.0, kub_stop=56.0)
+    ok, why = ready.check(52.0, 57.0, 54.5, 56.5, "x", now=now, status=st)
+    assert not ok and "those are the baseline" in why
