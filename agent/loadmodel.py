@@ -282,6 +282,47 @@ class ChargeCurve:
         return _invert(self.soc_points, target_soc)
 
 
+# How much of a curve's top the slope above it is measured across. The
+# charging curve is binned to 0.05 V and its state of charge is whole points,
+# so consecutive points are usually flat and the last two of them say nothing.
+# A volt is wide enough to have real rise in it and narrow enough to still be
+# the top of the curve.
+TOP_SLOPE_SPAN_V = 1.0
+
+
+def _top_slope(points, span=TOP_SLOPE_SPAN_V):
+    """Points of state of charge to the volt across the top of a curve.
+
+    A weighted least-squares fit over every point in the top `span`, each
+    weighted by how many observations made it, rather than the two end
+    points. The tail of a learned curve is where the observations run out,
+    and one thinly-seen bin should not set the slope everything above the
+    curve is carried on: the Kubota's charge curve has a single sample
+    reading 96% at 54.70 V against 88% at 54.65, and endpoint arithmetic
+    turns that into 16 points a volt.
+
+    None where the top does not rise. A flat top means the pack is full up
+    there and the voltage is being made by current against internal
+    resistance, which a state-of-charge model has nothing to say about.
+    """
+    if not points or len(points) < 2:
+        return None
+    top = points[-1][0]
+    fit = [p for p in points if p[0] >= top - span] or list(points)
+    if len(fit) < 2:
+        return None
+    sw = sum(max(n, 1) for _, _, n in fit)
+    swx = sum(max(n, 1) * v for v, _, n in fit)
+    swy = sum(max(n, 1) * y for _, y, n in fit)
+    swxx = sum(max(n, 1) * v * v for v, _, n in fit)
+    swxy = sum(max(n, 1) * v * y for v, y, n in fit)
+    denom = sw * swxx - swx * swx
+    if denom <= 0:
+        return None
+    slope = (sw * swxy - swx * swy) / denom
+    return slope if slope > 0 else None
+
+
 def _invert(curve, target_soc):
     """The voltage at a given state of charge on a (volts, soc, n) curve."""
     if not curve:
@@ -1028,18 +1069,19 @@ class LoadModel:
 
         # A learned charge curve still cannot speak for a voltage no run has
         # ever reached, and 57.0 is exactly that until a run is allowed to go
-        # there. Falling back to the resting curve keeps a conservative answer
-        # rather than refusing on a gap in the evidence; the basis says so.
+        # there. What is left is an estimate, said out loud as one.
         soc_target = curve.soc_for_voltage(target_v) if curve.learned else None
         if soc_target is not None:
             basis = f"charging curve ({curve.label})"
         else:
-            soc_target = self.soc_for_voltage(target_v)
-            basis = (f"resting curve ({curve.label}, none of them reached "
-                     f"{target_v:.1f} V)" if curve.learned else
-                     f"resting curve, {curve.runs} charging "
-                     f"run{'' if curve.runs == 1 else 's'} on record")
-        hours = self._hours_from(soc_target, from_v, rate, soc_now)
+            delta, basis = self.estimated_soc_delta(from_v, target_v, curve)
+            if delta is None:
+                return dict(base, ok=False, rate=rate, hours=None, basis=None,
+                            why=f"{target_v:.1f} V cannot be shown to be "
+                                f"reachable: {basis}")
+            soc_target = None
+        hours = (delta / soc_per_h if soc_target is None
+                 else self._hours_from(soc_target, from_v, rate, soc_now))
         if hours is None:
             return dict(base, ok=False, rate=rate, hours=None, basis=basis,
                         why=f"neither the charging nor the resting curve "
@@ -1054,6 +1096,70 @@ class LoadModel:
                          f"{target_v:.1f} needs {hours:.1f} h at "
                          f"{phrase} but the run window is "
                          f"{window_h:.1f} h, {basis}"))
+
+    def estimated_soc_delta(self, from_v, target_v, curve):
+        """(points of charge between two voltages, basis), one of them unseen.
+
+        This is what printed "56.1 reachable in 0.0 h" three times on
+        2026-08-30, for a Kubota that had never once reached 56.1 V. The
+        target was read off the resting curve, which is built from a settled
+        pack, while the starting point was the shunt's live reading taken
+        during a charge - and a charging pack reads several points of charge
+        higher at the same voltage. The pack was therefore already "past" a
+        voltage it had never been to, the delta came out negative, and the
+        run was priced at nothing.
+
+        The two ends are taken off one curve now, so the offset that made
+        them incomparable cancels: the charging curve's own points where it
+        is learned, the resting curve otherwise, both carried above their
+        highest reading on the slope of their top segment. That is an
+        estimate and the basis says so, but the deficit asking for the target
+        is real, and an estimate stated as one is a better answer to it than
+        an arithmetic accident.
+        """
+        points = curve.soc_points if curve.learned else self.voltage_soc_curve()
+        if not points:
+            return None, "no voltage-to-charge curve has been learned yet"
+        lo = self._carried(points, from_v)
+        hi = self._carried(points, target_v)
+        if lo is None or hi is None:
+            return None, (f"the curve cannot be carried from {from_v:.1f} V to "
+                          f"{target_v:.1f} V")
+        if hi > 100.0:
+            return None, (f"carrying the curve to {target_v:.1f} V puts it past "
+                          f"a full pack ({hi:.0f}%)")
+        if hi <= lo:
+            return None, (f"the curve is flat from {from_v:.1f} V to "
+                          f"{target_v:.1f} V, so charge is not what the "
+                          f"difference is made of")
+        head = ("estimated, charging curve has no run to this voltage"
+                if curve.learned else
+                f"estimated from the resting curve, {curve.runs} charging "
+                f"run{'' if curve.runs == 1 else 's'} on record")
+        return hi - lo, (f"{head} ({lo:.0f}% at {from_v:.1f} V to {hi:.0f}% at "
+                         f"{target_v:.1f} V)")
+
+    @classmethod
+    def _carried(cls, points, v):
+        """A curve's state of charge at `v`, carried above its highest reading.
+
+        Inside the curve this is plain interpolation. Above it the top
+        segment's slope is extended, which is the only honest thing left to
+        do for a voltage nothing has recorded - and it is refused outright
+        where the top is flat, because a flat top means the pack is full up
+        there and the voltage is being made by current against internal
+        resistance, which a state-of-charge model has nothing to say about.
+        """
+        inside = cls._interpolate(points, v)
+        if inside is not None:
+            return inside
+        top_v, top_soc = points[-1][0], points[-1][1]
+        if v < top_v:
+            return None
+        slope = _top_slope(points)
+        if slope is None:
+            return None
+        return top_soc + slope * (v - top_v)
 
     def _hours_from(self, soc_target, from_v, rate, soc_now):
         if soc_target is None:

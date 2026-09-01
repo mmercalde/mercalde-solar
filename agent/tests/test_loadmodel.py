@@ -596,15 +596,33 @@ def test_a_run_cut_short_of_the_window_is_not_evidence(conn, cfg, lm):
     assert "had the window" not in (r["basis"] or "")
 
 
-def test_reach_off_the_end_of_the_curve_says_so(conn, cfg, lm):
+def test_reach_off_the_end_of_the_curve_is_estimated_and_says_so(conn, cfg, lm):
+    """The curve stops at 53.0 and the target is 57.0. Carrying its 10 points
+    a volt up gives 90% at 57.0, which is 50 points away and far outside a
+    two hour window - and the answer says it was an estimate."""
     build_load_history(conn, cfg, days=30, start="2026-08-01",
                        night_wh=600, day_wh=600)
     scraped(conn, {52.0: (40, 900), 53.0: (50, 900)})
     add_capacity(conn, cfg, ah=2000)
     add_run(conn, cfg, "mep", "2026-08-10", 2, gross_w=5370.0)
     r = lm.reach("mep", 52.0, 57.0, 2.0, now=ts_at(cfg, "2026-08-20", 22))
+    assert not r["ok"] and r["hours"] > 2.0
+    assert r["basis"].startswith("estimated from the resting curve")
+    assert "40% at 52.0 V to 90% at 57.0 V" in r["basis"]
+
+
+def test_a_flat_top_is_not_priced_at_all(conn, cfg, lm):
+    """A curve that stops rising is a full pack, and the volts above it are
+    made by current against internal resistance. There is no charge in them
+    to estimate."""
+    build_load_history(conn, cfg, days=30, start="2026-08-01",
+                       night_wh=600, day_wh=600)
+    scraped(conn, {52.0: (99, 900), 53.0: (99, 900)})
+    add_capacity(conn, cfg, ah=2000)
+    add_run(conn, cfg, "mep", "2026-08-10", 2, gross_w=5370.0)
+    r = lm.reach("mep", 52.0, 57.0, 2.0, now=ts_at(cfg, "2026-08-20", 22))
     assert not r["ok"] and r["hours"] is None
-    assert "neither the charging nor the resting curve reaches 57.0 V" in r["why"]
+    assert "cannot be shown to be reachable" in r["why"]
 
 
 def test_the_highest_reachable_target_rounds_down_to_a_half_volt(cfg, reachable):
@@ -713,8 +731,9 @@ def test_two_runs_are_not_yet_a_charge_curve(conn, cfg, lm):
     scraped(conn, {52.0: (40, 900), 56.0: (85, 900), 57.0: (95, 900)})
     r = lm.reach(None, 52.0, 56.0, 2.0, solo=False, soc_now=40,
                  now=ts_at(cfg, "2026-08-20", 12))
-    assert r["basis"] == "resting curve, 2 charging runs on record"
-    assert "resting curve, 2 charging runs on record" in r["why"]
+    assert r["basis"].startswith("estimated from the resting curve, "
+                                 "2 charging runs on record")
+    assert "estimated from the resting curve" in r["why"]
 
 
 def test_the_charge_curve_gives_the_state_of_charge_a_voltage_really_costs(conn,
@@ -767,16 +786,30 @@ def test_minutes_from_mid_run_use_the_runs_that_passed_through(conn, cfg, lm):
     assert n == 3 and 0 < minutes < 100
 
 
-def test_a_target_no_run_has_reached_falls_back_and_says_so(conn, cfg, lm):
-    """Every run stopped at 56.0, so the charge curve cannot price 57.0. The
-    resting curve answers instead, conservatively, and the basis admits it."""
+def test_a_target_no_run_has_reached_is_estimated_and_says_so(conn, cfg, lm):
+    """Every run stopped at 56.0, so the charge curve cannot price 57.0. It is
+    carried above its own top instead, and the basis admits it is an estimate.
+    """
     this_morning(conn, cfg)
     scraped(conn, {52.0: (40, 900), 56.0: (85, 900), 57.0: (95, 900)})
     now = ts_at(cfg, "2026-08-20", 12)
     r = lm.reach(None, 52.0, 57.0, 3.0, solo=False, soc_now=40, now=now)
-    assert r["basis"] == ("resting curve (both generators paired, 3 runs, "
-                          "none of them reached 57.0 V)")
-    assert r["hours"] is not None
+    assert r["basis"].startswith(
+        "estimated, charging curve has no run to this voltage")
+    assert r["hours"] is not None and r["hours"] > 0
+
+
+def test_a_target_above_the_pack_is_never_priced_at_nothing(conn, cfg, lm):
+    """2026-08-30, three times: 56.1 V "reachable in 0.0 h" for a Kubota that
+    had never reached it. The shunt read 89% during a charge and the settled
+    resting curve put 56.1 V at 88%, so the pack was already past a voltage
+    it had never seen. Both ends come off one curve now."""
+    this_morning(conn, cfg)
+    scraped(conn, {52.0: (40, 900), 56.0: (85, 900), 57.0: (88, 900)})
+    now = ts_at(cfg, "2026-08-20", 12)
+    r = lm.reach(None, 55.0, 56.5, 2.0, solo=False, soc_now=89, now=now)
+    assert r["hours"] is None or r["hours"] > 0
+    assert "0.0 h" not in r["why"]
 
 
 def test_the_charge_side_estimate_is_shorter_than_the_resting_one(conn, cfg, lm):
@@ -791,7 +824,8 @@ def test_the_charge_side_estimate_is_shorter_than_the_resting_one(conn, cfg, lm)
     charging = lm.reach(None, 52.0, 57.0, 8.0, solo=False, soc_now=40, now=now)
     resting = lm.reach("mep", 52.0, 57.0, 8.0, solo=True, soc_now=40, now=now)
     assert charging["basis"].startswith("observed while charging")
-    assert resting["basis"].startswith("resting curve, 0 charging runs")
+    assert resting["basis"].startswith("estimated from the resting curve, "
+                                       "0 charging runs")
     assert charging["hours"] < resting["hours"] / 3
 
 

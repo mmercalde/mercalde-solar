@@ -33,7 +33,13 @@ Every 15 minutes, day and night:
    the load the run window expects — never in volts per hour or in the shunt
    alone, both of which measure the generator minus the house. The curve is the charge-side one, learned from
    the minute samples inside real runs, because the Pi5 stops on the terminal
-   voltage during a charge and not on the settled resting voltage.
+   voltage during a charge and not on the settled resting voltage. Where no
+   run has ever reached the target the answer is an estimate and says so —
+   both ends of the state-of-charge delta come off one curve, carried above
+   its top on the slope fitted across its last volt, because reading the
+   target off the settled curve while the starting point comes from the
+   shunt during a charge is how "reachable in 0.0 h" got written three times
+   on 2026-08-30 for a voltage the Kubota had never seen.
 3. The model sees those facts and that evaluation, may call up to 4 tools, and
    finishes with a one-line recommendation. A rule that fires must be either
    set or overruled in writing; anything else is logged as a policy miss.
