@@ -145,18 +145,73 @@ class Guard:
             self.state["raised_starts"] = raised
             self._save_state()
 
-    def adopt_live(self, values, now=None):
-        """Take what is actually in force as the owner's baseline.
+    def owner_changed(self, live_now, intended):
+        """Generators whose live numbers are not what the agent last wrote.
 
-        Called before the agent's first write of a run. Stored intent is a
-        memory of what a previous process meant, not evidence about the
-        present: after the freeze at 4:01 and the reboot at 8:26 the state
-        file still said Kubota 53.3/57.0, and re-asserting it wrote over the
-        owner's 52/56 and started the Kubota twice in full sun. Whatever the
-        dashboard reports at startup is the owner's, because the agent has no
-        standing to claim any of it.
+        The comparison is against the agent's own last write and never against
+        the baseline. An owner who puts a raised start back to 52.0 has
+        restored the baseline, and measuring against the baseline would read
+        that as nothing having happened - when in fact the owner has just
+        overruled the agent, which is the one thing rule 8 exists to notice.
         """
+        out = []
+        for gen, skey, pkey, _ in GEN_KEYS:
+            if (abs(live_now[skey] - intended[skey]) >= EPS
+                    or abs(live_now[pkey] - intended[pkey]) >= EPS):
+                out.append(gen)
+        return out
+
+    def adopt_owner(self, live_now, now, gens, why):
+        """Their values are the baseline, the agent stands down, the night ends.
+
+        One path for both ways this is found: mid-run by rule 8, and at
+        startup when what is in force is not what this agent last wrote.
+        """
+        now = int(now)
+        self.state["override_until"] = now + OWNER_OVERRIDE_SECONDS
+        self.state["override_adopted"] = dict(live_now)
+        self.state["owner_baseline"] = dict(live_now)
+        self.state["intended"] = dict(live_now)
+        # Their values are the baseline now; nothing of ours is raised.
+        self.state["raised_starts"] = {}
+        self._save_state()
+        if self.topup is not None:
+            for gen in gens:
+                self.topup.owner_took_it(gen, now, why)
+        log.warning("owner changed thresholds by hand; adopting %s and "
+                    "standing down for 6 h", live_now)
+        return live_now
+
+    def adopt_live(self, values, now=None):
+        """Settle what is in force at startup: the agent's own, or the owner's.
+
+        Stored intent is a memory of what a previous process meant, and it may
+        not be re-asserted over the dashboard - after the freeze at 4:01 and
+        the reboot at 8:26 the state file still said Kubota 53.3/57.0, and
+        re-asserting it wrote over the owner's 52/56 and started the Kubota
+        twice in full sun. But it is still evidence of one thing: what this
+        agent last wrote. If the live values match it, they are the agent's
+        own and calling them the owner's is how the raised start of
+        2026-08-30 became a baseline of 54.0 three minutes after the agent
+        wrote it, and could then never be put back. If they differ, the owner
+        moved them while the agent was away, which is an owner override like
+        any other.
+        """
+        now = int(now or time.time())
         values = dict(values)
+        intended = self.state.get("intended")
+        if intended:
+            changed = self.owner_changed(values, intended)
+            if not changed:
+                log.info("the live thresholds %s are this agent's own last "
+                         "write; the baseline stays %s", values,
+                         self.baseline())
+                return self.baseline()
+            return self.adopt_owner(
+                values, now, changed,
+                "the thresholds were changed while the agent was not running")
+        # Nothing has ever been written, so there is nothing to compare and
+        # everything in force is the owner's.
         self.state["owner_baseline"] = dict(values)
         self.state["intended"] = dict(values)
         self.state["raised_starts"] = {}
@@ -324,16 +379,12 @@ class Guard:
 
         # Rule 8: owner override.
         live_now = self._live_thresholds(live)
-        if self.state.get("intended") and not self._same(live_now, self.state["intended"]):
-            self.state["override_until"] = now + OWNER_OVERRIDE_SECONDS
-            self.state["override_adopted"] = live_now
-            self.state["owner_baseline"] = dict(live_now)
-            self.state["intended"] = dict(live_now)
-            # Their values are the baseline now; nothing of ours is raised.
-            self.state["raised_starts"] = {}
-            self._save_state()
-            log.warning("owner changed thresholds by hand; adopting %s and "
-                        "standing down for 6 h", live_now)
+        changed = (self.owner_changed(live_now, self.state["intended"])
+                   if self.state.get("intended") else [])
+        if changed:
+            self.adopt_owner(live_now, now, changed,
+                             "the owner changed the thresholds in the "
+                             "dashboard")
             return False, (
                 "the owner changed the thresholds in the dashboard "
                 f"(now MEP {live_now['mep_start']}/{live_now['mep_stop']}, "

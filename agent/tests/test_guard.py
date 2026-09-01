@@ -674,6 +674,80 @@ def test_the_agents_own_write_is_not_an_owner_edit(ready, cfg, now):
     assert ok, why
 
 
+def test_an_owner_edit_ends_that_generators_night(ready, cfg, now, tmp_path):
+    """The one whose numbers moved is the owner's; the other is untouched."""
+    import topup as topupmod
+    ready.topup = topupmod.TopUp(cfg, path=str(tmp_path / "topup.json"))
+    ready.topup.roll(now)
+    ready.note_write({"mep_start": 52.0, "mep_stop": 56.0,
+                      "kub_start": 54.0, "kub_stop": 56.0}, now=now - 7200)
+    assert ready.topup.status("kubota") == topupmod.REQUESTED
+    st = make_status(cfg, now, mep_stop=56.0,                   # unchanged
+                     kub_start=52.0, kub_stop=56.0)             # owner put it back
+    ok, why = ready.check(52.0, 57.0, 52.0, 57.0, "x", now=now, status=st)
+    assert not ok and "owner changed the thresholds" in why
+    assert ready.topup.status("kubota") == topupmod.STOPPED_BY_OWNER
+    assert ready.topup.status("mep") == topupmod.IDLE
+
+
+def test_restoring_the_baseline_is_still_an_owner_action(ready, cfg, now):
+    """Measured against what the agent last wrote, never against the baseline.
+
+    The owner putting a raised start back to 52.0 has overruled the agent.
+    Compared with the baseline those values look like nothing happened, which
+    is the one case rule 8 exists to catch.
+    """
+    ready.state["owner_baseline"] = {"mep_start": 52.0, "mep_stop": 56.0,
+                                     "kub_start": 52.0, "kub_stop": 56.0}
+    ready.note_write({"mep_start": 52.0, "mep_stop": 56.0,
+                      "kub_start": 54.6, "kub_stop": 56.6}, now=now - 7200)
+    st = make_status(cfg, now, mep_stop=56.0, kub_start=52.0, kub_stop=56.0)
+    ok, why = ready.check(52.0, 57.0, 52.0, 57.0, "x", now=now, status=st)
+    assert not ok and "owner changed the thresholds" in why
+    assert ready.state["override_until"] == now + guardmod.OWNER_OVERRIDE_SECONDS
+
+
+# --- startup: whose thresholds are these? -----------------------------------
+
+def test_the_agents_own_raised_start_is_not_adopted_as_the_owners(ready, now):
+    """2026-08-30, 7:51 pm: the agent wrote Kubota 54.0. It restarted at
+    7:54 and called that 54.0 the owner's baseline, after which its own
+    raised start could never be put back - every attempt was refused as
+    moving off the owner's values."""
+    ready.state["owner_baseline"] = {"mep_start": 52.0, "mep_stop": 56.0,
+                                     "kub_start": 52.0, "kub_stop": 56.0}
+    ready.note_write({"mep_start": 52.0, "mep_stop": 56.0,
+                      "kub_start": 54.0, "kub_stop": 56.0}, now=now - 180)
+    ready.adopt_live({"mep_start": 52.0, "mep_stop": 56.0,
+                      "kub_start": 54.0, "kub_stop": 56.0}, now=now)
+    assert ready.baseline()["kub_start"] == 52.0
+    assert "kubota" in ready.raised_starts()
+    assert ready.state["override_until"] == 0
+
+
+def test_thresholds_moved_while_the_agent_was_away_are_the_owners(ready, now):
+    """The 4:01 am freeze: the state file said Kubota 53.3/57.0 and the owner
+    had since set 52/56. Re-asserting the stored intent started the Kubota
+    twice in full sun."""
+    ready.note_write({"mep_start": 52.0, "mep_stop": 57.0,
+                      "kub_start": 53.3, "kub_stop": 57.0}, now=now - 20000)
+    ready.adopt_live({"mep_start": 52.0, "mep_stop": 56.0,
+                      "kub_start": 52.0, "kub_stop": 56.0}, now=now)
+    assert ready.baseline() == {"mep_start": 52.0, "mep_stop": 56.0,
+                                "kub_start": 52.0, "kub_stop": 56.0}
+    assert ready.raised_starts() == {}
+    assert ready.state["override_until"] == now + guardmod.OWNER_OVERRIDE_SECONDS
+
+
+def test_a_first_run_adopts_whatever_is_in_force(g, now):
+    """Nothing has ever been written, so there is nothing to compare and no
+    reason to stand down."""
+    g.adopt_live({"mep_start": 53.0, "mep_stop": 56.0,
+                  "kub_start": 53.0, "kub_stop": 56.0}, now=now)
+    assert g.baseline()["mep_start"] == 53.0
+    assert g.state["override_until"] == 0
+
+
 # --- rule 8: the owner's values are the baseline ----------------------------
 
 OWNER = {"mep_start": 52.0, "mep_stop": 55.0,

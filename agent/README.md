@@ -23,8 +23,10 @@ Every 15 minutes, day and night:
 
 1. Python gathers the facts — live status, thresholds, the last 24 hours,
    the load forecast to sunrise, the weather, today's peak voltage. On the
-   first gather of a run the live thresholds become the owner's baseline: a
-   previous process's stored intent is a memory, not evidence about now.
+   first gather of a run the live thresholds are settled against what this
+   agent last wrote: the same values are its own and the stored baseline
+   stands; different ones were moved while it was away and are the owner's.
+   Stored intent is never re-asserted over the dashboard either way.
 2. `policy.py` computes every POLICY rule whose condition is arithmetic and
    says, with the numbers, whether it fires. Whether a target is reachable is
    `loadmodel.py`'s answer, from each generator's learned gross delivery less
@@ -232,7 +234,15 @@ written to `data/audit.log` and the `actions` table.
 7. **Stale data** — refuse if the dashboard poll is over 5 minutes old or the
    Battery Monitor is offline.
 8. **Owner override** — if `/config` no longer matches what the agent last
-   wrote, adopt the owner's values and stand down for 6 hours.
+   wrote, adopt the owner's values, stand down for 6 hours, and end that
+   generator's top-up night. The comparison is against the agent's own last
+   write and never against the baseline: an owner who puts a raised start
+   back to 52.0 has restored the baseline and overruled the agent at the same
+   time, and measured against the baseline that reads as nothing having
+   happened. The same test settles what is in force at startup — thresholds
+   that match the agent's last write are the agent's own and the stored
+   baseline stands; thresholds that differ were moved while the agent was
+   away, and are the owner's.
 9. **Audit** — every check is recorded.
 
 ### One deliberate deviation
