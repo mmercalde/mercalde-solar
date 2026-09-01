@@ -492,6 +492,38 @@ def firing(evaluation):
     return [r for r in evaluation if r["fires"]]
 
 
+def numbers_line(evaluation):
+    """The figures behind a firing top-up, in one line, or None.
+
+    The plan record has always carried them. The Telegram that followed a
+    write carried four voltages and a sentence the model composed, so the two
+    accounts of one decision could differ and on 2026-08-30 they did. These
+    are the same numbers the POLICY line is built from.
+    """
+    for r in firing(evaluation or []):
+        if r["rule"] != 4:
+            continue
+        bits = []
+        if r.get("deficit_wh") is not None:
+            bits.append(f"deficit {r['deficit_wh']:,} Wh")
+        if r.get("margin_pct") is not None:
+            bits.append(f"+{r['margin_pct']}%"
+                        + (f" = {r['padded_wh']:,} Wh"
+                           if r.get("padded_wh") is not None else ""))
+        if r.get("target") is not None:
+            bits.append(f"target {r['target']:.1f} V")
+        if r.get("band"):
+            bits.append(str(r["band"]))
+        if r.get("net_w") is not None:
+            bits.append(f"{r['net_w'] / 1000.0:.1f} kW into the pack")
+        if r.get("run_minutes") is not None:
+            bits.append(f"about {r['run_minutes']} min of running")
+        if r.get("reach_basis"):
+            bits.append(str(r["reach_basis"]))
+        return "; ".join(bits) or None
+    return None
+
+
 def overruled(text):
     """Rule numbers the model said, in writing, that it is overruling."""
     return {int(n) for n in OVERRULE_RE.findall(text or "")}

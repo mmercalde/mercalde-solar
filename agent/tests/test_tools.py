@@ -239,6 +239,40 @@ def test_the_message_names_the_agent_the_change_and_the_effect():
     assert "Now MEP 55.0 / 57.0, Kubota 52.0 / 56.0; pack 54.2 V" in m
 
 
+def test_the_message_carries_the_numbers_the_rule_fired_on(cfg):
+    """The plan record has always had them. The Telegram had four voltages
+    and a sentence the model wrote, so the two could disagree about one
+    decision, and on 2026-08-30 they did."""
+    import policy
+    from stubs import StubModel
+    import test_topup
+    facts = {"now": test_topup.ts_at(cfg, "2026-08-30", 20, 24),
+             "voltage": 53.6, "soc": 87.0,
+             "sunrise_ts": test_topup.ts_at(cfg, "2026-08-31", 6, 22),
+             "sunset_ts": test_topup.ts_at(cfg, "2026-08-30", 19, 14),
+             "tomorrow_cloud": 56, "remaining_solar_wh": 0,
+             "data": {"autoGenEnabled": True},
+             "deficit": {"deficit_wh": 6463, "needed_wh": 15220,
+                         "available_wh": 8757, "capacity_wh": 100000,
+                         "soc_now": 87, "floor_v": 52.0},
+             "baseline": dict(BEFORE), "thresholds": dict(BEFORE),
+             "run_window_h": {"mep": 2.0, "kubota": 2.0},
+             "topup": {"gens": {"mep": {"state": "idle"},
+                                "kubota": {"state": "idle"}}}}
+    rules = [policy.solo_top_up(cfg, facts, StubModel())]
+    line = policy.numbers_line(rules)
+    assert "deficit 6,463 Wh" in line
+    assert "+15% = 7,432 Wh" in line
+    assert "target 57.0 V" in line
+    assert "Kubota band (deficit ≤ 8,000 Wh)" in line
+    assert "kW into the pack" in line
+    assert "min of running" in line
+
+    m = tools.write_message(AFTER, "solo top-up", before=BEFORE, voltage=53.6,
+                            default_start=52.0, numbers=line)
+    assert "deficit 6,463 Wh" in m and "target 57.0 V" in m
+
+
 def test_a_start_above_the_pack_says_the_generator_runs_now():
     _, effects = tools.describe_write(BEFORE, AFTER, voltage=54.2)
     assert effects == ["MEP will start now"]

@@ -46,7 +46,11 @@ Every 15 minutes, day and night:
 4. If it proposes a change, `guard.py` checks it against the hard rules.
    A refusal goes back to the model as the tool result, with the reason.
    Every write that is executed sends the owner a Telegram with the values
-   the dashboard read back and the reason given.
+   the dashboard read back, the reason given, and the arithmetic the rule
+   fired on — deficit, margin, target, band, net kW into the pack, expected
+   run minutes, and which curve priced it. The same numbers as the POLICY
+   line, so the message and the plan record cannot give two accounts of one
+   decision.
 5. The plan record is written to the `plans` table. Every line but the
    recommendation is computed in Python, including whether anything was
    applied — the model cannot claim a change it did not make.

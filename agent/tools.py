@@ -23,6 +23,7 @@ import counters
 import guard as guardmod
 import history
 import loadmodel
+import policy as policymod
 import system as systemmod
 import telegram
 import weather
@@ -116,7 +117,7 @@ def describe_write(before, applied, voltage):
 
 
 def write_message(applied, reason, before=None, voltage=None,
-                  default_start=None, refused=None):
+                  default_start=None, refused=None, numbers=None):
     """What the owner is told about a threshold write.
 
     "Thresholds set" with four numbers reads like the Pi5's own low-voltage
@@ -126,6 +127,10 @@ def write_message(applied, reason, before=None, voltage=None,
     changes, effects = describe_write(before, applied, voltage)
     head = ("Agent " + ", ".join(changes)) if changes else "Agent set the thresholds"
     lines = [f"⚙️ <b>{telegram.escape(head)}</b>", telegram.escape(reason)]
+    # The arithmetic the rule fired on, so the message and the plan record
+    # cannot give the owner two different accounts of one decision.
+    if numbers:
+        lines.append(telegram.escape(numbers))
     if effects:
         tail = "; ".join(effects) + ". This is the agent"
         if default_start is not None:
@@ -742,7 +747,8 @@ class Tools:
         notified = telegram.send(self.cfg, write_message(
             applied, reason, before=seen.get("thresholds"),
             voltage=seen.get("voltage"), refused=refused,
-            default_start=self.cfg["default_start"]))
+            default_start=self.cfg["default_start"],
+            numbers=policymod.numbers_line(self.policy)))
         return {"applied": True, "now": applied, "reason": reason,
                 "requested": values, "refused_parts": refused,
                 "notified": notified}
