@@ -155,7 +155,7 @@ policy:
   storm_cloud_pct: 70
   clear_cloud_pct: 30
   predawn_hours: 3.0            # tuned on the live system; was 2.0
-  topup_earliest: sunset
+  topup_earliest: "21:00"       # quoted: unquoted YAML reads 21:00 as 1260
   topup_margin_pct: 15
   min_topup_wh: 6000
   topup_bands: {kubota: 8000, mep: 15000}

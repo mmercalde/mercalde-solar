@@ -5,6 +5,7 @@ import textwrap
 import pytest
 import yaml
 
+import config
 import guard as guardmod
 import prompts
 import system
@@ -129,6 +130,13 @@ def test_the_manifest_records_the_window_the_site_is_tuned_to(manifest):
     """The manifest describes the system as it is, not as it shipped: the
     pre-dawn window was tuned to 3.0 h on the live agent and says so."""
     assert manifest["policy"]["predawn_hours"] == 3.0
+
+
+def test_the_top_up_window_opens_at_the_hour_the_owner_set(manifest):
+    """Nine at night, not sunset. It has to survive YAML: unquoted, 21:00 is
+    read as sexagesimal and arrives as the integer 1260."""
+    assert manifest["policy"]["topup_earliest"] == "21:00"
+    assert config.load(config.EXAMPLE_PATH)["topup_earliest"] == "21:00"
 
 
 def test_the_separation_has_one_copy(manifest):

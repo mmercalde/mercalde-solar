@@ -15,8 +15,15 @@ import history  # noqa: E402
 
 @pytest.fixture
 def cfg():
-    """The shipped example config, which is also the documented default."""
-    return config.load(config.EXAMPLE_PATH)
+    """The shipped example config, which is also the documented default.
+
+    With the top-up window pinned to sunset, whatever hour the site is
+    currently tuned to. These tests are about what the rules do, and should
+    not all move the next time the owner retunes the window; the clock-time
+    form of the setting has its own tests in test_policy.py, and
+    test_system.py is where the manifest's own value is checked.
+    """
+    return dict(config.load(config.EXAMPLE_PATH), topup_earliest="sunset")
 
 
 @pytest.fixture
