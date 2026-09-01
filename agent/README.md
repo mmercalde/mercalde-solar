@@ -406,7 +406,17 @@ It takes those values from the agent itself, over `/plan`, so they stay in
 step with `config.json`. It measures silence from the last time the agent
 actually answered, and never resets while the learning gate is closed —
 during the learning phase the guard permits no writes, so thresholds off the
-defaults are the owner's, not the agent's. The owner installs it by hand;
+defaults are the owner's, not the agent's.
+
+It resets only thresholds the agent itself put there. `/plan` reports the
+four values the agent last wrote and the watchdog caches them with the rest
+of its state; if the live `/config` differs from that, the owner moved them,
+and it logs `owner-set, leaving alone` and does nothing — no reset, no
+Telegram. A silent agent is a reason to undo the agent, never a reason to
+undo a person. The owner set Kubota 54.6/56.6 by hand at 9:24 pm on
+2026-08-30; a watchdog comparing only against the defaults would have written
+52.0/56.0 over it six hours later and announced that the agent had gone
+quiet. The owner installs it by hand;
 the crontab line is in the script header. It detects liveness through the
 agent's own `GET /plan`, because gunicorn on the Pi5 runs without
 `--access-logfile` and so writes no HTTP access log to search.

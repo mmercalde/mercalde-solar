@@ -36,7 +36,16 @@
 # enabling them would mean editing the unit and restarting the dashboard.
 #
 # So liveness comes from the agent itself: GET /plan on KAMRUI:8090 answers
-# with the learning gate and the configured defaults whenever the agent is up.
+# with the learning gate, the configured defaults, and the four thresholds
+# the agent last wrote, whenever the agent is up.
+#
+# WHAT IT WILL RESET
+#
+# Only thresholds the agent itself put there. /plan reports what it last
+# wrote and that is cached with the rest of the state; if the live values
+# differ from it, the owner moved them, and the watchdog logs "owner-set,
+# leaving alone" and does nothing. A silent agent is a reason to undo the
+# agent, never a reason to undo a person.
 
 set -uo pipefail
 
@@ -76,20 +85,61 @@ except Exception:
 " "$1" 2>/dev/null
 }
 
-write_state() {  # write_state <last_seen> <learning_open> <start> <stop>
-    python3 - "$STATE_FILE" "$1" "$2" "$3" "$4" <<'PY'
+write_state() {  # write_state <last_seen> <learning_open> <start> <stop> [intended-json]
+    python3 - "$STATE_FILE" "$1" "$2" "$3" "$4" "${5:-}" <<'PY'
 import json, sys
-path, seen, gate, start, stop = sys.argv[1:6]
+path, seen, gate, start, stop, intended = sys.argv[1:7]
 state = {"last_seen": int(seen), "learning_open": gate == "true"}
 if start:
     state["default_start"] = float(start)
 if stop:
     state["default_stop"] = float(stop)
+# What the agent last wrote to /config. A reset is only ever a reset of the
+# agent's own thresholds; anything else in force is the owner's.
+if intended:
+    try:
+        state["intended"] = json.loads(intended)
+    except ValueError:
+        pass
 tmp = path + ".tmp"
 with open(tmp, "w") as f:
     json.dump(state, f)
 import os
 os.replace(tmp, path)
+PY
+}
+
+# intended_matches_live <state-file> <config-json>
+#
+# 0  every live threshold is what the agent last wrote - the agent's own
+# 1  at least one differs - the owner's, and not the watchdog's to undo
+# 2  the agent's last write is not recorded, so nothing can be shown
+#
+# This is the whole difference between resetting the agent's leftovers and
+# overriding a person. On 2026-08-30 the owner set Kubota 54.6/56.6 by hand
+# at 9:24 pm; six silent hours later a watchdog that only compared with the
+# defaults would have written 52.0/56.0 over it and sent a Telegram saying
+# the agent had gone quiet, which would have been true and beside the point.
+intended_matches_live() {
+    python3 - "$1" "$2" <<'PY'
+import json, sys
+try:
+    state = json.load(open(sys.argv[1]))
+    live = json.loads(sys.argv[2])["config"]
+except (OSError, ValueError, KeyError):
+    sys.exit(2)
+want = state.get("intended")
+if not want:
+    sys.exit(2)
+try:
+    have = {"mep_start": live["mep803a"]["startVoltage"],
+            "mep_stop": live["mep803a"]["stopVoltage"],
+            "kub_start": live["kubota"]["startVoltage"],
+            "kub_stop": live["kubota"]["stopVoltage"]}
+    sys.exit(0 if all(abs(have[k] - float(want[k])) < 0.05 for k in have)
+             else 1)
+except (KeyError, TypeError, ValueError):
+    sys.exit(2)
 PY
 }
 
@@ -141,6 +191,7 @@ if [ -n "$plan_json" ]; then
     def_start=$(printf '%s' "$plan_json" | pyjson - "d['defaults']['start']")
     def_stop=$(printf  '%s' "$plan_json" | pyjson - "d['defaults']['stop']")
     plan_ts=$(printf   '%s' "$plan_json" | pyjson - "int(d['ts'])")
+    intended=$(printf  '%s' "$plan_json" | pyjson - "json.dumps(d['intended'])")
     # A parseable answer is proof the agent is alive, whether or not it has
     # recorded a plan yet.
     if [ -n "$gate" ]; then
@@ -154,7 +205,7 @@ if [ "$answered" = "yes" ]; then
     else
         log "agent answered; learning gate open=${gate}; no plan recorded yet"
     fi
-    write_state "$now" "$gate" "$def_start" "$def_stop"
+    write_state "$now" "$gate" "$def_start" "$def_stop" "${intended:-}"
     rm -f "${STATE_FILE}.notified"
     exit 0
 fi
@@ -223,6 +274,18 @@ if [ -z "$mep_start" ] || [ -z "$kub_stop" ]; then
     log "could not parse thresholds from /config; leaving them alone"
     exit 1
 fi
+
+# Whose thresholds are these? Only the agent's own are the watchdog's to
+# reset. Anything else in force was put there by the owner, and a silent
+# agent is no reason to undo it.
+intended_matches_live "$STATE_FILE" "$cfg"
+case $? in
+    0) ;;
+    1)  log "agent silent $(( silence / 3600 )) h, but MEP ${mep_start}/${mep_stop}, Kubota ${kub_start}/${kub_stop} are not what it last wrote: owner-set, leaving alone"
+        exit 0 ;;
+    *)  log "agent silent $(( silence / 3600 )) h, and its last write is not recorded, so these thresholds cannot be shown to be its own: owner-set, leaving alone"
+        exit 0 ;;
+esac
 
 at_default=$(python3 -c "
 vals = [float('$mep_start'), float('$mep_stop'), float('$kub_start'), float('$kub_stop')]
