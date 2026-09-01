@@ -57,6 +57,7 @@ class StubModel:
                                        rate["gross_w"] - self.expected_load,
                                        rate["soc_per_h"])
         return {"ok": ok, "rate": rate, "hours": hours, "basis": self.basis,
+                "net_w": rate["gross_w"] - self.expected_load,
                 "why": (f"{target_v:.1f} reachable in {hours:.1f} h at {phrase}"
                         if ok else
                         f"{target_v:.1f} needs {hours:.1f} h at {phrase} but "

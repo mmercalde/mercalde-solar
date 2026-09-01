@@ -34,6 +34,7 @@ import policy as policymod
 import prompts
 import telegram
 import tools as toolsmod
+import topup as topupmod
 import weather
 from llm import LLM, LLMError
 
@@ -100,7 +101,9 @@ class Agent:
         # run off the main thread, and sqlite3 forbids sharing a connection.
         history.connect(self.db_path).close()
         self.model = loadmodel.LoadModel(self.connection, cfg)
-        self.guard = guardmod.Guard(self.connection, cfg, model=self.model)
+        self.topup = topupmod.TopUp(cfg)
+        self.guard = guardmod.Guard(self.connection, cfg, model=self.model,
+                                    topup=self.topup)
         self.llm = LLM(cfg)
         self.lock = threading.Lock()          # one model conversation at a time
         self.anomaly_last = {}
@@ -202,8 +205,45 @@ class Agent:
             "run_window_h": run_window_h,
             "charge_rates": self.model.charge_rates(now=now),
         }
+        # The state machine sees the tick before the rules do: POLICY 4 asks
+        # what state each generator is in, and a generator that started three
+        # minutes ago has to be `running` by the time it is asked.
+        facts["topup_moves"] = self.topup.advance(
+            self.topup_observations(facts), now)
+        facts["topup"] = self.topup.snapshot()
         facts["policy"] = policymod.evaluate(self.cfg, facts, self.model)
         return facts
+
+    def topup_observations(self, facts):
+        """What the state machine needs to know about each generator now."""
+        data, live = facts["data"], facts["config"]
+        out = {}
+        for gen, cfg_key, act, mode, online in (
+                ("mep", "mep803a", "mep803aAction", "mep803aMode", "mepAgsOnline"),
+                ("kubota", "kubota", "kubotaAction", "kubotaMode",
+                 "kubotaAgsOnline")):
+            try:
+                cap = min(live[cfg_key]["maxRuntime"],
+                          self.cfg["ags_max_run_hours"][gen] * 60)
+            except (KeyError, TypeError):
+                cap = self.cfg["ags_max_run_hours"][gen] * 60
+            out[gen] = {
+                "action": data.get(act), "mode": data.get(mode),
+                "ags_online": data.get(online),
+                "auto_gen_enabled": data.get("autoGenEnabled"),
+                "voltage": facts["voltage"],
+                "stop_v": (live.get(cfg_key) or {}).get("stopVoltage"),
+                "cap_minutes": cap,
+                "run": self.latest_run(gen, facts["now"]),
+            }
+        return out
+
+    def latest_run(self, gen, now):
+        """The newest finished run for this generator, as a plain dict."""
+        row = self.conn.execute(
+            "SELECT * FROM gen_runs WHERE gen=? AND stop_ts IS NOT NULL "
+            "ORDER BY stop_ts DESC LIMIT 1", (gen,)).fetchone()
+        return dict(row) if row is not None else None
 
     # --- the plan record ----------------------------------------------------
 
@@ -457,6 +497,13 @@ class Agent:
         except Exception as e:                       # noqa: BLE001
             log.warning("store update failed, continuing: %s", e)
 
+        # What the state machine owes the owner, before anything else is said
+        # about the tick.
+        try:
+            self.notify_topup(facts)
+        except Exception as e:                       # noqa: BLE001
+            log.warning("could not send a top-up notice: %s", e)
+
         # Python's own write, before the model is asked anything: a start the
         # agent raised comes back the moment the generator is confirmed running.
         try:
@@ -533,14 +580,30 @@ class Agent:
             action = data.get("mep803aAction" if gen == "mep" else "kubotaAction")
             running = action == history.GEN_RUNNING
             ended = self._ran_since(gen, note.get("since", 0), facts["now"])
-            if not running and not ended:
+            # Every state past `requested` is a state in which the raised
+            # start has done all it will ever do: the generator is running,
+            # the run is over, the owner took it, or it never started. The
+            # start goes back on any of them.
+            state = self.topup.status(gen)
+            spent = state in (topupmod.RUNNING, topupmod.DONE,
+                              topupmod.STOPPED_BY_OWNER,
+                              topupmod.FAILED_TO_START)
+            if not running and not ended and not spent:
                 continue
             if want[skey] <= base[skey] + guardmod.EPS:
                 self.guard.clear_raised(gen)     # already back, nothing to write
                 continue
-            want[skey] = max(base[skey], guardmod.HARD_START_FLOOR)
+            # Lowering only. A start that comes back never goes up on the
+            # way, whatever the baseline says.
+            back_to = max(base[skey], guardmod.HARD_START_FLOOR)
+            if back_to > want[skey] + guardmod.EPS:
+                self.guard.clear_raised(gen)
+                continue
+            want[skey] = back_to
             done.append(gen)
-            why[gen] = "is running" if running else "has finished its run"
+            why[gen] = ("is running" if running else
+                        "never started" if state == topupmod.FAILED_TO_START
+                        else "has finished its run")
         if not done:
             return []
 
@@ -570,6 +633,32 @@ class Agent:
             voltage=facts["voltage"], default_start=self.cfg["default_start"]))
         log.info("returned raised start(s) %s to the baseline", ", ".join(done))
         return done
+
+    def notify_topup(self, facts):
+        """One Telegram per generator that stopped being the agent's tonight.
+
+        Driven by the state, not by the transition that produced it: whichever
+        call to gather() moved the machine, the message is still owed and is
+        still sent exactly once.
+        """
+        sent = []
+        for gen in self.topup.pending_notices():
+            entry = self.topup.entry(gen)
+            skey = "mep_start" if gen == "mep" else "kub_start"
+            base = self.guard.baseline()[skey]
+            if entry["state"] == topupmod.FAILED_TO_START:
+                other = next((g for g in topupmod.GENS if g != gen
+                              and self.topup.status(g) == topupmod.IDLE), None)
+                text = topupmod.failed_to_start_message(gen, entry, base, other)
+            else:
+                text = topupmod.stopped_by_owner_message(gen, entry)
+            if self.dry_run:
+                log.info("would tell the owner: %s", text)
+            else:
+                telegram.send(self.cfg, telegram.escape(text))
+            self.topup.mark_notified(gen)
+            sent.append(gen)
+        return sent
 
     def _ran_since(self, gen, since, now):
         row = self.conn.execute(

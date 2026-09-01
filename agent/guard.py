@@ -66,10 +66,14 @@ RESTORE_DEFAULT_RE = re.compile(
 
 
 class Guard:
-    def __init__(self, conn, cfg, model=None, state_path=None):
+    def __init__(self, conn, cfg, model=None, state_path=None, topup=None):
         self._conn = conn
         self.cfg = cfg
         self.model = model or loadmodel.LoadModel(conn, cfg)
+        # The top-up state machine. The guard is where a raised start is
+        # recorded and where an owner's edit is detected, so it is where both
+        # transitions have to be raised from.
+        self.topup = topup
         self.state_path = state_path or os.path.join(config.DATA_DIR, "guard_state.json")
         self.state = self._load_state()
         self.last_seen = None
@@ -113,10 +117,16 @@ class Guard:
         now = int(now or time.time())
         base = self.baseline()
         raised = dict(self.state.get("raised_starts") or {})
-        for gen, skey, _, _ in GEN_KEYS:
+        for gen, skey, pkey, _ in GEN_KEYS:
             if applied[skey] > base[skey] + EPS:
+                fresh = gen not in raised
                 raised.setdefault(gen, {"since": now, "baseline": base[skey],
                                         "start": applied[skey]})
+                # A start that has just gone up is the top-up being asked for.
+                # It is asked once: the state machine refuses a second request
+                # for the same generator on the same night.
+                if fresh and self.topup is not None:
+                    self.topup.request(gen, applied[skey], applied[pkey], now)
             else:
                 raised.pop(gen, None)
         self.state["raised_starts"] = raised

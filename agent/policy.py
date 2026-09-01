@@ -24,6 +24,7 @@ import math
 import re
 
 import history
+import topup as topupmod
 
 # Guard rule 1's separation lives in the manifest and reaches here through
 # config, so a proposal is never born invalid and there is only one copy of
@@ -150,28 +151,106 @@ def _proposal(cfg, gens, target, start, baseline):
     return values
 
 
-def _bands(cfg):
-    """[(name, generators, ceiling Wh)] smallest first, ending open-ended."""
+def _bands(cfg, available=None):
+    """[(name, generators, ceiling Wh)] smallest first, ending open-ended.
+
+    A generator that has already had its turn tonight - it ran, the owner
+    took it, or it was asked and never started - is not in `available`, and
+    every band that needs it is dropped. Whatever band is left on top becomes
+    the open-ended one, because it is then the most that can be asked for.
+    """
     conf = cfg.get("topup_bands") or {}
     kub, mep = conf.get("kubota"), conf.get("mep")
-    return [("Kubota", ("kubota",), kub),
-            ("MEP", ("mep",), mep),
-            ("both", ("mep", "kubota"), None)]
+    bands = [("Kubota", ("kubota",), kub),
+             ("MEP", ("mep",), mep),
+             ("both", ("mep", "kubota"), None)]
+    if available is None:
+        return bands
+    have = set(available)
+    kept = [b for b in bands if set(b[1]) <= have]
+    if kept:
+        name, gens, _ = kept[-1]
+        kept[-1] = (name, gens, None)
+    return kept
 
 
-def _band_for(cfg, deficit_wh):
+def _band_for(cfg, deficit_wh, available=None):
     """The band the deficit lands in, and the ones above it to step through."""
-    bands = _bands(cfg)
+    bands = _bands(cfg, available)
     for i, (name, gens, ceiling) in enumerate(bands):
         if ceiling is None or deficit_wh <= ceiling:
             return i, bands
     return len(bands) - 1, bands
 
 
+def _held_by_state(cfg, f):
+    """Why the top-up state says tonight's decision is already made, or None.
+
+    Rule 4 evaluates in `idle` and nowhere else. Re-deriving it from the
+    voltage on every tick is what produced three different Kubota top-ups
+    between 7:20 and 8:55 pm on 2026-08-30, the last of them written while
+    the Kubota was already running.
+    """
+    gens = ((f.get("topup") or {}).get("gens") or {})
+
+    def state(gen):
+        return (gens.get(gen) or {}).get("state", topupmod.IDLE)
+
+    def when(gen):
+        ts = (gens.get(gen) or {}).get("since")
+        return f" at {_clock(ts, cfg)}" if ts else ""
+
+    flight = [g for g in topupmod.GENS if state(g) in topupmod.IN_FLIGHT]
+    if flight:
+        return "; ".join(f"{g} is {state(g)}{when(g)}" for g in flight) + \
+               ", so tonight's top-up is already decided"
+    over = [g for g in topupmod.GENS
+            if state(g) in (topupmod.DONE, topupmod.STOPPED_BY_OWNER)]
+    if over:
+        return "; ".join(f"{g} is {state(g)}{when(g)}" for g in over) + \
+               ", and a top-up is once per night"
+    if not [g for g in topupmod.GENS if state(g) == topupmod.IDLE]:
+        return ("both generators were asked tonight and neither started, so "
+                "there is nothing left to ask")
+    return None
+
+
+def _held_for_autogen(f):
+    """Auto-gen off on the dashboard: a threshold cannot start anything.
+
+    Raising a start into a disabled auto-gen writes a number the Pi5 will not
+    act on, and five minutes later the state machine would report a generator
+    that "didn't start" and a controller that may need a reset. Neither is
+    true. The owner turned it off at 7:26 pm on 2026-08-30 and the agent went
+    on setting start thresholds for the next hour and a half.
+    """
+    if (f.get("data") or {}).get("autoGenEnabled") is False:
+        return ("auto-gen is disabled on the dashboard, so a start threshold "
+                "starts nothing")
+    return None
+
+
 def _window_for(f, gens):
     windows = f.get("run_window_h") or {}
     chosen = [windows[g] for g in gens if g in windows]
     return min(chosen) if chosen else None
+
+
+def _numbers(margin, want, band, reach):
+    """The figures a firing top-up carries, for the message the owner reads.
+
+    The POLICY line has always had them; the Telegram that followed a write
+    had four voltages and a sentence from the model. These are the same
+    numbers, so the two cannot say different things about one decision.
+    """
+    r = reach or {}
+    return {"margin_pct": margin,
+            "padded_wh": (want or {}).get("padded_wh"),
+            "band": band,
+            "net_w": r.get("net_w"),
+            "run_minutes": (round(r["hours"] * 60) if r.get("hours") is not None
+                            else None),
+            "reach_basis": r.get("basis")}
 
 
 def solo_top_up(cfg, f, model):
@@ -183,9 +262,16 @@ def solo_top_up(cfg, f, model):
     that calculation rather than its purpose.
     """
     name = "top-up"
-    held = _held_for_daylight(cfg, f)
+    held = _held_for_daylight(cfg, f) or _held_for_autogen(f) \
+        or _held_by_state(cfg, f)
     if held:
-        return _rule(4, name, False, held, held=True)
+        d = f.get("deficit") or {}
+        seen = (f"deficit {d['deficit_wh']:,} Wh; "
+                if d.get("deficit_wh") is not None else "")
+        return _rule(4, name, False, seen + held, held=True)
+    available = [g for g in topupmod.GENS
+                 if ((f.get("topup") or {}).get("gens", {}).get(g) or {})
+                 .get("state", topupmod.IDLE) == topupmod.IDLE]
 
     v, soc = f.get("voltage"), f.get("soc")
     baseline = f.get("baseline") or {}
@@ -232,7 +318,10 @@ def solo_top_up(cfg, f, model):
             f"{least_stop:.1f}, over the {ceiling:.1f} ceiling, so no run can "
             f"be started now"]))
 
-    index, bands = _band_for(cfg, deficit)
+    index, bands = _band_for(cfg, deficit, available)
+    if not bands:
+        return _rule(4, name, False, "; ".join(parts + [
+            "no generator is still available tonight"]), held=True)
     tried = []
     while index < len(bands):
         label, gens, band_max = bands[index]
@@ -265,7 +354,8 @@ def solo_top_up(cfg, f, model):
             return _rule(4, name, True, "; ".join(parts),
                          _proposal(cfg, gens, target, start, baseline),
                          gen="+".join(gens), target=target, mode=label.lower(),
-                         deficit_wh=deficit, start=start)
+                         deficit_wh=deficit, start=start,
+                         **_numbers(margin, want, band, reach))
         tried.append(f"{band} {reach['why']}")
         index += 1
 
@@ -288,7 +378,9 @@ def solo_top_up(cfg, f, model):
     return _rule(4, name, True, "; ".join(parts),
                  _proposal(cfg, gens, lower, start, baseline),
                  gen="+".join(gens), target=lower, mode="both",
-                 deficit_wh=deficit, start=start)
+                 deficit_wh=deficit, start=start,
+                 **_numbers(margin, None, f"{label} band, the most they reach",
+                            None))
 
 
 # --- POLICY 3: the two stop-voltage cases -----------------------------------

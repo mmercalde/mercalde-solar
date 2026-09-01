@@ -53,6 +53,7 @@ Every 15 minutes, day and night:
 |---|---|
 | `agent.py` | the tick loop, plan record, digests, Telegram inbound, anomalies |
 | `policy.py` | the numeric POLICY rules, computed rather than left to the model |
+| `topup.py` | the per-generator top-up state machine POLICY 4 runs on |
 | `guard.py` | the hard rules; every write passes through it |
 | `tools.py` | the eight read tools and the single write, as OpenAI schemas |
 | `eval_cases.py` | Q&A cases and their graders, for `model_eval.py --exam` |
@@ -175,6 +176,42 @@ agent/venv/bin/python -c "import sys; sys.path.insert(0,'agent'); \
   import config, history, loadmodel, json; c = config.load(); \
   print(json.dumps(loadmodel.LoadModel(history.connect(), c).learning_status(), indent=1))"
 ```
+
+## The top-up state machine
+
+POLICY 4 used to be re-derived from the pack's voltage on every tick, with no
+memory of what it had already done. On the night of 2026-08-30 that produced
+three separate Kubota top-ups between 7:20 and 8:55 pm — 54.1/56.1, then
+54.0/56.0, then 54.6/56.6 — the last of them written while the Kubota was
+already running.
+
+So the decision is a state now, one per generator, in `topup.py` and
+persisted to `data/topup_state.json`:
+
+```
+idle → requested → running → done
+                 ↘         ↘ stopped_by_owner
+                   failed_to_start
+```
+
+`idle` is the only state rule 4 evaluates in, and a generator leaves it once
+per night. A night is named by the sunset that opened it, so what a run
+settles at eleven at night still holds at ten the next morning.
+
+| state | how it is entered | what follows |
+|---|---|---|
+| `requested` | the agent raised that generator's start | the 2 V spread is fixed here and never re-applied |
+| `running` | `*Action == 9` seen | its start goes straight back to the owner's baseline, and nothing more is proposed for it |
+| `done` | the run ended on its stop voltage or its runtime cap | held until the next sunset |
+| `stopped_by_owner` | the run ended short of both, or the AGS mode went Off, or the owner edited `/config` | held until the next sunset, one Telegram |
+| `failed_to_start` | asked, pack under the start, nothing running five minutes later | start returned, one Telegram naming the AGS state, and the top-up is re-evaluated with the other generator |
+
+The rule also holds while `autoGenEnabled` is false. A start threshold written
+into a disabled auto-gen starts nothing, and five minutes later the machine
+would report a generator that "didn't start" and a controller that may need a
+reset — neither of which would be true. The owner turned auto-gen off at
+7:26 pm on 2026-08-30 and the agent went on setting start thresholds for the
+next hour and a half.
 
 ## The guard
 

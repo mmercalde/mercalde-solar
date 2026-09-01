@@ -218,7 +218,8 @@ def test_the_rule_is_held_while_the_sun_is_still_producing(cfg, night, model):
     """It fired at 9:36 am and started the MEP. The day's solar goes in first."""
     r = policy.solo_top_up(cfg, daytime(cfg, night), model)
     assert not r["fires"] and r["held"]
-    assert r["detail"] == "held until 7:24 pm; remaining solar today 8.2 kWh"
+    assert r["detail"] == ("deficit 9,000 Wh; held until 7:24 pm; "
+                           "remaining solar today 8.2 kWh")
     assert policy.line(r).startswith("POLICY 4 top-up: held")
 
 
