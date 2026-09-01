@@ -32,6 +32,7 @@ import history
 import loadmodel
 import policy as policymod
 import prompts
+import sun
 import telegram
 import tools as toolsmod
 import topup as topupmod
@@ -719,8 +720,8 @@ class Agent:
                 "ORDER BY battery_v LIMIT 1", (since,)).fetchone()
             if predicted:
                 at = history.clock(source_ts, self.cfg)
-                lines.append(f"predicted 52.0 V at "
-                             f"{self.model.projection_label(predicted, source_ts)}"
+                lines.append(f"predicted 52.0 V "
+                             f"{self._crossing_label(predicted, source_ts)}"
                              f"  (from the {at} plan)")
             else:
                 lines.append("no 52.0 V projection was made last night")
@@ -746,6 +747,26 @@ class Agent:
             return text
         telegram.send(self.cfg, text)
         return text
+
+    def _crossing_label(self, projection, source_ts):
+        """How the overnight report writes the projected 52.0 V crossing.
+
+        A bare clock time reads as last night. It is only last night if the
+        crossing fell in the overnight window - between the plan that made it
+        and the sunrise that ended that night. A plan can project past that
+        sunrise, into the following evening, and printing "9:10 pm" for it
+        told the owner the pack had crossed while they slept when it had not
+        crossed at all. Past the sunrise, say so, and carry the date so the
+        time cannot be read as the wrong night.
+        """
+        label = self.model.projection_label(projection, source_ts)
+        sunrise = sun.next_sunrise(self.cfg, now=source_ts)
+        reached = (projection or {}).get("reached")
+        if not sunrise or not reached or reached <= sunrise:
+            return f"at {label}"
+        t = history.local(reached, self.cfg)
+        return (f"not before sunrise (next crossing "
+                f"{history.fmt_clock(t)} {t.strftime('%b')} {t.day})")
 
     def reference_projection(self, now):
         """(tick ts, projection) the overnight report is scored against.

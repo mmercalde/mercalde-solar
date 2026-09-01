@@ -314,6 +314,40 @@ def test_the_report_names_the_plan_it_scored(a, cfg, morning, monkeypatch, capsy
     assert "predicted 52.0 V at 3:08 am  (from the 7:00 pm plan)" in text
 
 
+def test_a_crossing_past_sunrise_is_not_printed_as_a_bare_time(
+        a, cfg, morning, monkeypatch, capsys):
+    """The 7:00 pm plan projected 9:10 pm the following evening. Printed as
+    "at 9:10 pm" it read as a crossing the owner slept through."""
+    tz = history.tzinfo(cfg)
+    when = datetime(2026, 8, 27, 19, 0, tzinfo=tz)
+    reached = datetime(2026, 8, 28, 21, 10, tzinfo=tz)
+    history.record_plan(a.conn, "plan at 19:00",
+                        {"projection": {"reached": int(reached.timestamp())}},
+                        ts=int(when.timestamp()))
+    f = base_facts(cfg)
+    f["now"] = morning
+    monkeypatch.setattr(a, "gather", lambda *x, **k: f)
+    text = a.digest(evening=False)
+    assert ("predicted 52.0 V not before sunrise "
+            "(next crossing 9:10 pm Aug 28)  (from the 7:00 pm plan)") in text
+    assert "at 9:10 pm" not in text
+
+
+def test_a_crossing_just_before_sunrise_still_prints_its_time(
+        a, cfg, morning, monkeypatch, capsys):
+    tz = history.tzinfo(cfg)
+    when = datetime(2026, 8, 27, 19, 0, tzinfo=tz)
+    reached = datetime(2026, 8, 28, 5, 55, tzinfo=tz)
+    history.record_plan(a.conn, "plan at 19:00",
+                        {"projection": {"reached": int(reached.timestamp())}},
+                        ts=int(when.timestamp()))
+    f = base_facts(cfg)
+    f["now"] = morning
+    monkeypatch.setattr(a, "gather", lambda *x, **k: f)
+    text = a.digest(evening=False)
+    assert "predicted 52.0 V at 5:55 am  (from the 7:00 pm plan)" in text
+
+
 # --- what the Pi5 watchdog is told to reset to ------------------------------
 
 def test_plan_json_offers_the_config_defaults_by_default(a, cfg):
