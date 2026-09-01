@@ -224,7 +224,12 @@ written to `data/audit.log` and the `actions` table.
    2.0 V above start.
 2. **No-op** — refuse if all four values already match `/config`.
 3. **Running generator** — its stop may be raised, never lowered. Its start
-   is irrelevant mid-run.
+   is irrelevant mid-run. And while a generator's top-up is in flight —
+   `requested` or `running` — neither its start nor its stop may be raised
+   past what that top-up asked for. A top-up is decided once, and the lift
+   that clears the start by the 2.0 V separation is computed with it. Once
+   the run is over the ceiling lifts and POLICY 3 can raise a stop before a
+   storm like any other night.
 4. **Reachability** — a generator that will fire now must be able to reach
    its stop at its own observed charge rate, inside
    `min(Pi5 maxRuntime, ags_max_run_hours)`. No observed rate means refuse.

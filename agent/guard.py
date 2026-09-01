@@ -25,6 +25,7 @@ import loadmodel
 import policy as policymod
 import sun as sunmod
 import system as systemmod
+import topup as topupmod
 
 log = logging.getLogger(__name__)
 
@@ -532,7 +533,40 @@ class Guard:
             return (f"{gen} is running; its stop cannot be lowered from "
                     f"{live[cfg_key]['stopVoltage']} to {stop} mid-run "
                     f"(raising is allowed)")
+        asked = self.top_up_asked(gen)
+        if asked:
+            if start > asked["start"] + EPS:
+                return (f"{gen}'s top-up already asked for a start of "
+                        f"{asked['start']}; {start} would raise it again, and "
+                        f"a top-up is decided once")
+            if stop > asked["stop"] + EPS:
+                return (f"{gen}'s top-up already asked for a stop of "
+                        f"{asked['stop']}; {stop} would raise it again, and "
+                        f"the separation above the start is computed once")
         return None
+
+    def top_up_asked(self, gen):
+        """The start and stop this generator's live top-up asked for, or None.
+
+        The ceiling on a proposal while the top-up is in flight. Rule 4 used
+        to re-derive both numbers every tick from a pack voltage that moves,
+        and because the stop is lifted to clear the start by the separation
+        this guard requires, a start that drifted up carried the stop up with
+        it: 54.1/56.1, then 54.0/56.0, then 54.6/56.6 in ninety minutes on
+        2026-08-30, the last of them onto a generator already running.
+
+        It applies only while the generator is `requested` or `running`. Once
+        the run is over the start is back at the baseline and POLICY 3 is free
+        to raise a stop before a storm like any other night.
+        """
+        if self.topup is None:
+            return None
+        entry = self.topup.entry(gen)
+        if entry.get("state") not in topupmod.IN_FLIGHT:
+            return None
+        if entry.get("start") is None or entry.get("stop") is None:
+            return None
+        return {"start": entry["start"], "stop": entry["stop"]}
 
     def _trim(self, want, data, live, live_now, v, soc, now):
         """(values to write, what was dropped and why).

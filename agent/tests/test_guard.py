@@ -707,6 +707,73 @@ def test_restoring_the_baseline_is_still_an_owner_action(ready, cfg, now):
     assert ready.state["override_until"] == now + guardmod.OWNER_OVERRIDE_SECONDS
 
 
+# --- no creeping ------------------------------------------------------------
+
+@pytest.fixture
+def asked(ready, cfg, now, tmp_path):
+    """Kubota's top-up asked for 54.1/56.1 at 7:21 pm and is in flight."""
+    import topup as topupmod
+    ready.topup = topupmod.TopUp(cfg, path=str(tmp_path / "topup.json"))
+    ready.topup.roll(now)
+    ready.topup.request("kubota", 54.1, 56.1, now - 1800)
+    ready.state["last_write_ts"] = 0
+    return ready
+
+
+def test_a_requested_start_is_not_raised_again(asked, cfg, now):
+    """7:20 pm asked 54.1/56.1, 8:54 pm asked 54.6/56.6. The second is churn."""
+    ok, why = asked.check(52.0, 56.0, 54.6, 56.6, "POLICY 4 top-up", now=now,
+                          status=make_status(cfg, now, mep_stop=56.0,
+                                             kub_start=54.1, kub_stop=56.1))
+    assert not ok and "already asked for a start of 54.1" in why
+    assert "decided once" in why
+
+
+def test_a_requested_stop_is_not_raised_again(asked, cfg, now):
+    """The stop is lifted once to clear the start by 2.0 V. Re-deriving it
+    from a start that has drifted up carries it up too: 56.1, then 56.6."""
+    ok, why = asked.check(52.0, 56.0, 54.1, 56.6, "POLICY 4 top-up", now=now,
+                          status=make_status(cfg, now, mep_stop=56.0,
+                                             kub_start=54.1, kub_stop=56.1))
+    assert not ok and "already asked for a stop of 56.1" in why
+    assert "computed once" in why
+
+
+def test_the_start_may_always_come_back_down(asked, cfg, now):
+    ok, why = asked.check(52.0, 56.0, 52.0, 56.1,
+                          "kubota is running, so its start returns to 52.0",
+                          now=now, status=make_status(cfg, now, mep_stop=56.0,
+                                                      kub_start=54.1,
+                                                      kub_stop=56.1))
+    assert ok, why
+
+
+def test_the_other_generator_is_not_held_by_it(asked, cfg, now):
+    ok, why = asked.check(54.5, 56.5, 54.1, 56.1, "POLICY 4 top-up", now=now,
+                          status=make_status(cfg, now, mep_stop=56.0,
+                                             kub_start=54.1, kub_stop=56.1),
+                          policy=a_firing_rule(cfg, now))
+    assert ok, why
+
+
+def test_a_finished_top_up_does_not_hold_a_storm_stop(asked, cfg, now):
+    """Once the run is over the ceiling lifts: POLICY 3 raises both stops
+    before a storm on any night."""
+    import topup as topupmod
+    asked.topup.advance({"kubota": {"action": history.GEN_RUNNING, "mode": 2}},
+                        now - 1700)
+    asked.topup.advance({"kubota": {"action": history.GEN_STOPPED, "mode": 2,
+                                    "stop_v": 56.1, "cap_minutes": 120.0,
+                                    "run": {"stop_v": 56.2,
+                                            "duration_min": 25.0}}}, now - 60)
+    assert asked.topup.status("kubota") == topupmod.DONE
+    ok, why = asked.check(52.0, 57.0, 52.0, 57.0, "POLICY 3 storm stop",
+                          now=now, status=make_status(cfg, now, mep_stop=56.0,
+                                                      kub_start=52.0,
+                                                      kub_stop=56.1))
+    assert ok, why
+
+
 # --- startup: whose thresholds are these? -----------------------------------
 
 def test_the_agents_own_raised_start_is_not_adopted_as_the_owners(ready, now):
