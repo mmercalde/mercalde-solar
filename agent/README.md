@@ -200,15 +200,25 @@ capacity — and that capacity is itself derived from the same shunt's
 amp-hours, so the measurement was its own only check. A shunt that had
 drifted would have been believed twice.
 
-`loadmodel.py` learns the answer from the house instead. For every hour the
-pack was doing nothing but supplying it — between sunset and sunrise, no
-generator producing, no solar, voltage falling — the hour's load watt-hours
-are spread across the quarter-volt bins between its high and low reading, in
+`loadmodel.py` learns the answer from the record instead. For every hour the
+pack was doing nothing but supplying the house — between sunset and sunrise,
+no generator producing, no solar, voltage falling — the hour's watt-hours are
+spread across the quarter-volt bins between its high and low reading, in
 proportion to how much of each bin it crossed. Each night contributes a
 watt-hours-per-volt to every bin it passes through; the curve is the median
 across nights, bin by bin, walked through the same recency tiers as the
 overnight profile: last 14 nights, last 60 days, this month in prior years,
 all history. The first tier that can answer the range asked for wins.
+
+Those watt-hours are the **pack's**, not the house's: `hourly` device
+`battery`, column `wh_out`, which is `/SYS/BATT_INV/ENERGY_HOUR` from the
+gateway on backfilled hours and the integral of negative battery power on
+live ones. Inverter tare and conversion losses are inside it, which is
+right — the pack pays them, and the question is how much has to leave the
+battery to move it from one voltage to another. The same series answers what
+the night needs: `_drain_wh` and `overnight_drawdown` both walk the pack's
+profile, so the deficit nets one shunt-side figure against another instead of
+setting what the pack holds against what the house will receive.
 
 The plan record says which:
 
@@ -216,6 +226,24 @@ The plan record says which:
 deficit 7,144 Wh to sunrise above 52.0 V
   (needs 17,511, holds 21,232 Wh above 52.0 V (learned Wh-vs-V, 25 nights))
 ```
+
+### System overhead
+
+The AC load counter is still read, for one purpose: the ratio between them.
+Per night, over the same clean overnight discharge hours, the pack's
+watt-hours out divided by the house's watt-hours in — everything between the
+battery terminals and a socket, and the plan record shows it:
+
+```
+overnight Wh out of the pack: 16,640 — from last 14 nights (9 nights)
+system overhead: 1.023x (pack out ÷ house in, 1.015-1.037 over 8 nights, last 14 nights)
+```
+
+Nothing computes with it. Both the curve and the drawdown are measured on the
+pack's side already, so there is nothing left for a ratio to correct; it is
+there so the owner can see what the house never receives, and so a change in
+it — an inverter left in a different mode, a new standby load on the DC bus —
+shows up as a number rather than as a slow drift in everything else.
 
 A stretch of voltage no night crossed is a gap, not a guess: the curve says
 `no night crossed 52.00-52.25 V` and the deficit reports that it cannot be

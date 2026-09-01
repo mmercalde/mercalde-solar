@@ -15,19 +15,30 @@ def ts_at(cfg, day, hour):
                .replace(hour=hour, tzinfo=tz).timestamp())
 
 
-def add_load_hour(conn, cfg, day, hour, wh, source="live"):
-    history.put_hourly(conn, ts_at(cfg, day, hour), "load",
+def add_load_hour(conn, cfg, day, hour, wh, source="live", overhead=1.0):
+    """One hour of house load, and the pack discharge that paid for it.
+
+    Both series, because the model reads the pack's for anything it is going
+    to compare with what the pack holds and the house's only for the ratio
+    between them. `overhead` is that ratio: 1.0 unless a test is about it.
+    """
+    ts = ts_at(cfg, day, hour)
+    history.put_hourly(conn, ts, "load",
                        None, None, None, wh, None, None, 60, source)
+    history.put_hourly(conn, ts, "battery",
+                       None, None, 0, wh * overhead, None, None, 60, source)
 
 
 def add_discharge_night(conn, cfg, night, top_v=56.0, bottom_v=52.0,
                         wh_per_hour=1000, hours=(20, 21, 22, 23, 0, 1, 2, 3),
-                        source="live"):
+                        source="live", overhead=1.0):
     """One clean overnight discharge, for the Wh-vs-V curve.
 
-    The pack walks down in equal steps while the house draws the same each
-    hour, so the curve is a flat Wh per volt and a test can state what it
-    should say: 56.0 to 52.0 over eight hours at 1,000 Wh is 2,000 Wh a volt.
+    The pack walks down in equal steps while it gives up the same each hour,
+    so the curve is a flat Wh per volt and a test can state what it should
+    say: 56.0 to 52.0 over eight hours at 1,000 Wh is 2,000 Wh a volt. The
+    watt-hours are the pack's; `overhead` says how much of them the house
+    actually received.
     """
     d0 = datetime.strptime(night, "%Y-%m-%d").date()
     step = (top_v - bottom_v) / len(hours)
@@ -38,8 +49,8 @@ def add_discharge_night(conn, cfg, night, top_v=56.0, bottom_v=52.0,
         lo = hi - step
         history.put_hourly(conn, ts, "battery", (hi + lo) / 2, None, 0,
                            wh_per_hour, lo, hi, 60, source)
-        history.put_hourly(conn, ts, "load", None, None, None, wh_per_hour,
-                           None, None, 60, source)
+        history.put_hourly(conn, ts, "load", None, None, None,
+                           wh_per_hour / overhead, None, None, 60, source)
         history.put_hourly(conn, ts, "solar", None, None, 0, None, None, None,
                            60, source)
         history.put_hourly(conn, ts, "gen", None, None, 0, None, None, None,
@@ -55,14 +66,14 @@ def add_discharge_nights(conn, cfg, first="2026-08-10", n=5, **kw):
 
 
 def build_load_history(conn, cfg, days=30, start="2026-07-01",
-                       night_wh=900, day_wh=400):
+                       night_wh=900, day_wh=400, overhead=1.0):
     """A month of hourly load: heavier at night, lighter while the sun is up."""
     d0 = datetime.strptime(start, "%Y-%m-%d").date()
     for i in range(days):
         day = (d0 + timedelta(days=i)).strftime("%Y-%m-%d")
         for hour in range(24):
             wh = day_wh if 7 <= hour < 19 else night_wh
-            add_load_hour(conn, cfg, day, hour, wh)
+            add_load_hour(conn, cfg, day, hour, wh, overhead=overhead)
 
 
 @pytest.fixture
@@ -1037,13 +1048,13 @@ def test_monotonicity_does_not_disturb_the_low_end(conn, cfg, lm):
 
 # --- recency: this year's pattern beats last year's -------------------------
 
-def nights_of(conn, cfg, start, days, wh):
+def nights_of(conn, cfg, start, days, wh, overhead=1.0):
     """`days` whole nights of a given hourly load, from `start`."""
     d0 = datetime.strptime(start, "%Y-%m-%d").date()
     for i in range(days):
         day = (d0 + timedelta(days=i)).strftime("%Y-%m-%d")
         for hour in range(24):
-            add_load_hour(conn, cfg, day, hour, wh)
+            add_load_hour(conn, cfg, day, hour, wh, overhead=overhead)
 
 
 @pytest.fixture
@@ -1419,3 +1430,112 @@ def test_no_disagreement_at_or_below_the_floor(cfg, deficit_pack):
 
 def test_no_disagreement_without_a_curve_to_disagree_with(conn, cfg, lm):
     assert lm.soc_disagreement(80, 55.0, now=when(cfg)) is None
+
+
+# --- the curve is measured on the pack's side -------------------------------
+#
+# It used to count the watt-hours the house received. What the curve is asked
+# for is how much has to leave the battery to get from one voltage to
+# another, and the inverters take their tare out of that before the house
+# sees a watt.
+
+def test_the_curve_counts_what_left_the_pack_not_what_arrived(conn, cfg):
+    """A night that gave up 1,000 Wh an hour so the house could have 800."""
+    add_discharge_nights(conn, cfg, wh_per_hour=1000, overhead=1.25)
+    lm = loadmodel.LoadModel(conn, cfg)
+    r = lm.energy_above(52.0, 56.0, now=when(cfg))
+    assert r["wh"] == 8000, "the pack's watt-hours, not the 6,400 delivered"
+
+
+def test_the_curve_says_which_series_it_is(conn, cfg, curve_nights):
+    assert curve_nights.energy_curve_status()["series"] == "battery"
+
+
+def test_an_hour_with_no_discharge_counter_is_not_in_the_curve(conn, cfg):
+    """The load row alone is not evidence about the pack."""
+    for i in range(5):
+        night = (datetime(2026, 8, 10) + timedelta(days=i)).strftime("%Y-%m-%d")
+        for j, h in enumerate((20, 21, 22, 23)):
+            ts = ts_at(cfg, night, h)
+            history.put_hourly(conn, ts, "battery", 54.0, None, 0, None,
+                               54.0 - j * 0.5, 54.5 - j * 0.5, 60, "live")
+            history.put_hourly(conn, ts, "load", None, None, None, 1000,
+                               None, None, 60, "live")
+    conn.commit()
+    lm = loadmodel.LoadModel(conn, cfg)
+    assert lm._discharge_nights(when(cfg)) == {}
+
+
+# --- the overhead ratio ------------------------------------------------------
+
+def test_the_overhead_is_what_the_house_never_receives(conn, cfg):
+    add_discharge_nights(conn, cfg, wh_per_hour=1000, overhead=1.25)
+    lm = loadmodel.LoadModel(conn, cfg)
+    o = lm.system_overhead(now=when(cfg))
+    assert round(o["ratio"], 3) == 1.25
+    assert o["nights"] == 5 and o["source"] == "last 14 nights"
+
+
+def test_the_overhead_reports_its_spread(conn, cfg):
+    """One night per ratio, so the median and the ends are all stated."""
+    for i, ov in enumerate((1.10, 1.15, 1.20, 1.25, 1.40)):
+        night = (datetime(2026, 8, 10) + timedelta(days=i)).strftime("%Y-%m-%d")
+        add_discharge_night(conn, cfg, night, overhead=ov)
+    lm = loadmodel.LoadModel(conn, cfg)
+    o = lm.system_overhead(now=when(cfg))
+    assert round(o["ratio"], 2) == 1.20
+    assert round(o["min"], 2) == 1.10 and round(o["max"], 2) == 1.40
+
+
+def test_the_overhead_walks_the_same_tiers(conn, cfg):
+    add_discharge_nights(conn, cfg, first="2026-06-01", n=10, overhead=1.50)
+    add_discharge_nights(conn, cfg, first="2026-08-10", n=5, overhead=1.10)
+    lm = loadmodel.LoadModel(conn, cfg)
+    o = lm.system_overhead(now=when(cfg))
+    assert o["source"] == "last 14 nights" and round(o["ratio"], 2) == 1.10
+
+
+def test_no_nights_no_overhead(conn, cfg, lm):
+    assert lm.system_overhead(now=when(cfg)) is None
+
+
+def test_the_overhead_is_only_reported_never_applied(conn, cfg):
+    """The curve and the drawdown are both measured on the pack's side, so
+    there is nothing left for the ratio to correct. It exists to be seen."""
+    add_discharge_nights(conn, cfg, wh_per_hour=1000, overhead=1.25)
+    lm = loadmodel.LoadModel(conn, cfg)
+    plain = lm.energy_above(52.0, 56.0, now=when(cfg))["wh"]
+    add_discharge_nights(conn, cfg, first="2026-08-15", n=5,
+                         wh_per_hour=1000, overhead=2.0)
+    lm = loadmodel.LoadModel(conn, cfg)
+    assert lm.energy_above(52.0, 56.0, now=when(cfg))["wh"] == plain
+    assert lm.system_overhead(now=when(cfg))["ratio"] > 1.25
+
+
+# --- what the night needs is also the pack's side ---------------------------
+
+def test_what_the_night_needs_is_what_leaves_the_pack(conn, cfg, monkeypatch):
+    """1,000 Wh an hour at the socket costs the pack 1,250. The deficit nets
+    what the pack holds against what the pack must give up, not against what
+    the house will receive."""
+    monkeypatch.setattr(weather, "hourly", lambda *a, **k: [])
+    build_load_history(conn, cfg, days=30, start="2026-08-01",
+                       night_wh=1000, day_wh=1000, overhead=1.25)
+    add_discharge_nights(conn, cfg)
+    base = ts_at(cfg, "2026-08-20", 20)
+    for i in range(20):
+        add_sample(conn, cfg, base + i * 60, 54.0, 60, -1000, ah=1000)
+    lm = loadmodel.LoadModel(conn, cfg)
+    d = lm.overnight_deficit(ts_at(cfg, "2026-08-21", 6),
+                             now=ts_at(cfg, "2026-08-20", 21))
+    assert d["needed_wh"] == 11250, "nine hours at 1,250 out of the pack"
+    assert d["available_wh"] == 4000
+    assert d["deficit_wh"] == 7250
+
+
+def test_the_drawdown_is_the_packs_side_too(conn, cfg, lm, august):
+    nights_of(conn, cfg, "2026-08-10", 10, 1000, overhead=1.25)
+    d = lm.overnight_drawdown(now=august)
+    assert d["series"] == "battery"
+    assert d["wh"] == 1250 * 11, "eleven hours out of the pack, not at the socket"
+    assert lm.overnight_drawdown(now=august, series="load")["wh"] == 1000 * 11

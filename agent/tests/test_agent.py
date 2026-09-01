@@ -27,6 +27,8 @@ def base_facts(cfg, gate_open=False, model=None):
         "forecast": {"learned": True, "hours": 12, "total_wh": 10800},
         "projection": {"reached": now + 43800, "at": "4:10 am", "hours": 12.2},
         "drawdown": {"wh": 10800, "month": 8, "nights": 12,
+                     "source": "last 14 nights", "series": "battery"},
+        "overhead": {"ratio": 1.18, "min": 1.09, "max": 1.34, "nights": 12,
                      "source": "last 14 nights"},
         "gate": {"open": gate_open},
         "soc_curve": {"points": 12, "soc_at_start_threshold": 41.0,
@@ -62,25 +64,27 @@ def test_plan_record_matches_the_spec_shape(a, cfg):
                         "Kubota solo, start 56.0 / stop 57.0; MEP 52.0 / 54.5",
                         "no (learning phase)")
     lines = rec.splitlines()
-    assert len(lines) == 10
+    assert len(lines) == 11
     assert lines[0] == "2026-08-28 4:00 pm  V 54.2  SOC 63%  load 1.1 kW"
     assert lines[1] == "peak today: 55.8 V  (threshold 57.0 -> solar shortfall)"
-    assert lines[2] == ("overnight Wh: 10,800 — from last 14 nights "
-                        "(12 nights)")
-    assert lines[3] == "projected 52.0 V at: 4:10 am   sunrise 6:31 am"
-    assert lines[4] == ("forecast tomorrow: 20% cloud, est. solar 61.0 kWh "
+    assert lines[2] == ("overnight Wh out of the pack: 10,800 — from "
+                        "last 14 nights (12 nights)")
+    assert lines[3] == ("system overhead: 1.180x (pack out ÷ house in, "
+                        "1.090-1.340 over 12 nights, last 14 nights)")
+    assert lines[4] == "projected 52.0 V at: 4:10 am   sunrise 6:31 am"
+    assert lines[5] == ("forecast tomorrow: 20% cloud, est. solar 61.0 kWh "
                         "(Aug clear-day 68.0)")
-    assert lines[5] == ("POLICY 3 storm stop 57.0: no (tomorrow 20% daylight "
+    assert lines[6] == ("POLICY 3 storm stop 57.0: no (tomorrow 20% daylight "
                         "cloud < 70%)")
-    assert lines[6] == ("POLICY 3 pre-dawn stop 54.5: no (52 V projected 4:10 am, "
+    assert lines[7] == ("POLICY 3 pre-dawn stop 54.5: no (52 V projected 4:10 am, "
                         "2.4 h before sunrise 6:31 am (window 2.0 h))")
-    assert lines[7].startswith("POLICY 4 top-up: FIRES (deficit 9,000 Wh to "
+    assert lines[8].startswith("POLICY 4 top-up: FIRES (deficit 9,000 Wh to "
                                "sunrise above 52.0 V")
-    assert "+15% is 10,350 Wh → stop 55.5" in lines[7]
-    assert "raised to 56.4 to clear a start above 54.2 V" in lines[7]
-    assert "MEP band (deficit ≤ 15,000 Wh)" in lines[7]
-    assert lines[8].startswith("recommend: Kubota solo")
-    assert lines[9] == "applied: no (learning phase)"
+    assert "+15% is 10,350 Wh → stop 55.5" in lines[8]
+    assert "raised to 56.4 to clear a start above 54.2 V" in lines[8]
+    assert "MEP band (deficit ≤ 15,000 Wh)" in lines[8]
+    assert lines[9].startswith("recommend: Kubota solo")
+    assert lines[10] == "applied: no (learning phase)"
 
 
 def test_the_plan_record_shows_a_rule_that_does_not_fire_and_why(a, cfg):
@@ -101,20 +105,22 @@ def test_peak_at_or_above_threshold_is_not_a_shortfall(a, cfg):
 def test_plan_record_says_what_it_has_not_learned(a, cfg):
     f = base_facts(cfg)
     f["drawdown"] = None
+    f["overhead"] = None
     f["projection"] = {"reached": None, "reason": "pack capacity not learned"}
     f["est_solar"] = None
     f["policy"] = policy.evaluate(cfg, f, StubModel())
     lines = a.plan_record(f, "no change", "no (learning phase)").splitlines()
-    assert lines[2] == "overnight Wh: not learned yet"
-    assert "not projected (pack capacity not learned)" in lines[3]
-    assert lines[4].endswith("not learned yet")
+    assert lines[2] == "overnight Wh out of the pack: not learned yet"
+    assert lines[3] == "system overhead: not learned yet"
+    assert "not projected (pack capacity not learned)" in lines[4]
+    assert lines[5].endswith("not learned yet")
 
 
 def test_a_projection_already_at_the_target_reads_now_not_a_question_mark(a, cfg):
     f = base_facts(cfg)
     f["projection"] = {"reached": f["now"], "at": "now", "hours": 0.0,
                        "reason": "already at or below target"}
-    line = a.plan_record(f, "x", "y").splitlines()[3]
+    line = a.plan_record(f, "x", "y").splitlines()[4]
     assert line == "projected 52.0 V at: now   sunrise 6:31 am"
     assert "?" not in line
 
@@ -122,7 +128,7 @@ def test_a_projection_already_at_the_target_reads_now_not_a_question_mark(a, cfg
 def test_a_projection_with_no_label_is_still_not_a_question_mark(a, cfg):
     f = base_facts(cfg)
     f["projection"] = {"reached": f["now"] + 600}
-    assert "≤ 15 min" in a.plan_record(f, "x", "y").splitlines()[3]
+    assert "≤ 15 min" in a.plan_record(f, "x", "y").splitlines()[4]
 
 
 def test_load_line_admits_when_a_generator_hides_the_load(a, cfg):

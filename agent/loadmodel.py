@@ -32,6 +32,19 @@ import weather
 
 log = logging.getLogger(__name__)
 
+# The two hourly energy series. `battery` is the shunt's own discharge
+# counter - /SYS/BATT_INV/ENERGY_HOUR from the gateway, the integral of
+# negative battery power live - and is what actually leaves the pack, with
+# inverter tare and conversion losses already inside it. `load` is the AC the
+# house received. The pack is emptied by the first; the second is what the
+# house has to show for it, and the ratio between them is the overhead.
+#
+# Anything that asks how much will come out of the pack reads the battery
+# series. Asking the load series and calling the answer the pack's was
+# understating every night by whatever the inverters take to stay awake.
+SERIES = {"load": ("load", "wh_out"), "battery": ("battery", "wh_out")}
+DRAIN_SERIES = "battery"
+
 # A profile cell needs this many observations before it is worth quoting.
 MIN_SAMPLES_PER_HOUR = 3
 # How the house's own history is preferred, newest first. The first tier with
@@ -393,14 +406,14 @@ class LoadModel:
 
     # --- shared filtering ---------------------------------------------------
 
-    def _clean_load_rows(self, month=None, weekend=None):
-        """hourly load rows with every generator-affected hour removed.
+    def _clean_load_rows(self, month=None, weekend=None, series="load"):
+        """hourly rows with every generator-affected hour removed.
 
-        While a generator runs, the XW AC output is not house load, so those
-        hours say nothing about consumption. Exercise runs are gen runs, so
-        this drops them too.
+        While a generator runs, the XW AC output is not house load and the
+        pack is being filled rather than emptied, so those hours say nothing
+        about consumption. Exercise runs are gen runs, so this drops them too.
         """
-        rows = self._all_load_rows()
+        rows = self._series_rows(series)
         out = []
         for t, wh in rows:
             if month is not None and t.month != month:
@@ -410,37 +423,41 @@ class LoadModel:
             out.append((t, wh))
         return out
 
-    def _all_load_rows(self):
-        """Every clean hourly load row, cached until the table changes.
+    def _series_rows(self, series="load"):
+        """Every clean hourly row of one series, cached until the table changes.
 
         A forecast walk asks for the profile once an hour of the window, and
         each ask used to rescan the table and recompute the generator hours.
-        The cache is keyed on how many rows there are and how recent the
-        newest is, so a rollup during a tick is picked up at once rather than
-        waited out.
+        The cache is keyed on the series and on how many rows there are and
+        how recent the newest is, so a rollup during a tick is picked up at
+        once rather than waited out.
         """
+        device, column = SERIES[series]
         probe = self.conn.execute(
-            "SELECT COUNT(*) AS n, MAX(hour_ts) AS newest FROM hourly "
-            "WHERE device='load' AND wh_out IS NOT NULL").fetchone()
-        key = (probe["n"], probe["newest"])
-        cached = getattr(self, "_rows_cache", None)
+            f"SELECT COUNT(*) AS n, MAX(hour_ts) AS newest FROM hourly "
+            f"WHERE device=? AND {column} IS NOT NULL", (device,)).fetchone()
+        key = (series, probe["n"], probe["newest"])
+        cached = getattr(self, "_rows_cache", {}).get(series)
         if cached and cached[0] == key:
             return cached[1]
         rows = self.conn.execute(
-            "SELECT hour_ts, wh_out FROM hourly "
-            "WHERE device='load' AND wh_out IS NOT NULL ORDER BY hour_ts").fetchall()
+            f"SELECT hour_ts, {column} AS wh FROM hourly "
+            f"WHERE device=? AND {column} IS NOT NULL ORDER BY hour_ts",
+            (device,)).fetchall()
         out = []
         if rows:
             excluded = history.gen_running_hours(
                 self.conn, rows[0]["hour_ts"], rows[-1]["hour_ts"] + 3600)
-            out = [(history.local(r["hour_ts"], self.cfg), r["wh_out"])
+            out = [(history.local(r["hour_ts"], self.cfg), r["wh"])
                    for r in rows if r["hour_ts"] not in excluded]
-        self._rows_cache = (key, out)
+        if not hasattr(self, "_rows_cache"):
+            self._rows_cache = {}
+        self._rows_cache[series] = (key, out)
         return out
 
-    def _tiers(self, now, month=None):
+    def _tiers(self, now, month=None, series="load"):
         """(rows, label) in order of preference, newest evidence first."""
-        rows = self._all_load_rows()
+        rows = self._series_rows(series)
         today = history.local(now, self.cfg).date()
         month = month or history.local(now, self.cfg).month
         for days, label in RECENT_TIERS:
@@ -453,16 +470,20 @@ class LoadModel:
 
     # --- load profile -------------------------------------------------------
 
-    def load_profile(self, month=None, weekend=None, now=None):
+    def load_profile(self, month=None, weekend=None, now=None, series="load"):
         """{hour_of_day: median Wh}, from the newest evidence that covers a day.
 
         Recency first, then the weekday/weekend split within a tier if there
         is enough of it. The two recent tiers are already in season, so they
         are not filtered by month as well; the prior-year tier is the month
         by definition.
+
+        `series` says whose watt-hours: the house's, or the pack's. A walk
+        that is going to be compared with what the pack holds must ask the
+        pack's, or it is netting two different quantities against each other.
         """
         now = int(now or time.time())
-        for rows, label in self._tiers(now, month):
+        for rows, label in self._tiers(now, month, series):
             for w in (weekend, None):
                 buckets = {}
                 for t, wh in rows:
@@ -473,10 +494,11 @@ class LoadModel:
                            if len(v) >= MIN_SAMPLES_PER_HOUR}
                 if len(profile) >= 12:
                     return {"profile": profile, "month": month, "weekend": w,
-                            "source": label, "hours_covered": len(profile),
+                            "source": label, "series": series,
+                            "hours_covered": len(profile),
                             "observations": sum(len(v) for v in buckets.values())}
         return {"profile": {}, "month": None, "weekend": None, "source": None,
-                "hours_covered": 0, "observations": 0}
+                "series": series, "hours_covered": 0, "observations": 0}
 
     def load_forecast(self, hours, now=None):
         """Expected Wh over the next N hours, hour by hour."""
@@ -516,12 +538,16 @@ class LoadModel:
         night_hours = 24 - sunset_h + sunrise_h
         return {n: sum(v) for n, v in by_night.items() if len(v) >= night_hours}
 
-    def overnight_drawdown(self, month=None, now=None):
-        """Median Wh consumed between sunset and sunrise, newest evidence first.
+    def overnight_drawdown(self, month=None, now=None, series=DRAIN_SERIES):
+        """Median Wh out of the pack between sunset and sunrise, newest first.
 
         Reports which tier it leaned on, because "15,200 Wh" from a fortnight
         of this year and "15,200 Wh" from three Augusts ago are not the same
         claim and the plan record should not present them as one.
+
+        The pack's own discharge, not the house's consumption: what the night
+        costs is what leaves the battery, and the inverters take their tare
+        out of it before the house sees a watt.
         """
         now = int(now or time.time())
         month = month or history.local(now, self.cfg).month
@@ -530,29 +556,36 @@ class LoadModel:
             return None
         sunset_h = history.local(times[1], self.cfg).hour
         sunrise_h = history.local(times[0], self.cfg).hour
-        for rows, label in self._tiers(now, month):
+        for rows, label in self._tiers(now, month, series):
             nights = self._whole_nights(rows, sunset_h, sunrise_h)
             enough = (MIN_NIGHTS_PER_TIER if label != "all history" else 1)
             if len(nights) >= enough:
                 return {"month": month, "wh": round(_median(list(nights.values()))),
-                        "nights": len(nights), "source": label}
+                        "nights": len(nights), "source": label, "series": series}
         return None
 
     # --- energy against voltage ---------------------------------------------
 
     def _discharge_nights(self, now):
-        """{night: {bin: [Wh, volts crossed]}} for clean overnight discharges.
+        """{night: {"bins", "batt_wh", "load_wh"}} for clean overnight discharges.
 
         One record per hour the pack was doing nothing but supplying the
         house: between sunset and sunrise, no generator producing, no solar,
-        and the voltage falling. The hour's load Wh is spread across the
-        voltage bins between the hour's high and low reading in proportion to
-        how much of each bin it crossed, so an hour that fell 54.40 to 53.90
+        and the voltage falling. The hour's watt-hours are spread across the
+        voltage bins between its high and low reading in proportion to how
+        much of each bin it crossed, so an hour that fell 54.40 to 53.90
         contributes a rate to each of the two bins it passed through instead
         of a lump to one of them.
 
-        Cached on the shape of the table, like the load rows: a forecast walk
-        asks for this many times and the query is a three-way join.
+        The watt-hours are the pack's own - the shunt's discharge counter,
+        /SYS/BATT_INV/ENERGY_HOUR - and not the house's load. That is the
+        quantity the curve is asked for: how much has to leave the battery to
+        get from one voltage to another. Inverter tare and conversion losses
+        are inside it, which is right, because the pack pays them. The load
+        counter is carried alongside only to learn the ratio between the two.
+
+        Cached on the shape of the table, like the series rows: a forecast
+        walk asks for this many times and the query is a four-way join.
         """
         probe = self.conn.execute(
             "SELECT COUNT(*) AS n, MAX(hour_ts) AS newest FROM hourly").fetchone()
@@ -567,15 +600,16 @@ class LoadModel:
             return cached[1]
 
         rows = self.conn.execute(
-            "SELECT b.hour_ts, b.min_v, b.max_v, l.wh_out AS load_wh, "
+            "SELECT b.hour_ts, b.min_v, b.max_v, b.wh_out AS batt_wh, "
+            "       l.wh_out AS load_wh, "
             "       COALESCE(g.wh_in, 0) AS gen_wh, "
             "       COALESCE(s.wh_in, 0) AS solar_wh "
             "FROM hourly b "
-            "JOIN hourly l ON l.hour_ts = b.hour_ts AND l.device = 'load' "
+            "LEFT JOIN hourly l ON l.hour_ts = b.hour_ts AND l.device = 'load' "
             "LEFT JOIN hourly g ON g.hour_ts = b.hour_ts AND g.device = 'gen' "
             "LEFT JOIN hourly s ON s.hour_ts = b.hour_ts AND s.device = 'solar' "
             "WHERE b.device = 'battery' AND b.min_v IS NOT NULL "
-            "  AND b.max_v IS NOT NULL AND l.wh_out IS NOT NULL "
+            "  AND b.max_v IS NOT NULL AND b.wh_out IS NOT NULL "
             "ORDER BY b.hour_ts").fetchall()
         running = set()
         if rows:
@@ -591,19 +625,24 @@ class LoadModel:
                 continue
             if r["gen_wh"] > 0 or r["solar_wh"] > 0 or r["hour_ts"] in running:
                 continue
-            lo, hi, wh = r["min_v"], r["max_v"], r["load_wh"]
+            lo, hi, wh = r["min_v"], r["max_v"], r["batt_wh"]
             if hi <= lo or not wh or wh <= 0:
                 continue
             night = (t.date() if t.hour >= sunset_h
                      else (t - timedelta(days=1)).date())
-            bins = nights.setdefault(night, {})
+            rec = nights.setdefault(night, {"bins": {}, "batt_wh": 0.0,
+                                            "load_wh": 0.0, "hours": 0})
+            rec["batt_wh"] += wh
+            rec["hours"] += 1
+            if r["load_wh"] and r["load_wh"] > 0:
+                rec["load_wh"] += r["load_wh"]
             span = hi - lo
             b = int(lo // ENERGY_BIN_V)
             while b * ENERGY_BIN_V < hi:
                 a = max(lo, b * ENERGY_BIN_V)
                 z = min(hi, (b + 1) * ENERGY_BIN_V)
                 if z > a:
-                    cell = bins.setdefault(b, [0.0, 0.0])
+                    cell = rec["bins"].setdefault(b, [0.0, 0.0])
                     cell[0] += wh * (z - a) / span
                     cell[1] += z - a
                 b += 1
@@ -637,8 +676,8 @@ class LoadModel:
         the same measurement rather than one being half the other.
         """
         rates = {}
-        for bins in nights.values():
-            for b, (wh, volts) in bins.items():
+        for rec in nights.values():
+            for b, (wh, volts) in rec["bins"].items():
                 if volts >= ENERGY_BIN_V * MIN_BIN_FRACTION:
                     rates.setdefault(b, []).append(wh / volts)
         return {b: (_median(v) * ENERGY_BIN_V, len(v))
@@ -705,6 +744,34 @@ class LoadModel:
                     "from_v": v_from, "to_v": v_to}
         return {"wh": None, "reason": "; ".join(tried)}
 
+    def system_overhead(self, now=None, month=None):
+        """Watt-hours out of the pack per watt-hour the house received.
+
+        Everything between the battery terminals and a socket: inverter tare,
+        conversion loss, the DC bus, whatever the XW units draw to stay awake
+        overnight. Learned per night from the same clean overnight discharges
+        the curve is built from - the pack's own discharge counter over the
+        AC load counter for the same hours - and reported as the median with
+        the spread around it, because one night's weather does not decide it.
+
+        Nothing computes with this. The curve is measured on the pack's side
+        already, so the overhead needs no applying; it is here because the
+        owner should be able to see what the house never receives.
+        """
+        now = int(now or time.time())
+        for nights, label in self._night_tiers(now, month):
+            ratios = sorted(rec["batt_wh"] / rec["load_wh"]
+                            for rec in nights.values()
+                            if rec.get("load_wh", 0) > 0
+                            and rec.get("batt_wh", 0) > 0)
+            if len(ratios) < MIN_NIGHTS_PER_TIER and label != "all history":
+                continue
+            if not ratios:
+                continue
+            return {"ratio": _median(ratios), "min": ratios[0],
+                    "max": ratios[-1], "nights": len(ratios), "source": label}
+        return None
+
     def soc_disagreement(self, soc_pct, voltage, floor_v=52.0, now=None):
         """How far the Battery Monitor's state of charge sits above the curve.
 
@@ -747,6 +814,7 @@ class LoadModel:
             "volts_low": round(min(bins) * ENERGY_BIN_V, 2) if bins else None,
             "volts_high": round((max(bins) + 1) * ENERGY_BIN_V, 2) if bins else None,
             "bin_v": ENERGY_BIN_V,
+            "series": DRAIN_SERIES,
         }
 
     # --- solar --------------------------------------------------------------
@@ -1126,7 +1194,8 @@ class LoadModel:
         for i in range(hours):
             ts = history.hour_floor(now) + i * 3600
             t = datetime.fromtimestamp(ts, history.tzinfo(self.cfg))
-            p = self.load_profile(month=t.month, weekend=t.weekday() >= 5)
+            p = self.load_profile(month=t.month, weekend=t.weekday() >= 5,
+                                  series=DRAIN_SERIES)
             load_wh = p["profile"].get(t.hour) or _median(list(p["profile"].values()))
             if load_wh is None:
                 return {"reached": None, "reason": "load profile not learned"}
@@ -1495,7 +1564,8 @@ class LoadModel:
             if ts >= until:
                 break
             t = datetime.fromtimestamp(ts, history.tzinfo(self.cfg))
-            p = self.load_profile(month=t.month, weekend=t.weekday() >= 5, now=now)
+            p = self.load_profile(month=t.month, weekend=t.weekday() >= 5,
+                                  now=now, series=DRAIN_SERIES)
             load_wh = p["profile"].get(t.hour) or _median(list(p["profile"].values()))
             if load_wh is None:
                 return None, None

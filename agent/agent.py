@@ -170,6 +170,7 @@ class Agent:
         projection = self.model.project_voltage(52.0, now=now)
         deficit = self.model.overnight_deficit(sunrise_ts, now=now)
         drawdown = self.model.overnight_drawdown(now=now)
+        overhead = self.model.system_overhead(now=now)
         gate = self.model.learning_status(now=now)
         soc_curve = self.model.soc_curve_status()
 
@@ -208,7 +209,8 @@ class Agent:
             "sunset_ts": sunset_ts, "remaining_solar_wh": remaining_solar_wh,
             "forecast": forecast, "projection": projection,
             "deficit": deficit,
-            "drawdown": drawdown, "gate": gate, "soc_curve": soc_curve,
+            "drawdown": drawdown, "overhead": overhead,
+            "gate": gate, "soc_curve": soc_curve,
             "tomorrow_cloud": tomorrow_cloud, "est_solar": est_solar,
             "summary_24h": history.summary(self.conn, 24, now=now),
             "thresholds": toolsmod.thresholds_from_config(live),
@@ -287,11 +289,23 @@ class Agent:
 
         if facts["drawdown"]:
             d = facts["drawdown"]
-            lines.append(f"overnight Wh: {d['wh']:,} — from "
+            lines.append(f"overnight Wh out of the pack: {d['wh']:,} — from "
                          f"{d.get('source') or 'the load profile'} "
                          f"({d['nights']} night{'' if d['nights'] == 1 else 's'})")
         else:
-            lines.append("overnight Wh: not learned yet")
+            lines.append("overnight Wh out of the pack: not learned yet")
+
+        # What the house never receives. Nothing computes with it - the curve
+        # and the drawdown are both measured on the pack's side already - but
+        # the owner should be able to see it.
+        o = facts.get("overhead")
+        if o:
+            lines.append(f"system overhead: {o['ratio']:.3f}x "
+                         f"(pack out ÷ house in, {o['min']:.3f}-{o['max']:.3f} "
+                         f"over {o['nights']} night"
+                         f"{'' if o['nights'] == 1 else 's'}, {o['source']})")
+        else:
+            lines.append("system overhead: not learned yet")
 
         month = t.strftime("%b")
         proj = facts["projection"]
