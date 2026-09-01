@@ -78,6 +78,13 @@ WEST_ARRAY_ID = 30
 AGS_MEP803A_ID = 51
 AGS_KUBOTA_ID = 50
 
+# How many register reads each poll counts into `errors`: 18 across the
+# inverters, the battery monitor, the three MPPTs, plus one generator-mode
+# read per AGS. `errors` is a count of failed READS, not of dead devices -
+# a single slave contributes up to four of them - so the alert below says
+# reads. Only when every one of them fails is the gateway itself gone.
+POLL_READS = 20
+
 # Register addresses
 REG_AC_POWER = 0x009A
 REG_AC_CURRENT = 0x0096
@@ -880,7 +887,9 @@ def poll_modbus():
             with alert_lock:
                 if non_ags_errors > 0 and not alert_state["poll_error_alerted"]:
                     alert_state["poll_error_alerted"] = True
-                    send_telegram(f"⚠️ <b>Modbus Poll Errors</b>\n{non_ags_errors} device(s) not responding.\nCheck system connectivity.")
+                    detail = ("Gateway not responding." if errors >= POLL_READS
+                              else f"{non_ags_errors} failed register read(s) this cycle.")
+                    send_telegram(f"⚠️ <b>Modbus Poll Errors</b>\n{detail}\nCheck system connectivity.")
                 elif non_ags_errors == 0:
                     alert_state["poll_error_alerted"] = False
 
