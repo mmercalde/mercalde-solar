@@ -80,7 +80,7 @@ Memory note: two 8B models resident is ~20 GB of 22. If the agent's tests show s
 
 `GET /acdiag` for per-inverter AC voltage/frequency/power/current when investigating an AC anomaly.
 
-Gateway Modbus (port 503, via `pi5/schneider_modbus.py`, copy it into `agent/`): energy counters Today / This Month / This Year / Lifetime kWh per MPPT and per XW, Battery Monitor in/out. Read once per tick into the `counters` table. Register addresses are in the spec PDFs in the repo (`Conext_*_Modbus_503_spec_*.pdf` — these are ZIP archives of numbered `.txt` pages; `unzip` then `grep`). Use the addresses from those documents, not from memory.
+Gateway Modbus (port 503, via `pi5/schneider_modbus.py`, copy it into `agent/`): energy counters Today / This Month / This Year / Lifetime kWh per MPPT and per XW, Battery Monitor in/out. Read once an hour into the `counters` table, off the tick and spaced: on the tick these reads collided with the Pi5's own 5-second poll of the same gateway. Register addresses are in the spec PDFs in the repo (`Conext_*_Modbus_503_spec_*.pdf` — these are ZIP archives of numbered `.txt` pages; `unzip` then `grep`). Use the addresses from those documents, not from memory.
 
 ## 4. Dashboard interface (write) — the only lever
 
@@ -104,7 +104,7 @@ How generator behaviour is produced from this one lever:
 | `samples` | `/data` every 60 s | one per minute; rolled up into `hourly` and deleted after 90 days |
 | `hourly` | rollup of `samples` + scraped InsightLocal history | per hour per device: mean V, mean A, Wh in, Wh out, min/max V, source tag |
 | `daily` | rollup of `hourly` | per day: solar Wh, load Wh, gen minutes per gen, peak V, min V |
-| `counters` | Gateway Modbus energy registers each tick | cross-check for `daily` |
+| `counters` | Gateway Modbus energy registers, hourly at :37 | cross-check for `daily` |
 | `gen_runs` | derived from `*Action` transitions | start, stop, gen, duration, start V, stop V, observed charge rate (V/h and A), `kind` = `auto` / `agent` / `exercise` / `manual` |
 | `plans` | every tick (§8) | the plan record |
 | `actions` | every guard decision | mirrors `audit.log` |

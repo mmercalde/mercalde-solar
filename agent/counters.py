@@ -1,7 +1,21 @@
 """Gateway energy counters over Modbus TCP 503.
 
-Read once per agent tick into the `counters` table as an independent
-cross-check on `daily`, which is integrated from /data samples.
+Read once an hour into the `counters` table as an independent cross-check on
+`daily`, which is integrated from /data samples.
+
+Hourly, and spaced, because these 72 reads are aimed at the gateway the Pi5
+is already polling every 5 seconds, and the gateway will drop a connection
+when two masters crowd it. On the tick they did: every one of the eight
+"Incomplete response header: got 0" drops the Pi5 logged between 2026-08-28
+and 2026-09-01 landed 2.2-3.4 s after an agent tick — which is where this
+ran — and each cost the Pi5 one register and the owner a Telegram. The
+reverse happened too: seven of these reads came back empty over the same
+days, one register each.
+
+There is no connection to reuse. Every Modbus request opens its own socket
+and closes it in a `finally` — the Schneider port keeps no session, which is
+why `schneider_modbus.py` says "New TCP connection per request" — so the
+only lever on the burst is the gap between reads.
 
 Register addresses come from docs/energy_registers.md (Schneider specs
 9906268B, 9906269A, 9906270A). Each counter occupies six consecutive uint32
@@ -22,6 +36,9 @@ log = logging.getLogger(__name__)
 
 MODBUS_PORT = 503
 KWH_SCALE = 0.001
+# Seconds between reads. 72 reads at this spacing is about 11 s of gateway
+# time an hour, against the Pi5's continuous 5-second poll.
+READ_SPACING = 0.15
 
 # Offset from a counter's base address to each period. SPEC section 3 names
 # four of the six; hour and week are read by the same code if ever needed.
@@ -57,28 +74,37 @@ def modbus_host(cfg):
     return urlparse(cfg["gateway"]["url"]).hostname
 
 
-def read_all(cfg, host=None, client=None):
-    """Read every counter/period for every device.
+def read_all(cfg, host=None, client=None, spacing=READ_SPACING):
+    """Read every counter/period for every device, `spacing` seconds apart.
 
-    Returns {(device, counter, period): kwh}. Registers that fail to read are
-    left out rather than recorded as zero: a missing counter must not look
-    like a reset one.
+    Returns ({(device, counter, period): kwh}, failed_read_count). Registers
+    that fail to read are left out rather than recorded as zero: a missing
+    counter must not look like a reset one.
+
+    The gap goes before each read but the first, so the run costs
+    (reads - 1) * spacing and no more.
     """
     host = host or modbus_host(cfg)
     client = client or schneider_modbus.SchneiderModbusTCP()
     out = {}
+    failed = 0
+    first = True
     for dev in DEVICES:
         for counter, base in dev["bases"].items():
             for period in PERIODS:
+                if not first and spacing:
+                    time.sleep(spacing)
+                first = False
                 addr = base + PERIOD_OFFSET[period]
                 raw = client.read_holding_register_32(
                     host, MODBUS_PORT, dev["slave"], addr)
                 if raw is None:
+                    failed += 1
                     log.warning("counter read failed: %s %s %s (slave %d addr 0x%04X)",
                                 dev["name"], counter, period, dev["slave"], addr)
                     continue
                 out[(dev["name"], counter, period)] = round(raw * KWH_SCALE, 3)
-    return out
+    return out, failed
 
 
 def derive_totals(readings):
@@ -108,12 +134,20 @@ def derive_totals(readings):
     return derived
 
 
-def record(conn, cfg, ts=None, host=None, client=None):
-    """Read all counters and write one snapshot into `counters`."""
+def record(conn, cfg, ts=None, host=None, client=None, spacing=READ_SPACING):
+    """Read all counters and write one snapshot into `counters`.
+
+    Logs how long the run held the gateway and how many reads it lost, so a
+    run that starts crowding the Pi5 again is visible in the journal without
+    having to correlate two machines' logs after the fact.
+    """
     ts = int(ts or time.time())
-    readings = read_all(cfg, host=host, client=client)
+    started = time.monotonic()
+    readings, failed = read_all(cfg, host=host, client=client, spacing=spacing)
+    elapsed = time.monotonic() - started
     if not readings:
-        log.warning("no counters read; gateway unreachable on Modbus 503?")
+        log.warning("no counters read in %.1f s; gateway unreachable on Modbus 503?",
+                    elapsed)
         return 0
     readings.update(derive_totals(readings))
     conn.executemany(
@@ -121,6 +155,8 @@ def record(conn, cfg, ts=None, host=None, client=None):
         "VALUES (?,?,?,?,?)",
         [(ts, dev, ctr, per, kwh) for (dev, ctr, per), kwh in readings.items()])
     conn.commit()
+    log.info("counters: %d readings in %.1f s, %d failed read(s)",
+             len(readings), elapsed, failed)
     return len(readings)
 
 
@@ -161,11 +197,11 @@ def main():
     import config
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     cfg = config.load()
-    readings = read_all(cfg)
+    readings, failed = read_all(cfg)
     readings.update(derive_totals(readings))
     for (dev, ctr, per) in sorted(readings):
         print(f"{dev:12s} {ctr:22s} {per:9s} {readings[(dev, ctr, per)]:12.3f} kWh")
-    print(f"\n{len(readings)} values")
+    print(f"\n{len(readings)} values, {failed} failed read(s)")
 
 
 if __name__ == "__main__":

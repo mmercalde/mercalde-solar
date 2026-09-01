@@ -59,6 +59,13 @@ ARRAY_IMBALANCE_SECONDS = 1800
 # what fired at 07:31 on the first live day.
 ARRAY_MIN_OTHERS_AVG_W = 1000
 
+# The gateway's energy counters are read on their own hour, at :37 — clear of
+# the tick, which is a 15-minute interval from process start and so lands on
+# every quarter phase over a run of restarts, and clear of the 07:00 and 19:00
+# digests. And not at all while the Pi5's own poll is losing reads.
+COUNTERS_MINUTE = 37
+COUNTERS_QUIET_SECONDS = 120
+
 # Extra direction for the model when it is woken by an anomaly, so it looks
 # where the fault can actually be.
 ANOMALY_HINTS = {
@@ -522,7 +529,6 @@ class Agent:
             history.derive_gen_runs(self.conn, self.cfg)
             history.rollup_hourly(self.conn, self.cfg)
             history.rollup_daily(self.conn, self.cfg, days=[facts["today"]])
-            counters.record(self.conn, self.cfg, ts=facts["now"])
         except Exception as e:                       # noqa: BLE001
             log.warning("store update failed, continuing: %s", e)
 
@@ -1074,6 +1080,49 @@ class Agent:
         except (requests.RequestException, Exception) as e:   # noqa: BLE001
             log.debug("sample failed: %s", e)
 
+    def poll_errors_seen(self, now=None):
+        """Has the Pi5's own Modbus poll lost a read in the last 2 minutes?
+
+        pollErrors is a per-cycle count, zeroed at the top of every 5-second
+        poll, not a running total — so "it went up" is "it left the zero it
+        normally sits at", and any non-zero reading in the window says so.
+        Both the stored samples and a live /data read count; the samples are
+        60 s apart and a lost read is gone in 5, so neither alone is enough.
+        """
+        now = int(now or time.time())
+        seen = [r["poll_errors"] for r in self.conn.execute(
+            "SELECT poll_errors FROM samples WHERE ts >= ? AND ts <= ?",
+            (now - COUNTERS_QUIET_SECONDS, now))
+            if r["poll_errors"] is not None]
+        try:
+            live = history.fetch_data(self.cfg).get("pollErrors")
+        except requests.RequestException as e:
+            log.warning("could not read /data before the counters run: %s", e)
+            live = None
+        if live is not None:
+            seen.append(live)
+        return any(v > 0 for v in seen)
+
+    def record_counters(self, now=None):
+        """The gateway's energy counters, hourly, off the tick.
+
+        72 reads, each its own TCP connection, at the gateway the Pi5 polls
+        every 5 seconds. Run from the tick they collided with that poll and
+        cost the owner a Telegram; run here they are spaced, they are hourly,
+        and they stand down while the Pi5 is already losing reads rather than
+        adding to a problem the gateway is already having.
+        """
+        now = int(now or time.time())
+        if self.poll_errors_seen(now):
+            log.info("counters run skipped: the Pi5's poll lost a read in the "
+                     "last %d s", COUNTERS_QUIET_SECONDS)
+            return 0
+        try:
+            return counters.record(self.conn, self.cfg, ts=now)
+        except Exception as e:                       # noqa: BLE001
+            log.warning("counters run failed: %s", e)
+            return 0
+
     def run(self, ask_host=None):
         sched = BackgroundScheduler(timezone=self.cfg["tz"])
         sched.add_job(self.sample_once, "interval",
@@ -1083,6 +1132,8 @@ class Agent:
                       id="tick", max_instances=1, coalesce=True)
         sched.add_job(self.check_anomalies, "interval", minutes=5,
                       id="anomalies", max_instances=1, coalesce=True)
+        sched.add_job(self.record_counters, "cron", minute=COUNTERS_MINUTE,
+                      id="counters", max_instances=1, coalesce=True)
         for hour in self.cfg["digest_hours"]:
             evening = hour >= 12
             sched.add_job(self.digest, "cron", hour=hour, minute=0,
@@ -1095,8 +1146,10 @@ class Agent:
         threading.Thread(target=self.telegram_loop, name="telegram",
                          daemon=True).start()
 
-        log.info("solar agent running: tick every %s min, digests at %s",
-                 self.cfg["tick_minutes"], self.cfg["digest_hours"])
+        log.info("solar agent running: tick every %s min, digests at %s, "
+                 "counters hourly at :%02d",
+                 self.cfg["tick_minutes"], self.cfg["digest_hours"],
+                 COUNTERS_MINUTE)
         self.tick()
         try:
             while not self.stop_event.is_set():

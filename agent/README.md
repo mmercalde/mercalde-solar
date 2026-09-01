@@ -61,6 +61,25 @@ Every 15 minutes, day and night:
    not approved. The Pi5 watchdog reads liveness from `GET /plan`, so there is
    nothing for a heartbeat to prove.
 
+The tick does not read the gateway's energy counters. Those are 72 Modbus
+reads, each its own TCP connection, aimed at the gateway the Pi5 already
+polls every 5 seconds, and on the tick they collided with that poll: all
+eight of the "Incomplete response header: got 0" drops the Pi5 logged
+between 2026-08-28 and 2026-09-01 landed 2.2-3.4 s after a tick, each one
+costing the Pi5 a register and the owner a "Modbus Poll Errors" Telegram.
+Seven of these reads came back empty over the same days, so it went both
+ways. They now run hourly at :37, spaced 150 ms apart, and stand down
+entirely if `/data` or the last two minutes of samples show the Pi5 losing
+reads of its own — see `counters.py` and `Agent.record_counters`.
+
+That is mitigation, not a fix. Two Modbus masters on one Conext gateway is
+the actual problem, and spacing the second one only makes the collision
+rarer. The clean fix is for the Pi5 to read the energy counters in its own
+poll loop and publish them in `/data`, the way it already publishes every
+other register: then there is one Modbus master, the agent reads counters
+over HTTP like it reads everything else, and `counters.py` becomes a parser
+instead of a second poller.
+
 ## Layout
 
 | File | What it does |
