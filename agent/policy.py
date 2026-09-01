@@ -272,7 +272,9 @@ def solo_top_up(cfg, f, model):
                  if ((f.get("topup") or {}).get("gens", {}).get(g) or {})
                  .get("state", topupmod.IDLE) == topupmod.IDLE]
 
-    v, soc = f.get("voltage"), f.get("soc")
+    # The pack's voltage, and nothing from the Battery Monitor's state of
+    # charge: every figure below comes from a curve learned against volts.
+    v = f.get("voltage")
     baseline = f.get("baseline") or {}
     d = f.get("deficit") or {}
     if v is None or not baseline:
@@ -296,7 +298,9 @@ def solo_top_up(cfg, f, model):
 
     margin = cfg["topup_margin_pct"]
     parts = [f"deficit {deficit:,} Wh to sunrise above {floor_v:.1f} V "
-             f"(needs {d.get('needed_wh', 0):,}, holds {d.get('available_wh', 0):,})"]
+             f"(needs {d.get('needed_wh', 0):,}, holds "
+             f"{d.get('available_wh', 0):,} Wh above {floor_v:.1f} V "
+             f"({d.get('available_source', 'unknown')}))"]
 
     # Asked only once a run is known to be wanted. A night with charge to
     # spare is not "held because auto-gen is off"; it is simply not short.
@@ -332,7 +336,7 @@ def solo_top_up(cfg, f, model):
         label, gens, band_max = bands[index]
         gen = None if len(gens) > 1 else gens[0]
         solo = len(gens) == 1
-        want = model.topup_target(deficit, margin, soc, d.get("capacity_wh"),
+        want = model.topup_target(deficit, margin, v, d.get("capacity_wh"),
                                   low=cfg["solo_target_floor"], high=ceiling,
                                   gen=gen, solo=solo)
         if want is None:
@@ -344,8 +348,7 @@ def solo_top_up(cfg, f, model):
         if target > want["volts"] + EPS:
             note.append(f"raised to {target:.1f} to clear a start above "
                         f"{v:.1f} V by {cfg['min_stop_minus_start']:.1f} V")
-        reach = model.reach(gen, v, target, _window_for(f, gens), solo=solo,
-                            soc_now=soc)
+        reach = model.reach(gen, v, target, _window_for(f, gens), solo=solo)
         band = (f"{label} band (deficit ≤ {band_max:,} Wh)" if band_max
                 else f"{label} band (above every other)")
         if reach["ok"]:
@@ -376,7 +379,7 @@ def solo_top_up(cfg, f, model):
                                         ceiling=ceiling,
                                         floor=max(cfg["solo_target_floor"],
                                                   least_stop),
-                                        soc_now=soc, solo=solo)
+                                        solo=solo)
     if lower is None:
         return _rule(4, name, False, "; ".join(parts + [
             f"and {who} cannot reach {least_stop:.1f}"]))

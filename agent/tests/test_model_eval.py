@@ -43,7 +43,7 @@ def test_a_thousands_separator_is_the_same_number():
 
 
 def test_arithmetic_the_model_did_itself_is_flagged():
-    """POLICY 8 forbids the conversion, so the harness marks it."""
+    """POLICY 9 forbids the conversion, so the harness marks it."""
     assert model_eval.unsourced_numbers("load 1.2 kW", ["load 1200 W"]) == [1.2]
 
 

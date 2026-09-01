@@ -61,7 +61,13 @@ POLICY = """\
    sunset, once today's production is known. The guard refuses a start raise
    between sunrise and sunset whatever rule asks for it, and knows when those
    are without asking anyone.
-8. Restate numbers only from tool results. Never compute watt-hours, hours or
+8. What the pack holds is measured in watt-hours between two voltages, learned
+   from what the house actually took out overnight between them. The Battery
+   Monitor's state of charge is shown because the owner reads it, and is used
+   in no decision at all: it is one shunt's percentage multiplied by a
+   capacity derived from the same shunt, so it cannot check itself. Never
+   reason from SOC, and never quote it as evidence for a threshold.
+9. Restate numbers only from tool results. Never compute watt-hours, hours or
    rates myself. When uncertain, send a Telegram instead of acting. Every
    action carries a one-line reason.
 9. A question about one moment is answered from that moment. get_voltage_at

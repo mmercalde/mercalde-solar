@@ -254,7 +254,8 @@ def test_the_message_carries_the_numbers_the_rule_fired_on(cfg):
              "data": {"autoGenEnabled": True},
              "deficit": {"deficit_wh": 6463, "needed_wh": 15220,
                          "available_wh": 8757, "capacity_wh": 100000,
-                         "soc_now": 87, "floor_v": 52.0},
+                         "available_source": "learned Wh-vs-V, 10 nights",
+                         "soc_now_display": 87, "floor_v": 52.0},
              "baseline": dict(BEFORE), "thresholds": dict(BEFORE),
              "run_window_h": {"mep": 2.0, "kubota": 2.0},
              "topup": {"gens": {"mep": {"state": "idle"},
@@ -263,14 +264,14 @@ def test_the_message_carries_the_numbers_the_rule_fired_on(cfg):
     line = policy.numbers_line(rules)
     assert "deficit 6,463 Wh" in line
     assert "+15% = 7,432 Wh" in line
-    assert "target 57.0 V" in line
-    assert "Kubota band (deficit ≤ 8,000 Wh)" in line
+    assert "target 55.8 V" in line
+    assert "MEP band (deficit ≤ 15,000 Wh)" in line
     assert "kW into the pack" in line
     assert "min of running" in line
 
     m = tools.write_message(AFTER, "solo top-up", before=BEFORE, voltage=53.6,
                             default_start=52.0, numbers=line)
-    assert "deficit 6,463 Wh" in m and "target 57.0 V" in m
+    assert "deficit 6,463 Wh" in m and "target 55.8 V" in m
 
 
 def test_a_start_above_the_pack_says_the_generator_runs_now():

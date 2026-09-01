@@ -317,6 +317,9 @@ class Guard:
                                None, None, now)
         data, live = st["data"], st["config"]
         v = data.get("batteryVoltage")
+        # Recorded in the audit line and shown to the owner; it reaches no
+        # rule. Every figure a decision rests on comes from a curve learned
+        # against pack volts.
         soc = data.get("battSocBM")
         # What the dashboard said when this write was judged. The tool reads
         # it back to describe the change to the owner without a second fetch.
@@ -325,7 +328,7 @@ class Guard:
         # What check() decided to write, which may be less than was asked for.
         self.last_check = {"values": dict(want), "refused": [], "requested": dict(want)}
 
-        allowed, why = self._evaluate(want, data, live, v, soc, now, reason, policy)
+        allowed, why = self._evaluate(want, data, live, v, now, reason, policy)
         return self._audit(args, allowed, why, v, soc, now)
 
     @staticmethod
@@ -347,7 +350,7 @@ class Guard:
                                f"absolute")
         return True, "within the hard limits"
 
-    def _evaluate(self, want, data, live, v, soc, now, reason="", policy=None):
+    def _evaluate(self, want, data, live, v, now, reason="", policy=None):
         # The hard limits, before anything else and regardless of everything
         # else. Nothing below can widen them.
         ok, why = self.hard_limits(want)
@@ -401,7 +404,7 @@ class Guard:
         # thrown away whole. Last night's pre-dawn proposal bundled "Kubota
         # start back to 52" - which was wanted - with "Kubota stop down to
         # 54.5" mid-run, which is forbidden, and lost both.
-        kept, dropped = self._trim(want, data, live, live_now, v, soc, now)
+        kept, dropped = self._trim(want, data, live, live_now, v, now)
         if dropped and kept is None:
             return False, "; ".join(dropped)
         if dropped:
@@ -487,7 +490,7 @@ class Guard:
                                f"{live[cfg_key]['stopVoltage']} to {want[pkey]} "
                                f"mid-run (raising is allowed)")
 
-        ok, why = self._reachable(want, live, v, soc, now)
+        ok, why = self._reachable(want, live, v, now)
         if not ok:
             return False, why
 
@@ -512,7 +515,7 @@ class Guard:
                 closer = True
         return closer
 
-    def _gen_faults(self, gen, pair, want, data, live, live_now, v, soc, now):
+    def _gen_faults(self, gen, pair, want, data, live, live_now, v, now):
         """Why this generator's proposed pair of numbers cannot stand, if it cannot.
 
         Only the rules that are about one generator on its own: its bounds,
@@ -575,7 +578,7 @@ class Guard:
             return None
         return {"start": entry["start"], "stop": entry["stop"]}
 
-    def _trim(self, want, data, live, live_now, v, soc, now):
+    def _trim(self, want, data, live, live_now, v, now):
         """(values to write, what was dropped and why).
 
         Each generator's numbers are tried as asked; where that fails, with
@@ -593,7 +596,7 @@ class Guard:
             first = None
             for pair, giving_up in options:
                 fault = self._gen_faults(gen, pair, want, data, live, live_now,
-                                         v, soc, now)
+                                         v, now)
                 if first is None:
                     first = fault
                 if fault is None:
@@ -607,7 +610,7 @@ class Guard:
 
         return kept, dropped
 
-    def _reachable(self, want, live, v, soc, now):
+    def _reachable(self, want, live, v, now):
         """Rule 4, for whatever will actually fire, after the trim.
 
         Asked once about the set that will run: both engines on one pack is a
@@ -624,8 +627,7 @@ class Guard:
         gen = firing[0][0] if solo else None
         who = firing[0][0] if solo else "both generators"
         target = max(want[pkey] for _, _, pkey, _ in firing)
-        reach = self.model.reach(gen, v, target, window_h, solo=solo,
-                                 soc_now=soc, now=now)
+        reach = self.model.reach(gen, v, target, window_h, solo=solo, now=now)
         if reach["hours"] is None:
             return False, (f"{reach['why']}. Use the default thresholds "
                            f"{self.cfg['default_start']} / "

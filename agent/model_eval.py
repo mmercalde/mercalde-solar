@@ -8,7 +8,7 @@ actually gone wrong in production:
 
   tool calls   every call names a real tool and its arguments bind
   numbers      no figure in the answer that was not in the prompt or in a
-               tool result - POLICY 8, and the failure that made the agent
+               tool result - POLICY 9, and the failure that made the agent
                invent a voltage for Alexa
   rules        a POLICY rule that fires is set or overruled in writing, never
                answered with "no change"
@@ -229,7 +229,7 @@ def numbers_in(text):
 def unsourced_numbers(answer, sources):
     """Figures the model stated that were in none of its inputs.
 
-    POLICY 8: restate numbers only from tool results. A conversion the model
+    POLICY 9: restate numbers only from tool results. A conversion the model
     did in its head - 1200 W read back as 1.2 kW - counts, because doing
     arithmetic is exactly what it is told not to do.
     """

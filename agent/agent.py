@@ -42,6 +42,13 @@ log = logging.getLogger(__name__)
 
 MAX_TOOL_ROUNDS = 4
 ANOMALY_COOLDOWN = 1800
+# Anomalies that are worth saying less often than every half hour. A shunt
+# does not drift back by itself, so once the owner has been told, telling
+# them again before tomorrow adds nothing.
+ANOMALY_COOLDOWNS = {"soc_drift": 24 * 3600}
+# How far the Battery Monitor's state of charge may imply more energy above
+# the floor than the learned Wh-vs-V curve before the owner hears about it.
+SOC_DRIFT_EXCESS = 0.25
 POLL_ERROR_JUMP = 10
 ARRAY_IMBALANCE_RATIO = 0.30
 ARRAY_IMBALANCE_SECONDS = 1800
@@ -187,7 +194,12 @@ class Agent:
 
         facts = {
             "now": now, "today": today, "data": data, "config": live,
-            "voltage": data.get("batteryVoltage"), "soc": data.get("battSocBM"),
+            "voltage": data.get("batteryVoltage"),
+            # Display only, everywhere it appears. What the pack holds is
+            # answered by loadmodel's Wh-vs-V curve, learned from what the
+            # house actually took out between two voltages, and no rule and
+            # no guard check reads this.
+            "soc": data.get("battSocBM"),
             "load_w": None if gen_running else (data.get("acPower1") or 0)
                                               + (data.get("acPower2") or 0),
             "solar_w": solar_w, "gen_running": gen_running,
@@ -343,7 +355,8 @@ class Agent:
             f"({'weekend' if t.weekday() >= 5 else 'weekday'})",
             "",
             "NOW",
-            f"  battery {_fmt(f['voltage'], 2)} V, SOC {f['soc']}%, "
+            f"  battery {_fmt(f['voltage'], 2)} V, SOC {f['soc']}% "
+            f"(display only - nothing is decided on it), "
             f"monitor {'online' if f['data'].get('battMonitorOnline') else 'OFFLINE'}",
             f"  solar {f['solar_w']} W, house load "
             f"{'unknown (generator running)' if f['load_w'] is None else str(f['load_w']) + ' W'}",
@@ -764,7 +777,7 @@ class Agent:
 
         An answer must be grounded in a tool result. Qwen3-8B will sometimes
         answer a question about live state without calling anything, and then
-        it invents the number — which POLICY 8 forbids. So a reply produced
+        it invents the number — which POLICY 9 forbids. So a reply produced
         with no tool call is retried once, and if the model still will not
         look, Python answers from /data instead of letting a made-up voltage
         reach the owner or Alexa.
@@ -950,15 +963,52 @@ class Agent:
                               f"Battery is at {v:.2f} V with no generator running "
                               f"and auto-gen disabled."))
 
+        drift = self.soc_drift(data)
+        if drift:
+            fired.append(drift)
+
         raised = []
         for key, message in fired:
-            if now - self.anomaly_last.get(key, 0) < ANOMALY_COOLDOWN:
+            if now - self.anomaly_last.get(
+                    key, 0) < ANOMALY_COOLDOWNS.get(key, ANOMALY_COOLDOWN):
                 continue
             self.anomaly_last[key] = now
             raised.append((key, message))
             log.warning("anomaly %s: %s", key, message)
             self.on_anomaly(key, message)
         return raised
+
+    def soc_drift(self, data, floor_v=52.0, now=None):
+        """The Battery Monitor claiming more charge than the curve, or None.
+
+        Nothing decides on the Battery Monitor's state of charge any more, so
+        a shunt that has drifted no longer moves a threshold - and would
+        never be noticed either. This is the check that keeps it visible.
+        Not asked while a generator is running: both the voltage and the
+        shunt read high under charge, and the curve is a discharge curve.
+        """
+        if (data.get("mep803aAction") == history.GEN_RUNNING
+                or data.get("kubotaAction") == history.GEN_RUNNING):
+            return None
+        if data.get("battMonitorOnline") is False:
+            return None
+        try:
+            d = self.model.soc_disagreement(data.get("battSocBM"),
+                                            data.get("batteryVoltage"),
+                                            floor_v=floor_v, now=now)
+        except sqlite3.Error as e:
+            log.warning("could not compare SOC with the learned curve: %s", e)
+            return None
+        if not d or d["excess"] <= SOC_DRIFT_EXCESS:
+            return None
+        return ("soc_drift",
+                f"Battery Monitor SOC {d['soc_pct']:.0f}% implies "
+                f"{d['implied_wh']:,} Wh above {floor_v:.1f} V at "
+                f"{d['voltage']:.2f} V; the learned Wh-vs-V curve says "
+                f"{d['learned_wh']:,} Wh ({d['source']}, {d['nights']} nights) "
+                f"— {d['excess'] * 100:.0f}% more than the pack has been seen "
+                f"to hold. The shunt may need re-syncing. No decision uses "
+                f"SOC, so nothing has moved because of it.")
 
     def on_anomaly(self, key, message):
         """Wake the model with the anomaly as its question."""

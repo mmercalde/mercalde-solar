@@ -5,7 +5,14 @@ SPEC section 5:
   - overnight drawdown Wh (sunset -> sunrise) by month
   - solar yield vs cloud cover, learned per month
   - charge rate per generator, solo and paired
+  - watt-hours between two pack voltages, from overnight discharges
   - excludes every hour a generator was running, exercise runs included
+
+What the pack holds is the Wh-vs-V curve and never the Battery Monitor's
+state of charge. That figure is one shunt's percentage multiplied by a
+capacity derived from the same shunt, so it cannot check itself; it is shown
+to the owner and used in no decision, and `soc_disagreement` watches it
+against the curve so a drifted shunt is still noticed.
 
 The model never guesses past the evidence: where there is not enough history
 it returns None and says how much it has, so the guard and the plan record can
@@ -49,6 +56,23 @@ PROJECTION_SOON_SECONDS = 900
 # is treated as a point. The backfill supplies thousands per bin; live
 # sampling alone can take weeks to reach it at the start threshold.
 MIN_SOC_OBSERVATIONS = 10
+
+# --- the energy-vs-voltage curve ---------------------------------------------
+#
+# How many watt-hours sit between two pack voltages, learned from what the
+# house actually took out between them on nights the pack was doing nothing
+# else. It replaces state of charge times capacity, which asked the Battery
+# Monitor's shunt for a number no one had checked against the meter.
+#
+# A quarter of a volt: an ordinary discharge hour moves the pack across one
+# or two of these, so a night contributes a rate to each bin it crosses
+# rather than one lump to whichever bin it happened to sit in.
+ENERGY_BIN_V = 0.25
+# A night that clipped the corner of a bin has a Wh-per-volt that is mostly
+# rounding. It has to cross this much of the bin to speak for it.
+MIN_BIN_FRACTION = 0.4
+# Nights behind a bin before it is quoted.
+MIN_NIGHTS_PER_BIN = 3
 # The window the curve is built over. Wider than any plausible pack voltage,
 # so the query never has to guess at the range it will find data in.
 CURVE_V_LOW, CURVE_V_HIGH = 40.0, 70.0
@@ -514,6 +538,217 @@ class LoadModel:
                         "nights": len(nights), "source": label}
         return None
 
+    # --- energy against voltage ---------------------------------------------
+
+    def _discharge_nights(self, now):
+        """{night: {bin: [Wh, volts crossed]}} for clean overnight discharges.
+
+        One record per hour the pack was doing nothing but supplying the
+        house: between sunset and sunrise, no generator producing, no solar,
+        and the voltage falling. The hour's load Wh is spread across the
+        voltage bins between the hour's high and low reading in proportion to
+        how much of each bin it crossed, so an hour that fell 54.40 to 53.90
+        contributes a rate to each of the two bins it passed through instead
+        of a lump to one of them.
+
+        Cached on the shape of the table, like the load rows: a forecast walk
+        asks for this many times and the query is a three-way join.
+        """
+        probe = self.conn.execute(
+            "SELECT COUNT(*) AS n, MAX(hour_ts) AS newest FROM hourly").fetchone()
+        times = sun.times(self.cfg, now=now)
+        if not times:
+            return {}
+        sunset_h = history.local(times[1], self.cfg).hour
+        sunrise_h = history.local(times[0], self.cfg).hour
+        key = (probe["n"], probe["newest"], sunset_h, sunrise_h)
+        cached = getattr(self, "_nights_cache", None)
+        if cached and cached[0] == key:
+            return cached[1]
+
+        rows = self.conn.execute(
+            "SELECT b.hour_ts, b.min_v, b.max_v, l.wh_out AS load_wh, "
+            "       COALESCE(g.wh_in, 0) AS gen_wh, "
+            "       COALESCE(s.wh_in, 0) AS solar_wh "
+            "FROM hourly b "
+            "JOIN hourly l ON l.hour_ts = b.hour_ts AND l.device = 'load' "
+            "LEFT JOIN hourly g ON g.hour_ts = b.hour_ts AND g.device = 'gen' "
+            "LEFT JOIN hourly s ON s.hour_ts = b.hour_ts AND s.device = 'solar' "
+            "WHERE b.device = 'battery' AND b.min_v IS NOT NULL "
+            "  AND b.max_v IS NOT NULL AND l.wh_out IS NOT NULL "
+            "ORDER BY b.hour_ts").fetchall()
+        running = set()
+        if rows:
+            # `gen` energy covers the scraped years; gen_runs covers the live
+            # period. Neither alone spans the history this is built from.
+            running = history.gen_running_hours(
+                self.conn, rows[0]["hour_ts"], rows[-1]["hour_ts"] + 3600)
+
+        nights = {}
+        for r in rows:
+            t = history.local(r["hour_ts"], self.cfg)
+            if not (t.hour >= sunset_h or t.hour < sunrise_h):
+                continue
+            if r["gen_wh"] > 0 or r["solar_wh"] > 0 or r["hour_ts"] in running:
+                continue
+            lo, hi, wh = r["min_v"], r["max_v"], r["load_wh"]
+            if hi <= lo or not wh or wh <= 0:
+                continue
+            night = (t.date() if t.hour >= sunset_h
+                     else (t - timedelta(days=1)).date())
+            bins = nights.setdefault(night, {})
+            span = hi - lo
+            b = int(lo // ENERGY_BIN_V)
+            while b * ENERGY_BIN_V < hi:
+                a = max(lo, b * ENERGY_BIN_V)
+                z = min(hi, (b + 1) * ENERGY_BIN_V)
+                if z > a:
+                    cell = bins.setdefault(b, [0.0, 0.0])
+                    cell[0] += wh * (z - a) / span
+                    cell[1] += z - a
+                b += 1
+        self._nights_cache = (key, nights)
+        return nights
+
+    def _night_tiers(self, now, month=None):
+        """({night: bins}, label) newest evidence first - the profile's tiers.
+
+        Deliberately the same windows overnight_drawdown walks, so "last 14
+        nights" means the same fortnight in both and the plan record cannot
+        quote one against the other.
+        """
+        nights = self._discharge_nights(now)
+        today = history.local(now, self.cfg).date()
+        month = month or history.local(now, self.cfg).month
+        for days, label in RECENT_TIERS:
+            yield {n: v for n, v in nights.items()
+                   if 0 <= (today - n).days <= days}, label
+        yield ({n: v for n, v in nights.items()
+                if n.month == month and n.year < today.year},
+               f"{calendar.month_abbr[month]} in prior years")
+        yield nights, "all history"
+
+    @staticmethod
+    def _energy_bins(nights):
+        """{bin: (median Wh across nights, nights behind it)}.
+
+        The median is taken over watt-hours per volt and multiplied back up,
+        so a night that crossed half a bin and one that crossed all of it are
+        the same measurement rather than one being half the other.
+        """
+        rates = {}
+        for bins in nights.values():
+            for b, (wh, volts) in bins.items():
+                if volts >= ENERGY_BIN_V * MIN_BIN_FRACTION:
+                    rates.setdefault(b, []).append(wh / volts)
+        return {b: (_median(v) * ENERGY_BIN_V, len(v))
+                for b, v in rates.items() if len(v) >= MIN_NIGHTS_PER_BIN}
+
+    @staticmethod
+    def _sum_bins(bins, v_from, v_to):
+        """(Wh between two voltages, nights behind the thinnest bin, gap).
+
+        `gap` names the first stretch no night crossed, because a curve with
+        a hole in it cannot answer for a range that spans the hole and saying
+        so is better than adding up the parts that are there.
+        """
+        total, fewest = 0.0, None
+        b = int(v_from // ENERGY_BIN_V)
+        while b * ENERGY_BIN_V < v_to:
+            a = max(v_from, b * ENERGY_BIN_V)
+            z = min(v_to, (b + 1) * ENERGY_BIN_V)
+            if z > a:
+                if b not in bins:
+                    return None, None, (f"no night crossed "
+                                        f"{b * ENERGY_BIN_V:.2f}-"
+                                        f"{(b + 1) * ENERGY_BIN_V:.2f} V")
+                wh, n = bins[b]
+                total += wh * (z - a) / ENERGY_BIN_V
+                fewest = n if fewest is None else min(fewest, n)
+            b += 1
+        return total, fewest, None
+
+    def energy_above(self, v_from, v_to, month=None, now=None):
+        """Watt-hours the pack holds between two voltages, learned.
+
+        The successor to state of charge times capacity. That asked the
+        Battery Monitor what fraction of the pack was left and multiplied by
+        a size derived from the same shunt, so a shunt that had drifted was
+        both the measurement and its own check. This asks the house instead:
+        on nights the pack was doing nothing but supplying it, how many
+        watt-hours went out between these two voltages.
+
+        {"wh", "nights", "source", ...} or {"wh": None, "reason": ...}.
+        """
+        now = int(now or time.time())
+        if v_from is None or v_to is None:
+            return {"wh": None, "reason": "no pack voltage"}
+        if v_to <= v_from:
+            return {"wh": 0, "nights": None, "source": "at or below the floor",
+                    "from_v": v_from, "to_v": v_to}
+        if not self._discharge_nights(now):
+            return {"wh": None,
+                    "reason": "no overnight discharge on record yet; run "
+                              "scrape_gateway.py --backfill"}
+        tried = []
+        for nights, label in self._night_tiers(now, month):
+            if len(nights) < MIN_NIGHTS_PER_TIER and label != "all history":
+                tried.append(f"{label}: {len(nights)} night"
+                             f"{'' if len(nights) == 1 else 's'}")
+                continue
+            total, fewest, gap = self._sum_bins(self._energy_bins(nights),
+                                                v_from, v_to)
+            if gap:
+                tried.append(f"{label}: {gap}")
+                continue
+            return {"wh": round(total), "nights": fewest, "source": label,
+                    "from_v": v_from, "to_v": v_to}
+        return {"wh": None, "reason": "; ".join(tried)}
+
+    def soc_disagreement(self, soc_pct, voltage, floor_v=52.0, now=None):
+        """How far the Battery Monitor's state of charge sits above the curve.
+
+        Two answers to one question - how many watt-hours are in the pack
+        above the floor. One is the shunt's percentage against a capacity
+        derived from the same shunt; the other is what the house has actually
+        taken out between those voltages on nights the pack was doing nothing
+        else. Nothing decides on the first any more, which is exactly why it
+        is worth watching: a shunt that has drifted is invisible once you
+        stop believing it.
+
+        {"implied_wh", "learned_wh", "excess"} where excess is the fraction
+        by which the shunt is the higher of the two, or None when either side
+        cannot be computed.
+        """
+        now = int(now or time.time())
+        if soc_pct is None or voltage is None or voltage <= floor_v:
+            return None
+        soc_floor = self.soc_for_voltage(floor_v)
+        capacity = self.capacity_wh()
+        if soc_floor is None or capacity is None:
+            return None
+        learned = self.energy_above(floor_v, voltage, now=now)
+        if learned.get("wh") is None or learned["wh"] <= 0:
+            return None
+        implied = (soc_pct - soc_floor) / 100.0 * capacity
+        return {"implied_wh": round(implied), "learned_wh": learned["wh"],
+                "excess": implied / learned["wh"] - 1.0,
+                "nights": learned["nights"], "source": learned["source"],
+                "floor_v": floor_v, "voltage": voltage, "soc_pct": soc_pct}
+
+    def energy_curve_status(self):
+        """What the curve covers, for diagnostics and the plan record."""
+        now = int(time.time())
+        nights = self._discharge_nights(now)
+        bins = self._energy_bins(nights)
+        return {
+            "nights": len(nights),
+            "bins": len(bins),
+            "volts_low": round(min(bins) * ENERGY_BIN_V, 2) if bins else None,
+            "volts_high": round((max(bins) + 1) * ENERGY_BIN_V, 2) if bins else None,
+            "bin_v": ENERGY_BIN_V,
+        }
+
     # --- solar --------------------------------------------------------------
 
     def solar_model(self, month=None, now=None):
@@ -854,33 +1089,28 @@ class LoadModel:
         """
         now = int(now or time.time())
         sample = history.latest_sample(self.conn, at=self._at(now))
-        if not sample or sample["batt_soc"] is None:
-            return {"reached": None, "reason": "no battery monitor sample"}
+        if not sample or sample["battery_v"] is None:
+            return {"reached": None, "reason": "no battery sample"}
 
-        soc_target = self.soc_for_voltage(target_v)
-        if soc_target is None:
-            status = self.soc_curve_status()
-            if status["points"]:
-                reason = (f"the learned voltage/SOC curve only covers "
-                          f"{status['volts_low']}-{status['volts_high']} V, "
-                          f"so {target_v} V is off the end of it")
-            else:
-                reason = (f"no voltage/SOC history yet, so SOC at {target_v} V "
-                          f"is unknown; run scrape_gateway.py --backfill")
-            return {"reached": None, "reason": reason}
-        capacity = self.capacity_wh()
-        if capacity is None:
-            return {"reached": None, "reason": "pack capacity not learned"}
-
-        available_wh = (sample["batt_soc"] - soc_target) / 100.0 * capacity
+        # The same question the deficit asks, off the same curve, so the
+        # projection and the deficit cannot disagree about what the pack is
+        # holding tonight.
+        holds = self.energy_above(target_v, sample["battery_v"], now=now)
+        if holds.get("wh") is None:
+            return {"reached": None,
+                    "reason": f"the learned Wh-vs-V curve cannot say what the "
+                              f"pack holds above {target_v:.1f} V "
+                              f"({holds['reason']})"}
+        available_wh = holds["wh"]
         if available_wh <= 0:
             # There is nothing left above the target, so the answer is "now",
             # not an unknown. Leaving `at` unset printed "?" from 03:10 onward
             # on the first live night, exactly when the number mattered most.
             return {"reached": now, "at": "now", "hours": 0.0,
                     "reason": "already at or below target",
-                    "soc_now": sample["batt_soc"], "soc_target": round(soc_target, 1),
-                    "available_wh": round(available_wh)}
+                    "voltage": sample["battery_v"],
+                    "available_source": f"learned Wh-vs-V, {holds['nights']} nights",
+                    "available_wh": available_wh}
 
         forecast = weather.hourly(self.cfg, hours=hours, now=now)
         solar_by_ts = {f["ts"]: f for f in forecast}
@@ -913,14 +1143,15 @@ class LoadModel:
                 return {"reached": reached,
                         "at": self._at_label(reached, now),
                         "hours": round(max(0.0, reached - now) / 3600.0, 2),
-                        "soc_now": sample["batt_soc"],
-                        "soc_target": round(soc_target, 1),
-                        "capacity_wh": capacity,
-                        "available_wh": round(available_wh)}
+                        "voltage": sample["battery_v"],
+                        "available_source": f"learned Wh-vs-V, "
+                                            f"{holds['nights']} nights",
+                        "available_wh": available_wh}
             remaining -= net
         return {"reached": None, "reason": f"not reached within {hours} h",
-                "soc_now": sample["batt_soc"], "soc_target": round(soc_target, 1),
-                "available_wh": round(available_wh)}
+                "voltage": sample["battery_v"],
+                "available_source": f"learned Wh-vs-V, {holds['nights']} nights",
+                "available_wh": available_wh}
 
     # --- what a generator can do in a run window ----------------------------
 
@@ -994,7 +1225,7 @@ class LoadModel:
                 "capacity_wh": self.capacity_wh(),
                 "assumed": True, "assumed_net": True}
 
-    def hours_to_target(self, from_v, target_v, rate, soc_now=None):
+    def hours_to_target(self, from_v, target_v, rate):
         """Hours for `rate` to lift the pack from from_v to target_v.
 
         Amps become a state-of-charge rate against the learned capacity, and
@@ -1009,20 +1240,23 @@ class LoadModel:
         soc_target = self.soc_for_voltage(target_v)
         if soc_target is None:
             return None
-        if soc_now is None:
-            soc_now = self.soc_for_voltage(from_v)
+        soc_now = self.soc_for_voltage(from_v)
         if soc_now is None:
             return None
         if soc_target <= soc_now:
             return 0.0
         return (soc_target - soc_now) / rate["soc_per_h"]
 
-    def reach(self, gen, from_v, target_v, window_h, solo=None, soc_now=None,
-              now=None):
+    def reach(self, gen, from_v, target_v, window_h, solo=None, now=None):
         """Whether `gen` can lift the pack to target_v inside window_h.
 
         One place, so the guard's refusal and the POLICY detail can never
         quote different arithmetic for the same question.
+
+        Where the pack stands is read from `from_v` against a learned curve
+        and never from the Battery Monitor's live state of charge. A shunt
+        reading high says a target is nearer than it is, and prices a run
+        short at the moment the run is being decided on.
 
         Three ways of answering, best evidence first. What the pack was
         observed to do between these two voltages while charging; failing
@@ -1096,7 +1330,7 @@ class LoadModel:
                                 f"reachable: {basis}")
             soc_target = None
         hours = (delta / soc_per_h if soc_target is None
-                 else self._hours_from(soc_target, from_v, rate, soc_now))
+                 else self._hours_from(soc_target, from_v, rate))
         if hours is None:
             return dict(base, ok=False, rate=rate, hours=None, basis=basis,
                         why=f"neither the charging nor the resting curve "
@@ -1176,24 +1410,22 @@ class LoadModel:
             return None
         return top_soc + slope * (v - top_v)
 
-    def _hours_from(self, soc_target, from_v, rate, soc_now):
+    def _hours_from(self, soc_target, from_v, rate):
         if soc_target is None:
             return None
-        if soc_now is None:
-            soc_now = self.soc_for_voltage(from_v)
+        soc_now = self.soc_for_voltage(from_v)
         if soc_now is None:
             return None
         if soc_target <= soc_now:
             return 0.0
         return (soc_target - soc_now) / rate["soc_per_h"]
 
-    def voltage_after(self, from_v, hours, rate, soc_now=None, curve=None,
-                      soc_per_h=None):
+    def voltage_after(self, from_v, hours, rate, curve=None, soc_per_h=None):
         """The voltage the pack reaches after `hours` at this rate."""
         per_h = soc_per_h if soc_per_h is not None else (rate or {}).get("soc_per_h")
         if not rate or not per_h:
             return None
-        soc = soc_now if soc_now is not None else self.soc_for_voltage(from_v)
+        soc = self.soc_for_voltage(from_v)
         if soc is None:
             return None
         soc = min(100.0, soc + per_h * hours)
@@ -1202,7 +1434,7 @@ class LoadModel:
         return self.volts_for_soc(soc)
 
     def best_reachable_target(self, gen, from_v, window_h, ceiling, floor,
-                              step=0.5, solo=None, soc_now=None, now=None):
+                              step=0.5, solo=None, now=None):
         """The highest stop voltage reachable in the window, rounded down.
 
         Read off the same evidence reach() uses, so a rule that is told 57.0
@@ -1218,7 +1450,7 @@ class LoadModel:
         if v is None:
             rate = self._rate_for(gen, solo, now)
             _, soc_per_h = self.net_from_gross(rate, expected_load)
-            v = self.voltage_after(from_v, window_h, rate, soc_now=soc_now,
+            v = self.voltage_after(from_v, window_h, rate,
                                    curve=curve, soc_per_h=soc_per_h)
         if v is None:
             return None
@@ -1285,12 +1517,8 @@ class LoadModel:
         if not until or until <= now:
             return {"deficit_wh": None, "reason": "no sunrise to reach"}
         sample = history.latest_sample(self.conn, at=self._at(now))
-        if not sample or sample["batt_soc"] is None:
-            return {"deficit_wh": None, "reason": "no battery monitor sample"}
-        soc_floor = self.soc_for_voltage(floor_v)
-        if soc_floor is None:
-            return {"deficit_wh": None,
-                    "reason": f"the learned curve does not reach {floor_v} V"}
+        if not sample or sample["battery_v"] is None:
+            return {"deficit_wh": None, "reason": "no battery sample"}
         capacity = self.capacity_wh()
         if capacity is None:
             return {"deficit_wh": None, "reason": "pack capacity not learned"}
@@ -1298,14 +1526,30 @@ class LoadModel:
         if needed is None:
             return {"deficit_wh": None, "reason": "load profile not learned"}
 
-        available = (sample["batt_soc"] - soc_floor) / 100.0 * capacity
+        # What the pack holds above the floor, from what the house has
+        # actually taken out between those two voltages - not from the
+        # Battery Monitor's state of charge, which is a reading of the shunt
+        # and was being multiplied by a capacity derived from the same shunt.
+        holds = self.energy_above(floor_v, sample["battery_v"], now=now)
+        if holds.get("wh") is None:
+            return {"deficit_wh": None,
+                    "reason": f"the learned Wh-vs-V curve cannot say what the "
+                              f"pack holds above {floor_v:.1f} V "
+                              f"({holds['reason']})"}
+        available = holds["wh"]
         return {"deficit_wh": round(needed - available),
-                "needed_wh": needed, "available_wh": round(available),
+                "needed_wh": needed, "available_wh": available,
+                "available_source": f"learned Wh-vs-V, {holds['nights']} nights",
+                "available_tier": holds["source"],
                 "hours": round((until - now) / 3600.0, 1),
-                "soc_now": sample["batt_soc"], "soc_floor": round(soc_floor, 1),
+                "voltage": sample["battery_v"],
+                # Display only. The Battery Monitor's own figure is kept
+                # beside the answer so the two can be compared, and is used
+                # in no part of it.
+                "soc_now_display": sample["batt_soc"],
                 "capacity_wh": capacity, "floor_v": floor_v, "source": source}
 
-    def topup_target(self, deficit_wh, margin_pct, soc_now, capacity_wh,
+    def topup_target(self, deficit_wh, margin_pct, from_v, capacity_wh,
                      low, high, gen=None, solo=None, now=None):
         """The stop voltage that puts the deficit, plus its margin, in the pack.
 
@@ -1316,6 +1560,10 @@ class LoadModel:
         minutes of run time, and of too little is not getting through the
         night - then clamped.
         """
+        # Where the pack stands comes from its voltage through the learned
+        # curve, never from the Battery Monitor's live state of charge: a
+        # shunt reading high would set a target lower than the deficit needs.
+        soc_now = self.soc_for_voltage(from_v) if from_v is not None else None
         if not capacity_wh or soc_now is None:
             return None
         padded = deficit_wh * (1.0 + margin_pct / 100.0)

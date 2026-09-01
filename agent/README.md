@@ -28,7 +28,9 @@ Every 15 minutes, day and night:
    stands; different ones were moved while it was away and are the owner's.
    Stored intent is never re-asserted over the dashboard either way.
 2. `policy.py` computes every POLICY rule whose condition is arithmetic and
-   says, with the numbers, whether it fires. Whether a target is reachable is
+   says, with the numbers, whether it fires. What the pack holds is watt-hours
+   between two voltages, learned from overnight discharges, and never the
+   Battery Monitor's state of charge. Whether a target is reachable is
    `loadmodel.py`'s answer, from each generator's learned gross delivery less
    the load the run window expects — never in volts per hour or in the shunt
    alone, both of which measure the generator minus the house. The curve is the charge-side one, learned from
@@ -189,6 +191,59 @@ agent/venv/bin/python -c "import sys; sys.path.insert(0,'agent'); \
   import config, history, loadmodel, json; c = config.load(); \
   print(json.dumps(loadmodel.LoadModel(history.connect(), c).learning_status(), indent=1))"
 ```
+
+## What the pack holds
+
+The deficit asks one question: how many watt-hours are in the pack above
+52.0 V. It used to answer with the Battery Monitor's state of charge times a
+capacity — and that capacity is itself derived from the same shunt's
+amp-hours, so the measurement was its own only check. A shunt that had
+drifted would have been believed twice.
+
+`loadmodel.py` learns the answer from the house instead. For every hour the
+pack was doing nothing but supplying it — between sunset and sunrise, no
+generator producing, no solar, voltage falling — the hour's load watt-hours
+are spread across the quarter-volt bins between its high and low reading, in
+proportion to how much of each bin it crossed. Each night contributes a
+watt-hours-per-volt to every bin it passes through; the curve is the median
+across nights, bin by bin, walked through the same recency tiers as the
+overnight profile: last 14 nights, last 60 days, this month in prior years,
+all history. The first tier that can answer the range asked for wins.
+
+The plan record says which:
+
+```
+deficit 7,144 Wh to sunrise above 52.0 V
+  (needs 17,511, holds 21,232 Wh above 52.0 V (learned Wh-vs-V, 25 nights))
+```
+
+A stretch of voltage no night crossed is a gap, not a guess: the curve says
+`no night crossed 52.00-52.25 V` and the deficit reports that it cannot be
+computed, rather than adding up the parts that are there. The same curve
+answers the 52 V projection, so the two cannot disagree about the night.
+
+### The Battery Monitor's SOC
+
+Display only. It appears in the plan record, in `get_status`, in the
+dashboard and in the prompt — labelled — and reaches no rule, no guard check
+and no threshold. The model's decision methods do not accept one: `reach`,
+`best_reachable_target`, `hours_to_target` and `topup_target` take a pack
+voltage and read where it stands off a learned curve, because a shunt reading
+high makes every target look nearer than it is at exactly the moment a run is
+being decided on.
+
+Which is why it is worth watching. Once nothing believes a number, nobody
+notices when it goes wrong, so every five minutes the agent asks both sides
+the same question — how much energy is above 52.0 V — and if the shunt claims
+more than 25% over the learned curve the owner is told, once a day:
+
+> Battery Monitor SOC 92% implies 24,800 Wh above 52.0 V at 55.40 V; the
+> learned Wh-vs-V curve says 18,900 Wh (last 60 days, 12 nights) — 31% more
+> than the pack has been seen to hold. The shunt may need re-syncing. No
+> decision uses SOC, so nothing has moved because of it.
+
+Not asked while a generator is running: both the voltage and the shunt read
+high under charge, and the curve is a discharge curve.
 
 ## The top-up state machine
 
@@ -355,7 +410,7 @@ four things that have actually gone wrong in production:
 | check | what it catches |
 |---|---|
 | tool calls | a call naming no tool, or arguments that will not bind |
-| numbers | a figure in the answer that was in neither the prompt nor any tool result — POLICY 8, and the failure that put an invented voltage in front of Alexa |
+| numbers | a figure in the answer that was in neither the prompt nor any tool result — POLICY 9, and the failure that put an invented voltage in front of Alexa |
 | rules | a POLICY rule that fired and was answered with "no change" instead of being set or overruled |
 | narration | telling the owner a write happened. Only the write path may say that; at 12:17 am a model said it after the guard had refused |
 

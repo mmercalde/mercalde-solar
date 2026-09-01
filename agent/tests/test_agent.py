@@ -45,7 +45,8 @@ def base_facts(cfg, gate_open=False, model=None):
                      "kub_start": 52.0, "kub_stop": 56.0},
         "deficit": {"deficit_wh": 9000, "needed_wh": 32000,
                     "available_wh": 23000, "capacity_wh": 100000,
-                    "soc_now": 63, "soc_floor": 40.0, "floor_v": 52.0,
+                    "available_source": "learned Wh-vs-V, 10 nights",
+                    "soc_now_display": 63, "floor_v": 52.0,
                     "hours": 8.2, "source": "last 14 nights"},
     }
     f["voltage"] = 54.2
@@ -186,7 +187,7 @@ def test_an_empty_answer_is_reported_as_such():
 # --- answer grounding -------------------------------------------------------
 
 def test_an_ungrounded_answer_is_replaced_with_real_data(a, monkeypatch):
-    """POLICY 8: a number no tool returned must never reach the owner."""
+    """POLICY 9: a number no tool returned must never reach the owner."""
     monkeypatch.setattr(a, "run_model", lambda *args, **kw: ("Battery is 99.9 V.", None))
     monkeypatch.setattr(agentmod.history, "fetch_data", lambda *a, **k: {
         "batteryVoltage": 54.08, "battSocBM": 89,
@@ -350,12 +351,71 @@ def stub_data(**over):
 @pytest.fixture
 def quiet(a, monkeypatch):
     monkeypatch.setattr(a, "on_anomaly", lambda key, msg: None)
+    # The shunt check needs a learned pack; the tests that want it stub the
+    # model's answer directly, and the rest must not fire it by accident.
+    monkeypatch.setattr(a.model, "soc_disagreement",
+                        lambda *args, **kw: None)
     return a
 
 
 def fire(a, monkeypatch, **over):
     monkeypatch.setattr(agentmod.history, "fetch_data", lambda *x, **k: stub_data(**over))
     return {k for k, _ in a.check_anomalies()}
+
+
+# --- the shunt against the curve --------------------------------------------
+
+def disagreeing(a, monkeypatch, excess):
+    monkeypatch.setattr(a.model, "soc_disagreement", lambda *args, **kw: {
+        "implied_wh": 24800, "learned_wh": 18900, "excess": excess,
+        "nights": 12, "source": "last 60 days", "floor_v": 52.0,
+        "voltage": 55.4, "soc_pct": 92})
+
+
+def test_a_shunt_claiming_a_quarter_more_than_the_curve_is_reported(quiet,
+                                                                    monkeypatch):
+    """Nothing decides on the Battery Monitor any more, which is exactly why
+    a drifted shunt would otherwise never be noticed."""
+    disagreeing(quiet, monkeypatch, 0.31)
+    assert "soc_drift" in fire(quiet, monkeypatch)
+
+
+def test_a_shunt_within_a_quarter_is_left_alone(quiet, monkeypatch):
+    disagreeing(quiet, monkeypatch, 0.24)
+    assert "soc_drift" not in fire(quiet, monkeypatch)
+
+
+def test_the_shunt_is_not_judged_while_a_generator_runs(quiet, monkeypatch):
+    """Both the voltage and the shunt read high under charge, and the curve
+    is a discharge curve."""
+    disagreeing(quiet, monkeypatch, 0.9)
+    assert "soc_drift" not in fire(quiet, monkeypatch,
+                                   kubotaAction=history.GEN_RUNNING)
+
+
+def test_the_shunt_is_not_judged_while_the_monitor_is_offline(quiet, monkeypatch):
+    disagreeing(quiet, monkeypatch, 0.9)
+    assert "soc_drift" not in fire(quiet, monkeypatch, battMonitorOnline=False)
+
+
+def test_the_owner_hears_about_the_shunt_once_a_day(quiet, monkeypatch):
+    """A shunt does not drift back by itself, so saying it again before
+    tomorrow adds nothing."""
+    disagreeing(quiet, monkeypatch, 0.31)
+    assert "soc_drift" in fire(quiet, monkeypatch)
+    assert "soc_drift" not in fire(quiet, monkeypatch)
+    quiet.anomaly_last["soc_drift"] -= agentmod.ANOMALY_COOLDOWNS["soc_drift"]
+    assert "soc_drift" in fire(quiet, monkeypatch)
+
+
+def test_the_message_gives_both_figures_and_says_nothing_moved(quiet, monkeypatch):
+    disagreeing(quiet, monkeypatch, 0.31)
+    key, message = quiet.soc_drift(stub_data())
+    assert key == "soc_drift"
+    assert "24,800 Wh above 52.0 V" in message
+    assert "18,900 Wh (last 60 days, 12 nights)" in message
+    assert "31% more" in message
+    assert "No decision uses SOC" in message
 
 
 def test_poll_error_jump_fires(quiet, monkeypatch):
@@ -714,7 +774,7 @@ def test_an_owner_edit_cancels_an_outstanding_raise(a, cfg, conn, monkeypatch):
     a.guard._evaluate({"mep_start": 52.0, "mep_stop": 56.0,
                        "kub_start": 52.0, "kub_stop": 56.0},
                       {"battMonitorOnline": True, "clockTime": "22:00:00",
-                       "batteryVoltage": 54.0}, live, 54.0, 80,
+                       "batteryVoltage": 54.0}, live, 54.0,
                       int(datetime(2026, 8, 28, 22, tzinfo=history.tzinfo(cfg))
                           .timestamp()))
     assert a.guard.raised_starts() == {}

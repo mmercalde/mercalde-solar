@@ -49,7 +49,9 @@ def night(cfg):
         # kilowatt-hour is one point and 52.0 V is 40%.
         "deficit": {"deficit_wh": 9000, "needed_wh": 32000,
                     "available_wh": 23000, "capacity_wh": 100000,
-                    "soc_now": 63, "soc_floor": 40.0, "floor_v": 52.0,
+                    "available_source": "learned Wh-vs-V, 10 nights",
+                    "available_tier": "last 14 nights",
+                    "soc_now_display": 63, "floor_v": 52.0,
                     "hours": 8.2, "source": "last 14 nights"},
         "thresholds": {"mep_start": 52.0, "mep_stop": 56.0,
                        "kub_start": 52.0, "kub_stop": 56.0},
@@ -69,6 +71,23 @@ def test_the_deficit_sets_the_target(cfg, night, model):
     assert "deficit 9,000 Wh to sunrise above 52.0 V" in r["detail"]
     assert "needs 32,000, holds 23,000" in r["detail"]
     assert "+15% is 10,350 Wh → stop 55.5" in r["detail"]
+
+
+def test_the_holds_term_says_where_it_came_from(cfg, night, model):
+    """It used to be state of charge times capacity, with neither shown. Now
+    it is watt-hours between two voltages and it says so."""
+    r = policy.solo_top_up(cfg, night, model)
+    assert ("holds 23,000 Wh above 52.0 V (learned Wh-vs-V, 10 nights)"
+            in r["detail"])
+
+
+def test_the_rule_reads_no_state_of_charge(cfg, night, model):
+    """The Battery Monitor's figure is in the facts for the plan record's
+    header and nothing else. Removing it must not change a single number."""
+    with_soc = policy.solo_top_up(cfg, dict(night, soc=99.0), model)
+    without = policy.solo_top_up(cfg, dict(night, soc=None), model)
+    assert with_soc["detail"] == without["detail"]
+    assert with_soc["proposal"] == without["proposal"]
 
 
 def test_the_stop_clears_the_start_the_guard_will_require(cfg, night, model):
@@ -185,11 +204,11 @@ def test_stepping_up_can_reach_both(cfg, night):
 def test_when_no_band_reaches_it_both_take_what_they_can(cfg, night):
     """The deadlock decision still stands: a target out of reach is a reason
     to ask for less, not to do nothing. Two hours at 12 points an hour takes
-    63% to 87%, which is 56.7."""
+    the 62% the pack's 54.2 V implies to 86%, which is 56.6."""
     model = StubModel(rates={"kubota": {"gross_w": 4900, "soc_per_h": 3.0},
                              "mep": {"gross_w": 5900, "soc_per_h": 4.0}},
                       pair={"gross_w": 13900, "soc_per_h": 12.0})
-    night["deficit"] = dict(night["deficit"], deficit_wh=20000)
+    night["deficit"] = dict(night["deficit"], deficit_wh=22000)
     r = policy.solo_top_up(cfg, night, model)
     assert r["fires"] and r["gen"] == "mep+kubota"
     assert "no band reaches it" in r["detail"]

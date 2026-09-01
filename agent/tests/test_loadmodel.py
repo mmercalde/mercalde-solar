@@ -20,6 +20,40 @@ def add_load_hour(conn, cfg, day, hour, wh, source="live"):
                        None, None, None, wh, None, None, 60, source)
 
 
+def add_discharge_night(conn, cfg, night, top_v=56.0, bottom_v=52.0,
+                        wh_per_hour=1000, hours=(20, 21, 22, 23, 0, 1, 2, 3),
+                        source="live"):
+    """One clean overnight discharge, for the Wh-vs-V curve.
+
+    The pack walks down in equal steps while the house draws the same each
+    hour, so the curve is a flat Wh per volt and a test can state what it
+    should say: 56.0 to 52.0 over eight hours at 1,000 Wh is 2,000 Wh a volt.
+    """
+    d0 = datetime.strptime(night, "%Y-%m-%d").date()
+    step = (top_v - bottom_v) / len(hours)
+    for i, h in enumerate(hours):
+        day = d0 if h >= 19 else d0 + timedelta(days=1)
+        ts = ts_at(cfg, day.strftime("%Y-%m-%d"), h)
+        hi = top_v - i * step
+        lo = hi - step
+        history.put_hourly(conn, ts, "battery", (hi + lo) / 2, None, 0,
+                           wh_per_hour, lo, hi, 60, source)
+        history.put_hourly(conn, ts, "load", None, None, None, wh_per_hour,
+                           None, None, 60, source)
+        history.put_hourly(conn, ts, "solar", None, None, 0, None, None, None,
+                           60, source)
+        history.put_hourly(conn, ts, "gen", None, None, 0, None, None, None,
+                           60, source)
+    conn.commit()
+
+
+def add_discharge_nights(conn, cfg, first="2026-08-10", n=5, **kw):
+    d0 = datetime.strptime(first, "%Y-%m-%d").date()
+    for i in range(n):
+        add_discharge_night(conn, cfg, (d0 + timedelta(days=i)).strftime("%Y-%m-%d"),
+                            **kw)
+
+
 def build_load_history(conn, cfg, days=30, start="2026-07-01",
                        night_wh=900, day_wh=400):
     """A month of hourly load: heavier at night, lighter while the sun is up."""
@@ -337,35 +371,38 @@ def test_no_history_reports_no_curve(lm):
 
 
 def test_projection_works_from_backfill_without_live_soc(conn, cfg, lm, monkeypatch):
-    """The reported bug: 483 days of history, yet no SOC at 52.0 V."""
+    """The reported bug: 483 days of history, yet nothing to project from."""
     monkeypatch.setattr(weather, "hourly", lambda *a, **k: [])
     build_load_history(conn, cfg, days=30, start="2026-08-01", night_wh=1000)
-    scraped(conn, {52.0: (50, 900), 54.0: (75, 900)})
+    add_discharge_nights(conn, cfg)
     base = ts_at(cfg, "2026-08-20", 22)
-    # Live samples supply only the present state and the pack size.
+    # Live samples supply only the present voltage and the pack size.
     for i in range(20):
         add_sample(conn, cfg, base + i * 60, 54.0, 60, -1000, ah=1200)
     p = lm.project_voltage(52.0, now=base + 1300)
     assert p["reached"] is not None, p.get("reason")
-    assert p["soc_target"] == 50
+    # 2,000 Wh a volt, two volts above the floor.
+    assert p["available_wh"] == 4000
+    assert p["available_source"] == "learned Wh-vs-V, 5 nights"
 
 
 def test_the_projection_says_when_the_curve_is_too_narrow(conn, cfg, lm, monkeypatch):
+    """Nights that never went below 54.0 cannot say what is under it."""
     monkeypatch.setattr(weather, "hourly", lambda *a, **k: [])
-    scraped(conn, {55.0: (85, 400), 56.0: (95, 400)})
+    add_discharge_nights(conn, cfg, top_v=56.0, bottom_v=54.0)
     base = ts_at(cfg, "2026-08-20", 22)
     for i in range(20):
         add_sample(conn, cfg, base + i * 60, 55.5, 90, -1000, ah=1200)
     p = lm.project_voltage(52.0, now=base)
     assert p["reached"] is None
-    assert "only covers 55.0-56.0 V" in p["reason"]
+    assert "no night crossed 52.00-52.25 V" in p["reason"]
 
 
 def test_with_no_curve_at_all_the_projection_points_at_the_backfill(conn, cfg, lm,
                                                                     monkeypatch):
     monkeypatch.setattr(weather, "hourly", lambda *a, **k: [])
     base = ts_at(cfg, "2026-08-20", 22)
-    # Too few readings for any bin to qualify, so there is no curve at all.
+    # No overnight discharge on record at all.
     for i in range(4):
         add_sample(conn, cfg, base + i * 60, 54.0, 60, -1000, ah=1200)
     p = lm.project_voltage(52.0, now=base)
@@ -383,17 +420,16 @@ def test_capacity_from_ah_remaining(conn, cfg, lm):
 def test_project_voltage_walks_the_load_forward(conn, cfg, lm, monkeypatch):
     monkeypatch.setattr(weather, "hourly", lambda *a, **k: [])   # night, no sun
     build_load_history(conn, cfg, days=30, start="2026-08-01", night_wh=1000)
+    add_discharge_nights(conn, cfg)
     base = ts_at(cfg, "2026-08-20", 22)
     for i in range(20):
         add_sample(conn, cfg, base + i * 60, 54.0, 60, -1000, ah=1200)
-    for i in range(20):
-        add_sample(conn, cfg, base - 86400 + i * 60, 52.0, 50, -1000, ah=1000)
 
     p = lm.project_voltage(52.0, now=base + 1300)
     assert p["reached"] is not None
-    assert p["soc_target"] == 50 and p["soc_now"] == 60
-    # 10% of a ~127 kWh pack at 1000 Wh/h is about 12.7 h.
-    assert 10 < p["hours"] < 15
+    # 4,000 Wh above the floor at 1,000 Wh an hour is four hours.
+    assert p["available_wh"] == 4000
+    assert 3.5 < p["hours"] < 4.5
 
 
 def test_project_voltage_says_why_it_cannot(conn, cfg, lm, monkeypatch):
@@ -474,12 +510,16 @@ def test_hours_to_target_is_state_of_charge_not_volts(cfg, reachable):
     assert round(hours, 2) == round(30 / per_h, 2)
 
 
-def test_the_measured_state_of_charge_beats_the_curve_when_it_is_known(cfg,
-                                                                       reachable):
-    now = ts_at(cfg, "2026-08-20", 22)
-    rate, _ = netted(reachable, "mep", now)
-    assert (reachable.hours_to_target(54.0, 57.0, rate, soc_now=80)
-            < reachable.hours_to_target(54.0, 57.0, rate))
+def test_where_the_pack_stands_is_read_from_its_voltage(cfg, reachable):
+    """It used to prefer the Battery Monitor's live state of charge when it
+    was given one. There is no way to give it one now: a shunt reading high
+    made every target look nearer than it was, at the moment a run was being
+    decided on."""
+    import inspect
+    for name in ("reach", "best_reachable_target", "hours_to_target",
+                 "voltage_after"):
+        params = inspect.signature(getattr(reachable, name)).parameters
+        assert "soc_now" not in params, f"{name} still accepts a live SOC"
 
 
 def test_a_target_already_reached_takes_no_time(cfg, reachable):
@@ -490,7 +530,7 @@ def test_a_target_already_reached_takes_no_time(cfg, reachable):
 
 def test_reach_says_yes_with_the_arithmetic(cfg, reachable):
     now = ts_at(cfg, "2026-08-20", 22)
-    r = reachable.reach("mep", 56.0, 57.0, 3.0, soc_now=80, now=now)
+    r = reachable.reach("mep", 56.0, 57.0, 3.0, now=now)
     assert r["ok"] and r["net_w"] == 4770
     assert ("reachable in 2.2 h at gross 5.4 kW − expected load 0.6 kW = "
             "4.8 kW into pack") in r["why"]
@@ -498,7 +538,7 @@ def test_reach_says_yes_with_the_arithmetic(cfg, reachable):
 
 def test_reach_says_no_with_the_arithmetic(cfg, reachable):
     now = ts_at(cfg, "2026-08-20", 22)
-    r = reachable.reach("mep", 52.0, 57.0, 2.0, soc_now=40, now=now)
+    r = reachable.reach("mep", 52.0, 57.0, 2.0, now=now)
     assert not r["ok"]
     assert "57.0 needs 11.1 h at gross 5.4 kW − expected load 0.6 kW" in r["why"]
     assert "but the run window is 2.0 h" in r["why"]
@@ -567,7 +607,7 @@ def test_a_capped_run_that_fell_short_refuses_that_target(conn, cfg, lm):
                          gen="kubota", solo=1, soc_start=45, soc_end=70)
     scraped(conn, {52.0: (40, 900), 57.0: (90, 900)})
     now = ts_at(cfg, "2026-08-20", 22)
-    r = lm.reach("kubota", 53.3, 57.0, 2.0, solo=True, soc_now=45, now=now)
+    r = lm.reach("kubota", 53.3, 57.0, 2.0, solo=True, now=now)
     assert not r["ok"] and r["hours"] is None
     assert "3 runs had the window and stopped at 55.8" in r["basis"]
     assert "57.0 was not reached" in r["why"]
@@ -578,7 +618,7 @@ def test_a_target_those_runs_did_reach_is_still_answered(conn, cfg, lm):
         add_charging_run(conn, cfg, f"2026-08-{10+i:02d}", 2, 120, 53.3, 55.8,
                          gen="kubota", solo=1, soc_start=45, soc_end=70)
     now = ts_at(cfg, "2026-08-20", 22)
-    r = lm.reach("kubota", 53.3, 55.5, 2.0, solo=True, soc_now=45, now=now)
+    r = lm.reach("kubota", 53.3, 55.5, 2.0, solo=True, now=now)
     assert r["ok"] and r["basis"].startswith("observed while charging")
 
 
@@ -592,7 +632,7 @@ def test_a_run_cut_short_of_the_window_is_not_evidence(conn, cfg, lm):
     scraped(conn, {52.0: (40, 900), 57.0: (90, 900)})
     add_capacity(conn, cfg, ah=2000)
     now = ts_at(cfg, "2026-08-20", 22)
-    r = lm.reach("kubota", 53.3, 57.0, 2.0, solo=True, soc_now=45, now=now)
+    r = lm.reach("kubota", 53.3, 57.0, 2.0, solo=True, now=now)
     assert "had the window" not in (r["basis"] or "")
 
 
@@ -629,21 +669,21 @@ def test_the_highest_reachable_target_rounds_down_to_a_half_volt(cfg, reachable)
     """From 54.0 V (60%) two hours at 4.5%/h reaches 69%, which is 54.9 V."""
     now = ts_at(cfg, "2026-08-20", 22)
     v = reachable.best_reachable_target("mep", 54.0, 2.0, ceiling=57.0,
-                                        floor=52.0, soc_now=60, now=now)
+                                        floor=52.0, now=now)
     assert v == 54.5
 
 
 def test_the_highest_reachable_target_is_capped_by_the_ceiling(cfg, reachable):
     now = ts_at(cfg, "2026-08-20", 22)
     v = reachable.best_reachable_target("mep", 56.0, 8.0, ceiling=57.0,
-                                        floor=55.0, soc_now=80, now=now)
+                                        floor=55.0, now=now)
     assert v == 57.0
 
 
 def test_a_target_below_the_floor_is_not_worth_running_for(cfg, reachable):
     now = ts_at(cfg, "2026-08-20", 22)
     assert reachable.best_reachable_target("mep", 52.0, 1.0, ceiling=57.0,
-                                           floor=55.0, soc_now=40,
+                                           floor=55.0,
                                            now=now) is None
 
 
@@ -718,7 +758,7 @@ def test_the_charge_curve_reads_the_minutes_off_real_runs(conn, cfg, lm):
 def test_reach_prefers_what_was_observed_over_either_curve(conn, cfg, lm):
     """The morning's run answers the question directly: 70 minutes."""
     this_morning(conn, cfg)
-    r = lm.reach(None, 52.0, 56.0, 2.0, solo=False, soc_now=40,
+    r = lm.reach(None, 52.0, 56.0, 2.0, solo=False,
                  now=ts_at(cfg, "2026-08-20", 12))
     assert r["ok"] and round(r["hours"], 3) == round(70 / 60, 3)
     assert r["basis"] == "observed while charging (both generators paired, 3 runs)"
@@ -729,7 +769,7 @@ def test_two_runs_are_not_yet_a_charge_curve(conn, cfg, lm):
     """Under three runs the resting curve is still what is used."""
     this_morning(conn, cfg, n=2)
     scraped(conn, {52.0: (40, 900), 56.0: (85, 900), 57.0: (95, 900)})
-    r = lm.reach(None, 52.0, 56.0, 2.0, solo=False, soc_now=40,
+    r = lm.reach(None, 52.0, 56.0, 2.0, solo=False,
                  now=ts_at(cfg, "2026-08-20", 12))
     assert r["basis"].startswith("estimated from the resting curve, "
                                  "2 charging runs on record")
@@ -758,7 +798,7 @@ def runs_to_57(conn, cfg, n=3, minutes=100):
 def test_runs_that_reached_the_target_answer_it_from_the_minutes(conn, cfg, lm):
     runs_to_57(conn, cfg)
     scraped(conn, {52.0: (40, 900), 57.0: (95, 900)})
-    r = lm.reach(None, 52.0, 57.0, 3.0, solo=False, soc_now=45,
+    r = lm.reach(None, 52.0, 57.0, 3.0, solo=False,
                  now=ts_at(cfg, "2026-08-20", 12))
     assert r["basis"] == "observed while charging (both generators paired, 3 runs)"
     assert round(r["hours"], 3) == round(100 / 60, 3)
@@ -772,7 +812,7 @@ def test_the_charge_curve_prices_a_target_the_minutes_cannot_reach(conn, cfg, lm
     now = ts_at(cfg, "2026-08-20", 12)
     curve = lm.charge_curve(None, solo=False, now=now)
     assert curve.minutes_between(51.5, 57.0) is None, "no run started that low"
-    r = lm.reach(None, 51.5, 57.0, 3.0, solo=False, soc_now=35, now=now)
+    r = lm.reach(None, 51.5, 57.0, 3.0, solo=False, now=now)
     assert r["basis"] == "charging curve (both generators paired, 3 runs)"
     assert "charging curve (both generators paired, 3 runs)" in r["why"]
 
@@ -793,7 +833,7 @@ def test_a_target_no_run_has_reached_is_estimated_and_says_so(conn, cfg, lm):
     this_morning(conn, cfg)
     scraped(conn, {52.0: (40, 900), 56.0: (85, 900), 57.0: (95, 900)})
     now = ts_at(cfg, "2026-08-20", 12)
-    r = lm.reach(None, 52.0, 57.0, 3.0, solo=False, soc_now=40, now=now)
+    r = lm.reach(None, 52.0, 57.0, 3.0, solo=False, now=now)
     assert r["basis"].startswith(
         "estimated, charging curve has no run to this voltage")
     assert r["hours"] is not None and r["hours"] > 0
@@ -807,7 +847,7 @@ def test_a_target_above_the_pack_is_never_priced_at_nothing(conn, cfg, lm):
     this_morning(conn, cfg)
     scraped(conn, {52.0: (40, 900), 56.0: (85, 900), 57.0: (88, 900)})
     now = ts_at(cfg, "2026-08-20", 12)
-    r = lm.reach(None, 55.0, 56.5, 2.0, solo=False, soc_now=89, now=now)
+    r = lm.reach(None, 55.0, 56.5, 2.0, solo=False, now=now)
     assert r["hours"] is None or r["hours"] > 0
     assert "0.0 h" not in r["why"]
 
@@ -821,8 +861,8 @@ def test_the_charge_side_estimate_is_shorter_than_the_resting_one(conn, cfg, lm)
     add_run(conn, cfg, "mep", "2026-08-15", 6, gross_w=8550.0, solo=1)
     scraped(conn, {52.0: (40, 900), 56.0: (85, 900), 57.0: (95, 900)})
     now = ts_at(cfg, "2026-08-20", 12)
-    charging = lm.reach(None, 52.0, 57.0, 8.0, solo=False, soc_now=40, now=now)
-    resting = lm.reach("mep", 52.0, 57.0, 8.0, solo=True, soc_now=40, now=now)
+    charging = lm.reach(None, 52.0, 57.0, 8.0, solo=False, now=now)
+    resting = lm.reach("mep", 52.0, 57.0, 8.0, solo=True, now=now)
     assert charging["basis"].startswith("observed while charging")
     assert resting["basis"].startswith("estimated from the resting curve, "
                                        "0 charging runs")
@@ -883,7 +923,7 @@ def test_the_highest_reachable_target_reads_off_the_charge_curve(conn, cfg, lm):
                         now=ts_at(cfg, "2026-08-20", 12)).voltage_after(52.0, 35 / 60)
     assert 53.9 <= v <= 54.1
     got = lm.best_reachable_target(None, 52.0, 35 / 60, ceiling=57.0, floor=52.0,
-                                   solo=False, soc_now=40,
+                                   solo=False,
                                    now=ts_at(cfg, "2026-08-20", 12))
     assert got == 54.0
 
@@ -1085,12 +1125,19 @@ def test_the_cleaned_rows_are_not_re_read_for_every_hour(conn, cfg, lm,
 
 @pytest.fixture
 def deficit_pack(conn, cfg, lm, monkeypatch):
-    """A learned pack: 52.0 V is 40% of a 100 kWh bank, 1,000 Wh a night hour."""
+    """A learned pack: 1,000 Wh a night hour, and 2,000 Wh to the volt.
+
+    Five clean overnight discharges walking 56.0 down to 52.0 in half-volt
+    steps at a kilowatt an hour, so the Wh-vs-V curve is flat and what it
+    should answer is arithmetic. The resting SOC curve is still here because
+    the top-up target reads a voltage off it - the deficit does not.
+    """
     monkeypatch.setattr(weather, "hourly", lambda *a, **k: [])   # night, no sun
     scraped(conn, {52.0: (40, 900), 54.0: (60, 900),
                    56.0: (80, 900), 57.0: (90, 900)})
     build_load_history(conn, cfg, days=30, start="2026-08-01",
                        night_wh=1000, day_wh=1000)
+    add_discharge_nights(conn, cfg)
     base = ts_at(cfg, "2026-08-20", 20)
     for i in range(20):
         # 1,850 Ah at 100 kWh: 1,000 Ah remaining is 54% of it.
@@ -1104,9 +1151,28 @@ def test_the_deficit_is_what_the_night_needs_less_what_the_pack_holds(cfg,
     sunrise = ts_at(cfg, "2026-08-21", 6)
     d = deficit_pack.overnight_deficit(sunrise, now=now)
     assert d["needed_wh"] == 9000, "nine hours at a kilowatt"
-    # 60% now, 40% at the floor: a fifth of the pack.
-    assert d["available_wh"] == round(0.20 * d["capacity_wh"])
-    assert d["deficit_wh"] == d["needed_wh"] - d["available_wh"]
+    # The pack is at 54.0 and the curve is 2,000 Wh a volt above 52.0.
+    assert d["available_wh"] == 4000
+    assert d["available_source"] == "learned Wh-vs-V, 5 nights"
+    assert d["deficit_wh"] == 5000
+
+
+def test_what_the_pack_holds_no_longer_comes_from_the_shunt(cfg, deficit_pack,
+                                                            conn):
+    """The Battery Monitor says 60% of a 100 kWh pack, 20 points above the
+    40% the curve puts at 52.0 - twenty thousand watt-hours. The house has
+    only ever taken four thousand out between those two voltages."""
+    now = ts_at(cfg, "2026-08-20", 21)
+    d = deficit_pack.overnight_deficit(ts_at(cfg, "2026-08-21", 6), now=now)
+    assert d["soc_now_display"] == 60
+    assert d["available_wh"] == 4000
+    assert d["available_wh"] != round(0.20 * d["capacity_wh"])
+
+
+def test_the_deficit_names_the_tier_the_curve_came_from(cfg, deficit_pack):
+    now = ts_at(cfg, "2026-08-20", 21)
+    d = deficit_pack.overnight_deficit(ts_at(cfg, "2026-08-21", 6), now=now)
+    assert d["available_tier"] == "last 14 nights"
 
 
 def test_a_pack_with_room_to_spare_has_a_negative_deficit(cfg, deficit_pack):
@@ -1119,7 +1185,24 @@ def test_the_deficit_says_why_it_cannot_be_computed(conn, cfg, lm, monkeypatch):
     monkeypatch.setattr(weather, "hourly", lambda *a, **k: [])
     now = ts_at(cfg, "2026-08-20", 21)
     d = lm.overnight_deficit(ts_at(cfg, "2026-08-21", 6), now=now)
-    assert d["deficit_wh"] is None and "no battery monitor sample" in d["reason"]
+    assert d["deficit_wh"] is None and "no battery sample" in d["reason"]
+
+
+def test_the_deficit_says_when_the_curve_cannot_answer(conn, cfg, lm,
+                                                        monkeypatch):
+    """Nights that never went below 54.0 cannot price the volts under it."""
+    monkeypatch.setattr(weather, "hourly", lambda *a, **k: [])
+    build_load_history(conn, cfg, days=30, start="2026-08-01",
+                       night_wh=1000, day_wh=1000)
+    add_discharge_nights(conn, cfg, top_v=56.0, bottom_v=54.0)
+    base = ts_at(cfg, "2026-08-20", 20)
+    for i in range(20):
+        add_sample(conn, cfg, base + i * 60, 55.0, 60, -1000, ah=1000)
+    d = lm.overnight_deficit(ts_at(cfg, "2026-08-21", 6),
+                             now=ts_at(cfg, "2026-08-20", 21))
+    assert d["deficit_wh"] is None
+    assert "learned Wh-vs-V curve cannot say" in d["reason"]
+    assert "no night crossed 52.00-52.25 V" in d["reason"]
 
 
 def test_a_sunrise_already_past_is_not_a_deficit(cfg, deficit_pack):
@@ -1139,7 +1222,7 @@ def test_the_deficit_reports_which_load_history_it_used(cfg, deficit_pack):
 def test_the_target_is_the_deficit_plus_its_margin_in_volts(cfg, deficit_pack):
     """9,000 Wh and 15% is 10,350: 10.35% of a 100 kWh pack. From 60% that is
     70.35%, which the curve puts at 55.2 V, rounded up to 55.5."""
-    t = deficit_pack.topup_target(9000, 15, 60, 100000, low=55.0, high=57.0)
+    t = deficit_pack.topup_target(9000, 15, 54.0, 100000, low=55.0, high=57.0)
     assert t["padded_wh"] == 10350 and t["target_soc"] == 70.3
     assert t["volts"] == 55.5
     assert t["basis"] == "resting curve"
@@ -1147,14 +1230,14 @@ def test_the_target_is_the_deficit_plus_its_margin_in_volts(cfg, deficit_pack):
 
 def test_the_target_is_rounded_up_never_down(cfg, deficit_pack):
     """Too much is minutes of run time. Too little is not getting through."""
-    t = deficit_pack.topup_target(100, 0, 60, 100000, low=52.0, high=57.0)
+    t = deficit_pack.topup_target(100, 0, 54.0, 100000, low=52.0, high=57.0)
     assert t["uncapped_volts"] == 54.5, "60.1% is 54.005 V, which rounds up"
 
 
 def test_the_target_is_clamped_at_both_ends(cfg, deficit_pack):
-    assert deficit_pack.topup_target(100, 0, 60, 100000,
+    assert deficit_pack.topup_target(100, 0, 54.0, 100000,
                                      low=55.0, high=57.0)["volts"] == 55.0
-    assert deficit_pack.topup_target(60000, 0, 60, 100000,
+    assert deficit_pack.topup_target(60000, 0, 54.0, 100000,
                                      low=55.0, high=57.0)["volts"] == 57.0
 
 
@@ -1163,10 +1246,176 @@ def test_the_target_uses_the_charge_curve_when_there_is_one(conn, cfg,
     """The stop is a terminal voltage read while charging, so the charge-side
     curve is what turns the charge wanted into the voltage to stop at."""
     this_morning(conn, cfg)
-    t = deficit_pack.topup_target(9000, 15, 60, 100000, low=55.0, high=57.0,
+    t = deficit_pack.topup_target(9000, 15, 54.0, 100000, low=55.0, high=57.0,
                                   solo=False)
     assert t["basis"].startswith("charging curve")
 
 
 def test_no_curve_at_all_gives_no_target(conn, cfg, lm):
-    assert lm.topup_target(9000, 15, 60, 100000, low=55.0, high=57.0) is None
+    assert lm.topup_target(9000, 15, 54.0, 100000, low=55.0, high=57.0) is None
+
+
+# --- the energy-vs-voltage curve --------------------------------------------
+#
+# What the pack holds above a voltage, learned from what the house actually
+# took out between two voltages overnight. It replaced state of charge times
+# capacity, which was one shunt's percentage multiplied by a size derived
+# from the same shunt.
+
+@pytest.fixture
+def curve_nights(conn, cfg):
+    """Five nights walking 56.0 down to 52.0 at a kilowatt an hour."""
+    add_discharge_nights(conn, cfg)
+    return loadmodel.LoadModel(conn, cfg)
+
+
+def when(cfg):
+    return ts_at(cfg, "2026-08-20", 21)
+
+
+def test_the_curve_is_watt_hours_to_the_volt(cfg, curve_nights):
+    """Four volts and eight thousand watt-hours: two thousand to the volt."""
+    r = curve_nights.energy_above(52.0, 56.0, now=when(cfg))
+    assert r["wh"] == 8000 and r["nights"] == 5
+
+
+def test_it_answers_between_any_two_voltages(cfg, curve_nights):
+    now = when(cfg)
+    assert curve_nights.energy_above(52.0, 53.0, now=now)["wh"] == 2000
+    assert curve_nights.energy_above(52.0, 54.0, now=now)["wh"] == 4000
+    assert curve_nights.energy_above(54.0, 56.0, now=now)["wh"] == 4000
+
+
+def test_a_voltage_at_or_below_the_floor_holds_nothing(cfg, curve_nights):
+    r = curve_nights.energy_above(52.0, 52.0, now=when(cfg))
+    assert r["wh"] == 0
+
+
+def test_a_stretch_no_night_crossed_is_a_gap_not_a_guess(conn, cfg):
+    """Nights that stopped at 54.0 cannot price the volts underneath."""
+    add_discharge_nights(conn, cfg, top_v=56.0, bottom_v=54.0)
+    lm = loadmodel.LoadModel(conn, cfg)
+    r = lm.energy_above(52.0, 55.0, now=when(cfg))
+    assert r["wh"] is None
+    assert "no night crossed 52.00-52.25 V" in r["reason"]
+    # What it does cover, it answers.
+    assert lm.energy_above(54.0, 56.0, now=when(cfg))["wh"] == 8000
+
+
+def test_with_no_nights_at_all_it_points_at_the_backfill(conn, cfg):
+    lm = loadmodel.LoadModel(conn, cfg)
+    r = lm.energy_above(52.0, 55.0, now=when(cfg))
+    assert r["wh"] is None and "--backfill" in r["reason"]
+
+
+def test_two_nights_are_not_a_bin(conn, cfg):
+    add_discharge_nights(conn, cfg, n=2)
+    lm = loadmodel.LoadModel(conn, cfg)
+    assert lm.energy_above(52.0, 56.0, now=when(cfg))["wh"] is None
+
+
+def test_a_generator_hour_is_not_a_discharge(conn, cfg):
+    """AC output is not house load while a generator is feeding the
+    inverters, and the pack is being filled rather than emptied."""
+    add_discharge_nights(conn, cfg)
+    lm = loadmodel.LoadModel(conn, cfg)
+    assert lm.energy_above(52.0, 56.0, now=when(cfg))["wh"] == 8000
+    # The same nights, with the generator recorded as having produced.
+    for i in range(5):
+        night = (datetime(2026, 8, 10) + timedelta(days=i)).strftime("%Y-%m-%d")
+        for h in (20, 21, 22, 23):
+            history.put_hourly(conn, ts_at(cfg, night, h), "gen",
+                               None, None, 5000, None, None, None, 60, "live")
+    conn.commit()
+    lm = loadmodel.LoadModel(conn, cfg)
+    r = lm.energy_above(52.0, 56.0, now=when(cfg))
+    assert r["wh"] is None, "the generator hours must not be in the curve"
+
+
+def test_an_hour_with_sun_in_it_is_not_a_discharge(conn, cfg):
+    add_discharge_nights(conn, cfg)
+    for i in range(5):
+        night = (datetime(2026, 8, 10) + timedelta(days=i)).strftime("%Y-%m-%d")
+        for h in (20, 21, 22, 23):
+            history.put_hourly(conn, ts_at(cfg, night, h), "solar",
+                               None, None, 800, None, None, None, 60, "live")
+    conn.commit()
+    lm = loadmodel.LoadModel(conn, cfg)
+    assert lm.energy_above(52.0, 56.0, now=when(cfg))["wh"] is None
+
+
+def test_a_daylight_hour_is_not_part_of_a_night(conn, cfg):
+    """Sunset to sunrise, computed for the site, and nothing outside it."""
+    add_discharge_nights(conn, cfg, hours=(9, 10, 11, 12))
+    lm = loadmodel.LoadModel(conn, cfg)
+    assert lm._discharge_nights(when(cfg)) == {}
+
+
+def test_an_hour_the_pack_rose_through_is_not_a_discharge(conn, cfg):
+    for i in range(5):
+        night = (datetime(2026, 8, 10) + timedelta(days=i)).strftime("%Y-%m-%d")
+        for h in (20, 21, 22, 23):
+            ts = ts_at(cfg, night, h)
+            # max below min: nothing fell.
+            history.put_hourly(conn, ts, "battery", 54.0, None, 0, 1000,
+                               54.0, 54.0, 60, "live")
+            history.put_hourly(conn, ts, "load", None, None, None, 1000,
+                               None, None, 60, "live")
+    conn.commit()
+    lm = loadmodel.LoadModel(conn, cfg)
+    assert lm._discharge_nights(when(cfg)) == {}
+
+
+def test_hours_after_midnight_belong_to_the_night_that_began_yesterday(conn, cfg):
+    add_discharge_nights(conn, cfg, n=3)
+    lm = loadmodel.LoadModel(conn, cfg)
+    nights = lm._discharge_nights(when(cfg))
+    assert len(nights) == 3, "eight hours either side of midnight is one night"
+
+
+def test_the_recent_tier_wins_over_older_evidence(conn, cfg):
+    """The same tiers the overnight profile walks. A household changes, and
+    a June that drew twice as much should not still be arguing with this
+    fortnight."""
+    add_discharge_nights(conn, cfg, first="2026-06-01", n=10, wh_per_hour=2000)
+    add_discharge_nights(conn, cfg, first="2026-08-10", n=5, wh_per_hour=1000)
+    lm = loadmodel.LoadModel(conn, cfg)
+    r = lm.energy_above(52.0, 56.0, now=when(cfg))
+    assert r["source"] == "last 14 nights" and r["wh"] == 8000
+
+
+def test_a_tier_that_cannot_answer_gives_way_to_one_that_can(conn, cfg):
+    """This fortnight never went below 54.0; the older nights did."""
+    add_discharge_nights(conn, cfg, first="2026-06-01", n=10, wh_per_hour=2000)
+    add_discharge_nights(conn, cfg, first="2026-08-10", n=5,
+                         top_v=56.0, bottom_v=54.0)
+    lm = loadmodel.LoadModel(conn, cfg)
+    r = lm.energy_above(52.0, 55.0, now=when(cfg))
+    assert r["source"] == "all history"
+    assert r["wh"] == 12000, "three volts at 4,000 Wh each"
+
+
+# --- the shunt against the curve --------------------------------------------
+
+def test_the_shunt_claiming_more_than_the_curve_is_measurable(cfg, deficit_pack):
+    """60% of the 90 kWh the shunt's own Ah imply is 20 points above the 40%
+    the resting curve puts at 52.0: 18,000 Wh. The house has taken 4,000 out
+    between those two voltages."""
+    d = deficit_pack.soc_disagreement(60, 54.0, now=when(cfg))
+    assert d["implied_wh"] == 18000 and d["learned_wh"] == 4000
+    assert round(d["excess"], 2) == 3.5
+
+
+def test_a_shunt_that_agrees_shows_no_excess(cfg, deficit_pack):
+    """44.44% is 4.44 points above the floor, which on a 90 kWh pack is
+    4,000 Wh - exactly what the curve says."""
+    d = deficit_pack.soc_disagreement(44.44, 54.0, now=when(cfg))
+    assert abs(d["excess"]) < 0.01
+
+
+def test_no_disagreement_at_or_below_the_floor(cfg, deficit_pack):
+    assert deficit_pack.soc_disagreement(40, 52.0, now=when(cfg)) is None
+
+
+def test_no_disagreement_without_a_curve_to_disagree_with(conn, cfg, lm):
+    assert lm.soc_disagreement(80, 55.0, now=when(cfg)) is None

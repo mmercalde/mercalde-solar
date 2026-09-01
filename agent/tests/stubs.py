@@ -20,6 +20,10 @@ class StubModel:
 
     `soc_per_v` points of state of charge per volt, `rates` amps and %SOC/h
     per generator, with None for the pair meaning no paired history.
+
+    Nothing here takes a live state of charge. The real model stopped
+    accepting one when the Battery Monitor's reading became display-only, so
+    the stub does not offer a door the real one has closed.
     """
 
     def __init__(self, rates=None, pair=None, soc_at_52=40.0, soc_per_v=10.0,
@@ -42,15 +46,14 @@ class StubModel:
     def _rate(self, gen):
         return self.pair if gen is None else self.rates.get(gen)
 
-    def reach(self, gen, from_v, target_v, window_h, solo=None, soc_now=None,
-              now=None):
+    def reach(self, gen, from_v, target_v, window_h, solo=None, now=None):
         rate = self._rate(gen)
         who = "both generators" if gen is None else gen
         if rate is None:
             return {"ok": False, "rate": None, "hours": None, "basis": None,
                     "why": f"no observed charge rate for {who}, so "
                            f"{target_v:.1f} V cannot be shown to be reachable"}
-        soc = self._soc(from_v) if soc_now is None else soc_now
+        soc = self._soc(from_v)
         hours = max(0.0, (self._soc(target_v) - soc) / rate["soc_per_h"])
         ok = hours <= window_h + 1e-9
         phrase = loadmodel.rate_phrase(rate, self.expected_load,
@@ -63,8 +66,9 @@ class StubModel:
                         f"{target_v:.1f} needs {hours:.1f} h at {phrase} but "
                         f"the run window is {window_h:.1f} h")}
 
-    def topup_target(self, deficit_wh, margin_pct, soc_now, capacity_wh,
+    def topup_target(self, deficit_wh, margin_pct, from_v, capacity_wh,
                      low, high, gen=None, solo=None, now=None):
+        soc_now = self._soc(from_v) if from_v is not None else None
         if not capacity_wh or soc_now is None:
             return None
         padded = deficit_wh * (1.0 + margin_pct / 100.0)
@@ -75,11 +79,11 @@ class StubModel:
                 "target_soc": round(target_soc, 1), "basis": self.basis}
 
     def best_reachable_target(self, gen, from_v, window_h, ceiling, floor,
-                              step=0.5, solo=None, soc_now=None, now=None):
+                              step=0.5, solo=None, now=None):
         rate = self._rate(gen)
         if rate is None:
             return None
-        soc = self._soc(from_v) if soc_now is None else soc_now
+        soc = self._soc(from_v)
         v = self._volts(soc + rate["soc_per_h"] * window_h)
         v = math.floor(min(v, ceiling) / step) * step
         return round(v, 2) if v >= floor - 1e-9 else None

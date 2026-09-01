@@ -227,7 +227,8 @@ def facts(cfg):
         "data": {"autoGenEnabled": True},
         "deficit": {"deficit_wh": 6463, "needed_wh": 15220,
                     "available_wh": 8757, "capacity_wh": 100000,
-                    "soc_now": 87, "floor_v": 52.0},
+                    "available_source": "learned Wh-vs-V, 10 nights",
+                    "soc_now_display": 87, "floor_v": 52.0},
         "thresholds": {"mep_start": 52.0, "mep_stop": 56.0,
                        "kub_start": 54.0, "kub_stop": 56.0},
         "baseline": {"mep_start": 52.0, "mep_stop": 56.0,
@@ -287,10 +288,13 @@ def test_a_disabled_autogen_holds_the_rule(cfg, facts):
 
 
 def test_the_firing_rule_carries_the_numbers(cfg, facts):
+    """The band is the MEP's: the pack's 53.6 V puts it at 56% of the way up,
+    and the Kubota cannot lift 22 points of charge inside its two hours. The
+    shunt's 87% would have said this was easy."""
     r = policy.solo_top_up(cfg, facts, StubModel())
     assert r["deficit_wh"] == 6463 and r["margin_pct"] == 15
     assert r["padded_wh"] == 7432
-    assert r["band"].startswith("Kubota band")
+    assert r["band"].startswith("MEP band")
     assert r["net_w"] is not None and r["run_minutes"] is not None
 
 
