@@ -24,6 +24,7 @@ import math
 import re
 
 import history
+import sun as sunmod
 import topup as topupmod
 
 # Guard rule 1's separation lives in the manifest and reaches here through
@@ -83,6 +84,31 @@ def _held_for_daylight(cfg, f):
     solar = (f"{left / 1000.0:.1f} kWh" if left is not None
              else "not learned yet")
     return (f"held until {_clock(opens, cfg)}; remaining solar today {solar}")
+
+
+def _held_until_sunset(cfg, f):
+    """Why a stop change is held, or None once the night is open.
+
+    POLICY 3's two cases both decide what tonight's run should stop at, and
+    both were free to decide it at any hour of the day. At 10:36 am on
+    2026-09-01 the pre-dawn case fired for a 52 V crossing projected at 3:57
+    the following morning - seventeen hours away, with the whole day's solar
+    still to come - and dropped both stops to 54.5, where they stood until
+    the evening. The projection it fired on had moved by 3:14 the same
+    morning and again by 4:59; a number that unsettled is not one to set a
+    threshold from half a day early.
+
+    So a stop for tonight is decided tonight, on the projection the evening
+    actually has: between sunset and the following sunrise, and nowhere else.
+    The same discipline POLICY 4 keeps, with the window POLICY 3 needs.
+    """
+    now = f.get("now")
+    if not now:
+        return None
+    day = sunmod.daylight(cfg, now)
+    if not day:
+        return None
+    return f"held until sunset {_clock(day[1], cfg)}"
 
 
 def _clock(ts, cfg):
@@ -405,6 +431,10 @@ def storm_stop(cfg, f):
     target = cfg["stop_voltage_max"]
     th = f.get("thresholds") or {}
 
+    held = _held_until_sunset(cfg, f)
+    if held:
+        seen = f"tomorrow {cloud}% daylight cloud; " if cloud is not None else ""
+        return _rule(3, name, False, seen + held, held=True)
     if cloud is None:
         return _rule(3, name, False, "tomorrow's cloud cover unknown")
     if cloud < limit:
@@ -414,21 +444,10 @@ def storm_stop(cfg, f):
     stops = (th.get("mep_stop"), th.get("kub_stop"))
     if all(s is not None and abs(s - target) < EPS for s in stops):
         return _rule(3, name, False,
-                     f"{detail}, but both stops are already {target:.1f}")
+                     f"{detail}, but both stops are already {target:.1f}",
+                     satisfied=True)
     proposal = {"mep_start": cfg["default_start"], "mep_stop": target,
                 "kub_start": cfg["default_start"], "kub_stop": target}
-    # Raising a stop does not start anything, so it is never held. A
-    # pre-charge that raises a start would run a generator, and that waits
-    # for the same window POLICY 4 waits for.
-    baseline = f.get("baseline") or {}
-    raises_a_start = any(
-        proposal[k] > (baseline.get(k, cfg["default_start"])) + EPS
-        for k in ("mep_start", "kub_start"))
-    if raises_a_start:
-        held = _held_for_daylight(cfg, f)
-        if held:
-            return _rule(3, name, False, f"{detail}, but the pre-charge start "
-                         f"raise is {held}", held=True)
     return _rule(3, name, True,
                  f"{detail} → stop {target:.1f} (live stops MEP "
                  f"{stops[0]} / Kubota {stops[1]})", proposal)
@@ -445,16 +464,24 @@ def predawn_stop(cfg, f, superseded=False):
     sunrise, reached = f.get("sunrise_ts"), proj.get("reached")
     th = f.get("thresholds") or {}
 
+    held = _held_until_sunset(cfg, f)
+    if held:
+        seen = (f"52 V projected {_clock(reached, cfg)}; " if reached else "")
+        return _rule(3, name, False, seen + held, held=True)
     if not reached:
         return _rule(3, name, False,
                      f"52 V not projected ({proj.get('reason', 'unknown')})")
     if not sunrise:
         return _rule(3, name, False, "next sunrise unknown")
     lead = (sunrise - reached) / 3600.0
+    # The crossing has to be tonight's. `sunrise` is the coming one, so
+    # anything at or past it belongs to a later night, and tonight's stop is
+    # not set for a night that has not started.
     if lead <= 0:
         return _rule(3, name, False,
-                     f"52 V projected {_clock(reached, cfg)}, after sunrise "
-                     f"{_clock(sunrise, cfg)}")
+                     f"52 V projected {_clock(reached, cfg)}, not before the "
+                     f"coming sunrise {_clock(sunrise, cfg)}: that crossing "
+                     f"belongs to a later night")
     if lead > window:
         return _rule(3, name, False,
                      f"52 V projected {_clock(reached, cfg)}, {_hours(lead)} h "
@@ -476,7 +503,8 @@ def predawn_stop(cfg, f, superseded=False):
     stops = (th.get("mep_stop"), th.get("kub_stop"))
     if all(s is not None and abs(s - target) < EPS for s in stops):
         return _rule(3, name, False,
-                     f"{detail}, but both stops are already {target:.1f}")
+                     f"{detail}, but both stops are already {target:.1f}",
+                     satisfied=True)
     return _rule(3, name, True, f"{detail} → stop {target:.1f}",
                  {"mep_start": cfg["default_start"], "mep_stop": target,
                   "kub_start": cfg["default_start"], "kub_stop": target})

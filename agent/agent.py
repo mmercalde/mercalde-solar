@@ -32,7 +32,7 @@ import history
 import loadmodel
 import policy as policymod
 import prompts
-import sun
+import sun as sunmod
 import telegram
 import tools as toolsmod
 import topup as topupmod
@@ -539,14 +539,22 @@ class Agent:
         except Exception as e:                       # noqa: BLE001
             log.warning("could not send a top-up notice: %s", e)
 
-        # Python's own write, before the model is asked anything: a start the
-        # agent raised comes back the moment the generator is confirmed running.
+        # Python's own writes, before the model is asked anything: a start the
+        # agent raised comes back the moment the generator is confirmed
+        # running, and a stop it lowered comes back when the night that
+        # justified it is over.
         try:
             if self.return_raised_starts(facts):
                 facts["config"] = history.fetch_config(self.cfg)
                 facts["thresholds"] = toolsmod.thresholds_from_config(facts["config"])
         except Exception as e:                       # noqa: BLE001
             log.warning("returning a raised start failed: %s", e)
+        try:
+            if self.return_lowered_stops(facts):
+                facts["config"] = history.fetch_config(self.cfg)
+                facts["thresholds"] = toolsmod.thresholds_from_config(facts["config"])
+        except Exception as e:                       # noqa: BLE001
+            log.warning("returning a lowered stop failed: %s", e)
 
         tools = self.tools(policy=facts["policy"])
         prompt = self.tick_prompt(facts)
@@ -695,6 +703,100 @@ class Agent:
             sent.append(gen)
         return sent
 
+    def predawn_reason_passed(self, facts):
+        """Why a lowered stop is no longer justified, or None.
+
+        POLICY 3's pre-dawn case drops both stops so the morning's solar can
+        finish a charge that lands just before a clear sunrise. That reason
+        lasts exactly one night. It has passed when the sun is up - whatever
+        happened, the night it was set for is over - and before that if the
+        crossing it was set for stops being projected at all.
+
+        A rule that is only "not firing" because the stops are already where
+        it wants them has not stopped meaning it, so `satisfied` is checked:
+        without it the stop would go back, the rule would fire again, and the
+        two would take turns all night.
+        """
+        day = sunmod.daylight(self.cfg, facts["now"])
+        if day:
+            return (f"the sun came up at {history.clock(day[0], self.cfg)} and "
+                    f"the night it was set for is over")
+        rule = next((r for r in (facts.get("policy") or [])
+                     if r.get("rule") == 3 and "pre-dawn" in r.get("name", "")),
+                    None)
+        if (rule is not None and not rule["fires"] and not rule.get("held")
+                and not rule.get("satisfied")):
+            return f"the pre-dawn case no longer holds: {rule['detail']}"
+        return None
+
+    def return_lowered_stops(self, facts):
+        """Put a stop the agent lowered back to the owner's baseline.
+
+        The same housekeeping as a raised start, on the other threshold and
+        in the other direction. On 2026-09-01 the pre-dawn case fired at
+        10:36 am and dropped both stops to 54.5; nothing put them back, and
+        they were still there that evening.
+        """
+        if self.dry_run:
+            return []
+        data, live = facts["data"], facts["config"]
+        base = self.guard.baseline()
+        want = dict(toolsmod.thresholds_from_config(live))
+        # The ledger, plus anything actually sitting below the owner's
+        # baseline. A stop can be down there without a ledger entry - it was
+        # written before this bookkeeping existed - and it is no more
+        # justified for that. Their own values are never below their own
+        # baseline, because adopting them is what makes them the baseline.
+        lowered = set(self.guard.lowered_stops())
+        for gen in ("mep", "kubota"):
+            pkey = "mep_stop" if gen == "mep" else "kub_stop"
+            if want[pkey] < base[pkey] - guardmod.EPS:
+                lowered.add(gen)
+        if not lowered:
+            return []
+        why = self.predawn_reason_passed(facts)
+        if not why:
+            return []
+        done = []
+        for gen in sorted(lowered):
+            pkey = "mep_stop" if gen == "mep" else "kub_stop"
+            # Raising only. A stop that comes back never goes down on the way.
+            back_to = min(base[pkey], guardmod.HARD_STOP_CEILING)
+            if back_to <= want[pkey] + guardmod.EPS:
+                self.guard.clear_lowered(gen)     # already back, nothing to write
+                continue
+            want[pkey] = back_to
+            done.append(gen)
+        if not done:
+            return []
+
+        reason = (f"{' and '.join(done)} stop returns to the owner's "
+                  f"{base['mep_stop' if done[0] == 'mep' else 'kub_stop']}: "
+                  f"{why}")
+        allowed, refusal = self.guard.check(reason=reason, now=facts["now"],
+                                            status={"data": data, "config": live},
+                                            **want)
+        if not allowed:
+            log.warning("could not return the lowered stop: %s", refusal)
+            return []
+        try:
+            applied = toolsmod.thresholds_from_config(
+                toolsmod.apply_thresholds(self.cfg, want["mep_start"],
+                                          want["mep_stop"], want["kub_start"],
+                                          want["kub_stop"],
+                                          approval=self.guard.approval()))
+        except requests.RequestException as e:
+            log.warning("returning the lowered stop failed: %s", e)
+            return []
+        self.guard.note_write(applied, now=facts["now"], housekeeping=True)
+        for gen in done:
+            self.guard.clear_lowered(gen)
+        telegram.send(self.cfg, toolsmod.write_message(
+            applied, reason, before=toolsmod.thresholds_from_config(live),
+            voltage=facts["voltage"], default_start=self.cfg["default_start"]))
+        log.info("returned lowered stop(s) %s to the baseline", ", ".join(done))
+        return done
+
     def _ran_since(self, gen, since, now):
         row = self.conn.execute(
             "SELECT 1 FROM gen_runs WHERE gen=? AND stop_ts IS NOT NULL "
@@ -766,7 +868,7 @@ class Agent:
         time cannot be read as the wrong night.
         """
         label = self.model.projection_label(projection, source_ts)
-        sunrise = sun.next_sunrise(self.cfg, now=source_ts)
+        sunrise = sunmod.next_sunrise(self.cfg, now=source_ts)
         reached = (projection or {}).get("reached")
         if not sunrise or not reached or reached <= sunrise:
             return f"at {label}"

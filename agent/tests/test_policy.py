@@ -316,30 +316,81 @@ def test_an_unknown_forecast_does_not_fire(cfg, night, model):
     assert not policy.storm_stop(cfg, night)["fires"]
 
 
-def test_a_stop_raise_is_never_held_by_daylight(cfg, night, model):
-    """Raising a stop does not start anything, so a storm forecast is acted on
-    the moment it appears."""
+def test_a_storm_stop_waits_for_the_night(cfg, night, model):
+    """A stop is what tonight's run stops at, and it is set tonight. The
+    forecast at 9:36 am is not the forecast the evening will have."""
     night = daytime(cfg, night)
+    night["tomorrow_cloud"] = 85
+    r = policy.storm_stop(cfg, night)
+    assert not r["fires"] and r["held"]
+    # Computed from the site, like the guard's own daylight hold, so the
+    # window holds whether or not a forecast came back.
+    assert r["detail"] == "tomorrow 85% daylight cloud; held until sunset 7:18 pm"
+
+
+def test_a_storm_stop_fires_once_the_sun_is_down(cfg, night, model):
     night["tomorrow_cloud"] = 85
     r = policy.storm_stop(cfg, night)
     assert r["fires"] and not r.get("held")
     assert r["proposal"]["mep_stop"] == 57.0
 
 
-def test_a_pre_charge_start_raise_waits_for_the_window(cfg, night, model):
-    """A storm proposal that raised a start would run a generator in daylight,
-    and that waits for the same window POLICY 4 waits for."""
+def test_the_storm_hold_still_says_what_the_forecast_is(cfg, night, model):
+    """Held is not silent: the number that would have fired is still shown."""
     night = daytime(cfg, night)
-    night["tomorrow_cloud"] = 85
-    night["baseline"] = {"mep_start": 52.0, "mep_stop": 56.0,
-                         "kub_start": 52.0, "kub_stop": 56.0}
-    cfg = dict(cfg, default_start=54.0)     # the proposal now raises the start
+    night["tomorrow_cloud"] = None
     r = policy.storm_stop(cfg, night)
-    assert not r["fires"] and r["held"]
-    assert "the pre-charge start raise is held until 7:24 pm" in r["detail"]
+    assert r["held"] and r["detail"] == "held until sunset 7:18 pm"
 
 
 # --- POLICY 3: the pre-dawn 54.5 case ---------------------------------------
+
+def test_the_pre_dawn_case_is_not_evaluated_in_daylight(cfg, night, model):
+    """2026-09-01, 10:36 am: it fired for a 52 V crossing projected at 3:57
+    the next morning - seventeen hours off, with the day's solar still to
+    come - and dropped both stops to 54.5 for the rest of the day."""
+    night = daytime(cfg, night, 10, 36)
+    night["projection"] = {"reached": ts_at(cfg, "2026-08-28", 3, 57)}
+    r = policy.predawn_stop(cfg, night)
+    assert not r["fires"] and r["held"]
+    assert r["detail"] == "52 V projected 3:57 am; held until sunset 7:18 pm"
+
+
+def test_the_same_crossing_fires_once_the_sun_is_down(cfg, night, model):
+    """The window is the only thing that changed: at 10 pm the projection is
+    the one the evening actually has."""
+    night["projection"] = {"reached": ts_at(cfg, "2026-08-28", 5, 0)}
+    assert policy.predawn_stop(cfg, night)["fires"]
+
+
+def test_a_crossing_on_a_later_night_is_ignored(cfg, night, model):
+    """Inside the window, and still not tonight's business: the coming
+    sunrise is 6:21 am, and this crossing is the night after."""
+    night["projection"] = {"reached": ts_at(cfg, "2026-08-29", 4, 0)}
+    r = policy.predawn_stop(cfg, night)
+    assert not r["fires"] and not r.get("held")
+    assert "not before the coming sunrise 6:21 am" in r["detail"]
+    assert "belongs to a later night" in r["detail"]
+
+
+def test_a_crossing_just_after_the_coming_sunrise_is_ignored_too(cfg, night,
+                                                                 model):
+    night["projection"] = {"reached": ts_at(cfg, "2026-08-28", 7, 0)}
+    r = policy.predawn_stop(cfg, night)
+    assert not r["fires"] and "not before the coming sunrise" in r["detail"]
+
+
+def test_a_rule_already_satisfied_says_so(cfg, night, model):
+    """"Not firing" because the stops are already there is not the same as
+    the reason having passed, and the housekeeping write needs to tell them
+    apart or it will fight the rule all night."""
+    night["projection"] = {"reached": ts_at(cfg, "2026-08-28", 5, 0)}
+    night["thresholds"].update(mep_stop=54.5, kub_stop=54.5)
+    r = policy.predawn_stop(cfg, night)
+    assert not r["fires"] and r.get("satisfied")
+
+
+
 
 def test_a_run_landing_before_a_clear_sunrise_drops_the_stop(cfg, night, model):
     night["projection"] = {"reached": ts_at(cfg, "2026-08-28", 5, 0)}

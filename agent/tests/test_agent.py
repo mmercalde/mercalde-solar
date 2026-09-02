@@ -74,10 +74,12 @@ def test_plan_record_matches_the_spec_shape(a, cfg):
     assert lines[4] == "projected 52.0 V at: 4:10 am   sunrise 6:31 am"
     assert lines[5] == ("forecast tomorrow: 20% cloud, est. solar 61.0 kWh "
                         "(Aug clear-day 68.0)")
-    assert lines[6] == ("POLICY 3 storm stop 57.0: no (tomorrow 20% daylight "
-                        "cloud < 70%)")
-    assert lines[7] == ("POLICY 3 pre-dawn stop 54.5: no (52 V projected 4:10 am, "
-                        "2.4 h before sunrise 6:31 am (window 2.0 h))")
+    # Four in the afternoon: both stop rules are held until sunset, and say
+    # what they would have been looking at.
+    assert lines[6] == ("POLICY 3 storm stop 57.0: held (tomorrow 20% daylight "
+                        "cloud; held until sunset 7:17 pm)")
+    assert lines[7] == ("POLICY 3 pre-dawn stop 54.5: held (52 V projected "
+                        "4:10 am; held until sunset 7:17 pm)")
     assert lines[8].startswith("POLICY 4 top-up: FIRES (deficit 9,000 Wh to "
                                "sunrise above 52.0 V")
     assert "+15% is 10,350 Wh → stop 55.5" in lines[8]
@@ -897,3 +899,123 @@ def test_the_baseline_is_adopted_only_once(rebooted):
 
 def test_the_agent_has_no_heartbeat_method_left(a):
     assert not hasattr(a, "heartbeat")
+
+
+# --- a lowered stop comes back too -------------------------------------------
+#
+# 2026-09-01: POLICY 3's pre-dawn case fired at 10:36 am and dropped both
+# stops to 54.5. Nothing put them back; they were still at 54.5 that evening.
+
+def predawn_facts(a, cfg, hour=8, stop=54.5, fires=False, held=False,
+                  satisfied=False):
+    """Both stops lowered to 54.5, at a chosen hour of 2026-08-28."""
+    live = {"mep803a": {"startVoltage": 52.0, "stopVoltage": stop,
+                        "maxRuntime": 120},
+            "kubota": {"startVoltage": 52.0, "stopVoltage": stop,
+                       "maxRuntime": 120}}
+    f = base_facts(cfg, gate_open=True)
+    f.update(now=int(datetime(2026, 8, 28, hour, 0,
+                              tzinfo=history.tzinfo(cfg)).timestamp()),
+             voltage=54.6, config=live,
+             data={"mep803aAction": history.GEN_STOPPED,
+                   "kubotaAction": history.GEN_STOPPED},
+             thresholds=toolsmod.thresholds_from_config(live),
+             policy=[{"rule": 3, "name": "pre-dawn stop 54.5", "fires": fires,
+                      "held": held, "satisfied": satisfied,
+                      "detail": "52 V not projected", "proposal": None}])
+    a.dry_run = False
+    # The guard's own rules are test_guard.py's subject; what these tests are
+    # about is whether the return is attempted at all, and with what.
+    a.guard.check = lambda **kw: (True, "permitted")
+    for gen in ("mep", "kubota"):
+        a.guard.state.setdefault("lowered_stops", {})[gen] = {
+            "since": f["now"] - 7200, "baseline": 56.0, "stop": stop}
+    return f
+
+
+def test_the_stops_come_back_once_the_sun_is_up(a, cfg, wrote):
+    """Whatever happened overnight, the night the stop was set for is over."""
+    f = predawn_facts(a, cfg, hour=8)
+    assert a.return_lowered_stops(f) == ["kubota", "mep"]
+    assert wrote == [(52.0, 56.0, 52.0, 56.0)]
+    assert a.guard.lowered_stops() == {}
+
+
+def test_the_stops_come_back_when_the_crossing_stops_being_projected(a, cfg,
+                                                                     wrote):
+    """Before sunrise, and the reason has already gone."""
+    f = predawn_facts(a, cfg, hour=2)
+    assert a.return_lowered_stops(f) == ["kubota", "mep"]
+    assert wrote == [(52.0, 56.0, 52.0, 56.0)]
+
+
+def test_the_stops_stay_down_while_the_rule_still_means_it(a, cfg, wrote):
+    """Not firing only because the stops are already where it wants them is
+    not the reason having passed. Returning them here would start a fight
+    that lasted until morning."""
+    f = predawn_facts(a, cfg, hour=2, fires=False, satisfied=True)
+    assert a.return_lowered_stops(f) == []
+    assert wrote == []
+
+
+def test_the_stops_stay_down_while_the_rule_is_firing(a, cfg, wrote):
+    f = predawn_facts(a, cfg, hour=2, fires=True)
+    assert a.return_lowered_stops(f) == []
+    assert wrote == []
+
+
+def test_the_stops_stay_down_while_the_rule_is_only_held(a, cfg, wrote):
+    """Held by POLICY 4 superseding it is not the reason having passed."""
+    f = predawn_facts(a, cfg, hour=2, held=True)
+    assert a.return_lowered_stops(f) == []
+    assert wrote == []
+
+
+def test_a_stop_already_back_is_just_forgotten(a, cfg, wrote):
+    f = predawn_facts(a, cfg, hour=8, stop=56.0)
+    assert a.return_lowered_stops(f) == []
+    assert wrote == [] and a.guard.lowered_stops() == {}
+
+
+def test_the_return_never_lowers_a_stop_on_the_way(a, cfg, wrote):
+    """The baseline is below where the stops sit, so there is nothing to put
+    back and the return must not take them down to it."""
+    f = predawn_facts(a, cfg, hour=8, stop=57.0)
+    a.guard.state["owner_baseline"] = {"mep_start": 52.0, "mep_stop": 56.0,
+                                       "kub_start": 52.0, "kub_stop": 56.0}
+    assert a.return_lowered_stops(f) == []
+    assert wrote == []
+
+
+def test_a_stop_below_the_baseline_comes_back_without_a_ledger_entry(a, cfg,
+                                                                     wrote):
+    """A stop written before this bookkeeping existed is no more justified
+    for having no record. On 2026-09-01 that was both of them."""
+    f = predawn_facts(a, cfg, hour=8)
+    a.guard.state["lowered_stops"] = {}
+    a.guard.state["owner_baseline"] = {"mep_start": 52.0, "mep_stop": 56.0,
+                                       "kub_start": 52.0, "kub_stop": 56.0}
+    assert a.return_lowered_stops(f) == ["kubota", "mep"]
+    assert wrote == [(52.0, 56.0, 52.0, 56.0)]
+
+
+def test_the_owners_own_low_stop_is_not_returned(a, cfg, wrote):
+    """Adopting their values is what makes them the baseline, so a stop at
+    the baseline is never below it."""
+    f = predawn_facts(a, cfg, hour=8)
+    a.guard.state["lowered_stops"] = {}
+    a.guard.state["owner_baseline"] = {"mep_start": 52.0, "mep_stop": 54.5,
+                                       "kub_start": 52.0, "kub_stop": 54.5}
+    assert a.return_lowered_stops(f) == []
+    assert wrote == []
+
+
+def test_the_guard_records_a_lowered_stop(a, cfg):
+    a.guard.state["owner_baseline"] = {"mep_start": 52.0, "mep_stop": 56.0,
+                                       "kub_start": 52.0, "kub_stop": 56.0}
+    a.guard.note_write({"mep_start": 52.0, "mep_stop": 54.5,
+                        "kub_start": 52.0, "kub_stop": 54.5})
+    assert set(a.guard.lowered_stops()) == {"mep", "kubota"}
+    a.guard.note_write({"mep_start": 52.0, "mep_stop": 56.0,
+                        "kub_start": 52.0, "kub_stop": 56.0})
+    assert a.guard.lowered_stops() == {}

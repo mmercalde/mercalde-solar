@@ -292,6 +292,41 @@ more than 25% over the learned curve the owner is told, once a day:
 Not asked while a generator is running: both the voltage and the shunt read
 high under charge, and the curve is a discharge curve.
 
+## When the stop rules are allowed to decide
+
+POLICY 3 sets what tonight's run should stop at, and both its cases now
+evaluate only between sunset and the following sunrise — the same window
+discipline POLICY 4 keeps, with the window POLICY 3 needs. Outside it the
+plan record says `held until sunset 7:12 pm` and shows the number it would
+have been looking at.
+
+It was not always so. At 10:36 am on 2026-09-01 the pre-dawn case fired for
+a 52 V crossing projected at 3:57 the *following* morning — seventeen hours
+away, with the whole day's solar still to come — and dropped both stops to
+54.5, where they stood until the evening. The guard's daylight hold did not
+catch it, because that rule forbids raising a *start* in daylight and this
+was lowering a stop. The projection it fired on had said 3:06 half an hour
+earlier and said 4:59 half an hour later; a figure that unsettled is not one
+to set a threshold from half a day early.
+
+Inside the window, the crossing has to be tonight's: anything at or past the
+coming sunrise belongs to a later night and is ignored, with the reason
+printed.
+
+And the stop comes back. A stop below the owner's baseline is POLICY 3's
+pre-dawn case borrowing tonight, and `agent.py` returns it the same way a
+raised start is returned — raising only, exempt from the rate limit, one
+Telegram — as soon as the reason has passed. That is when the sun is up,
+whatever happened overnight, or earlier if the crossing stops being
+projected at all. A rule that is only "not firing" because the stops are
+already where it wants them still means it, so the housekeeping checks
+`satisfied` and leaves those alone; without that the two would take turns
+all night.
+
+The return is driven by the state, not only by the ledger: any stop sitting
+below the owner's baseline with no live reason comes back, whether or not
+this bookkeeping recorded putting it there.
+
 ## The top-up state machine
 
 POLICY 4 used to be re-derived from the pack's voltage on every tick, with no

@@ -94,7 +94,7 @@ class Guard:
             return {"intended": None, "last_write_ts": 0,
                     "override_until": 0,
                     "override_adopted": None, "owner_baseline": None,
-                    "raised_starts": {}}
+                    "raised_starts": {}, "lowered_stops": {}}
 
     def _save_state(self):
         os.makedirs(os.path.dirname(self.state_path), exist_ok=True)
@@ -118,6 +118,7 @@ class Guard:
         now = int(now or time.time())
         base = self.baseline()
         raised = dict(self.state.get("raised_starts") or {})
+        lowered = dict(self.state.get("lowered_stops") or {})
         for gen, skey, pkey, _ in GEN_KEYS:
             if applied[skey] > base[skey] + EPS:
                 fresh = gen not in raised
@@ -130,7 +131,17 @@ class Guard:
                     self.topup.request(gen, applied[skey], applied[pkey], now)
             else:
                 raised.pop(gen, None)
+            # A stop below the owner's baseline is POLICY 3's pre-dawn case
+            # asking solar to finish the charge. That reason lasts one night,
+            # so the same bookkeeping that brings a raised start back brings
+            # this back too.
+            if applied[pkey] < base[pkey] - EPS:
+                lowered.setdefault(gen, {"since": now, "baseline": base[pkey],
+                                         "stop": applied[pkey]})
+            else:
+                lowered.pop(gen, None)
         self.state["raised_starts"] = raised
+        self.state["lowered_stops"] = lowered
         self.state["intended"] = dict(applied)
         if not housekeeping:
             self.state["last_write_ts"] = now
@@ -144,6 +155,16 @@ class Guard:
         raised = dict(self.state.get("raised_starts") or {})
         if raised.pop(gen, None) is not None:
             self.state["raised_starts"] = raised
+            self._save_state()
+
+    def lowered_stops(self):
+        """Generators whose stop the agent has dropped and not yet put back."""
+        return dict(self.state.get("lowered_stops") or {})
+
+    def clear_lowered(self, gen):
+        lowered = dict(self.state.get("lowered_stops") or {})
+        if lowered.pop(gen, None) is not None:
+            self.state["lowered_stops"] = lowered
             self._save_state()
 
     def owner_changed(self, live_now, intended):
@@ -173,8 +194,10 @@ class Guard:
         self.state["override_adopted"] = dict(live_now)
         self.state["owner_baseline"] = dict(live_now)
         self.state["intended"] = dict(live_now)
-        # Their values are the baseline now; nothing of ours is raised.
+        # Their values are the baseline now; nothing of ours is raised or
+        # lowered against it.
         self.state["raised_starts"] = {}
+        self.state["lowered_stops"] = {}
         self._save_state()
         if self.topup is not None:
             for gen in gens:
@@ -216,6 +239,7 @@ class Guard:
         self.state["owner_baseline"] = dict(values)
         self.state["intended"] = dict(values)
         self.state["raised_starts"] = {}
+        self.state["lowered_stops"] = {}
         self._save_state()
         log.info("adopted the live thresholds as the baseline: %s", values)
         return values
