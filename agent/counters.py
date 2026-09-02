@@ -3,8 +3,8 @@
 Read once an hour into the `counters` table as an independent cross-check on
 `daily`, which is integrated from /data samples.
 
-Hourly, and spaced, because these 72 reads are aimed at the gateway the Pi5
-is already polling every 5 seconds, and the gateway will drop a connection
+Hourly, and widely spaced, because these 72 reads are aimed at the gateway
+the Pi5 is already polling every 5 seconds, and the gateway will drop a connection
 when two masters crowd it. On the tick they did: every one of the eight
 "Incomplete response header: got 0" drops the Pi5 logged between 2026-08-28
 and 2026-09-01 landed 2.2-3.4 s after an agent tick — which is where this
@@ -36,9 +36,15 @@ log = logging.getLogger(__name__)
 
 MODBUS_PORT = 503
 KWH_SCALE = 0.001
-# Seconds between reads. 72 reads at this spacing is about 11 s of gateway
+# Seconds between reads. 72 reads at this spacing is about 25 s of gateway
 # time an hour, against the Pi5's continuous 5-second poll.
-READ_SPACING = 0.15
+#
+# It was 0.15 s, which put the run at 11 s and still left it colliding: the
+# Pi5's poller is edge-triggered on a single failed read, so one unlucky
+# overlap in 72 costs a Telegram. Widening the gap is the only lever there
+# is - there is no connection to reuse and no batching to do - and an hour
+# has room for a great deal more than 25 s.
+READ_SPACING = 0.35
 
 # Offset from a counter's base address to each period. SPEC section 3 names
 # four of the six; hour and week are read by the same code if ever needed.
@@ -145,6 +151,10 @@ def record(conn, cfg, ts=None, host=None, client=None, spacing=READ_SPACING):
     started = time.monotonic()
     readings, failed = read_all(cfg, host=host, client=client, spacing=spacing)
     elapsed = time.monotonic() - started
+    # Counted before the rollups are folded in: what the gateway was asked
+    # for is 72 registers, and the 92 values that come out of it include 20
+    # this module derived itself.
+    reads = len(readings) + failed
     if not readings:
         log.warning("no counters read in %.1f s; gateway unreachable on Modbus 503?",
                     elapsed)
@@ -155,8 +165,8 @@ def record(conn, cfg, ts=None, host=None, client=None, spacing=READ_SPACING):
         "VALUES (?,?,?,?,?)",
         [(ts, dev, ctr, per, kwh) for (dev, ctr, per), kwh in readings.items()])
     conn.commit()
-    log.info("counters: %d readings in %.1f s, %d failed read(s)",
-             len(readings), elapsed, failed)
+    log.info("counters: %d register reads in %.1f s, %d values stored, "
+             "%d failed read(s)", reads, elapsed, len(readings), failed)
     return len(readings)
 
 
@@ -198,10 +208,12 @@ def main():
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     cfg = config.load()
     readings, failed = read_all(cfg)
+    reads = len(readings) + failed
     readings.update(derive_totals(readings))
     for (dev, ctr, per) in sorted(readings):
         print(f"{dev:12s} {ctr:22s} {per:9s} {readings[(dev, ctr, per)]:12.3f} kWh")
-    print(f"\n{len(readings)} values, {failed} failed read(s)")
+    print(f"\n{len(readings)} values from {reads} register reads, "
+          f"{failed} failed read(s)")
 
 
 if __name__ == "__main__":

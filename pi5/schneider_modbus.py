@@ -31,6 +31,8 @@ class SchneiderModbusTCP:
     CONNECT_RETRIES = 1  # One extra attempt on connect failure (safe: nothing sent yet)
     CONNECT_RETRY_DELAY = 0.1  # 100ms backoff before retry
     POST_WRITE_DELAY = 0.2  # 200ms after writes
+    READ_RETRIES = 1  # One extra attempt on a failed READ. Never on a write.
+    READ_RETRY_DELAY = 0.3  # 300ms, long enough for a colliding master to finish
     
     def __init__(self):
         self._transaction_id = 0
@@ -193,6 +195,54 @@ class SchneiderModbusTCP:
                 except:
                     pass
     
+    def _read_request(
+        self,
+        host: str,
+        port: int,
+        slave: int,
+        function_code: int,
+        start_reg_or_coil: int,
+        quantity: int
+    ) -> Tuple[bool, Optional[bytes]]:
+        """One Modbus read, retried once after a short pause if it fails.
+
+        Reads only. A read is idempotent: the gateway keeps no session and
+        every request opens its own socket, so a second attempt asks the same
+        question again and nothing has been changed by the first. A write is
+        not idempotent and gets no retry here or anywhere else.
+
+        The failures this absorbs are single-read transients on a port two
+        masters share - a dropped frame, a response that arrived past the one
+        second timeout, a connection the gateway closed while it was busy
+        with the other master. They come back on the next attempt. A fault
+        that is really there fails twice and is reported exactly as before.
+
+        Retried on any failed read rather than on a named exception:
+        _send_modbus_request already catches socket.timeout, socket.error and
+        OSError internally and reports them as (False, None), alongside the
+        incomplete frames and transaction-id mismatches that are the same
+        collision seen from a different angle. The except clause below is for
+        anything a future edit lets through.
+        """
+        for attempt in range(1 + self.READ_RETRIES):
+            try:
+                success, data = self._send_modbus_request(
+                    host, port, slave, function_code, start_reg_or_coil, quantity)
+            except (socket.timeout, socket.error, OSError) as e:
+                logger.debug(f"Read from slave {slave} addr 0x{start_reg_or_coil:04X} "
+                             f"raised {e}")
+                success, data = False, None
+            if success:
+                if attempt:
+                    logger.debug(f"Read from slave {slave} "
+                                 f"addr 0x{start_reg_or_coil:04X} recovered on retry")
+                return success, data
+            if attempt < self.READ_RETRIES:
+                logger.debug(f"Read from slave {slave} addr 0x{start_reg_or_coil:04X} "
+                             f"failed, retrying once in {self.READ_RETRY_DELAY}s")
+                time.sleep(self.READ_RETRY_DELAY)
+        return False, None
+
     # --- Register Read Functions ---
     
     def read_holding_register_16(self, host: str, port: int, slave: int, reg: int) -> Optional[int]:
@@ -202,7 +252,7 @@ class SchneiderModbusTCP:
         Returns:
             16-bit unsigned value, or None on failure
         """
-        success, data = self._send_modbus_request(host, port, slave, 0x03, reg, 1)
+        success, data = self._read_request(host, port, slave, 0x03, reg, 1)
         if success and data and len(data) == 2:
             # Big-endian
             return (data[0] << 8) | data[1]
@@ -218,7 +268,7 @@ class SchneiderModbusTCP:
         Returns:
             32-bit unsigned value, or None on failure
         """
-        success, data = self._send_modbus_request(host, port, slave, 0x03, reg, 2)
+        success, data = self._read_request(host, port, slave, 0x03, reg, 2)
         if success and data and len(data) == 4:
             # MSW first, big-endian words
             return (data[0] << 24) | (data[1] << 16) | (data[2] << 8) | data[3]
@@ -306,7 +356,7 @@ class SchneiderModbusTCP:
         Returns:
             True if ON, False if OFF, None on failure
         """
-        success, data = self._send_modbus_request(host, port, slave, 0x01, coil, 1)
+        success, data = self._read_request(host, port, slave, 0x01, coil, 1)
         if success and data and len(data) >= 1:
             return (data[0] & 0x01) != 0
         return None

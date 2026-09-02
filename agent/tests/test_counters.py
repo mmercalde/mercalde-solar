@@ -58,11 +58,14 @@ def test_the_first_read_is_not_delayed(cfg):
     assert client.reads[0][0] - started < 0.01
 
 
-def test_the_shipped_spacing_holds_the_gateway_about_eleven_seconds(cfg):
-    """A number worth noticing if it is ever raised: it is gateway time
-    taken away from the Pi5's poll, once an hour."""
-    assert counters.READ_SPACING == 0.15
-    assert 10.0 < 71 * counters.READ_SPACING < 12.0
+def test_the_shipped_spacing_holds_the_gateway_about_twenty_five_seconds(cfg):
+    """A number worth noticing if it is ever changed: it is gateway time
+    taken away from the Pi5's poll, once an hour. It was 0.15 s and 11 s,
+    which was still close enough to collide - and the Pi5's poller is
+    edge-triggered on a single failed read, so one unlucky overlap in 72
+    costs a Telegram."""
+    assert counters.READ_SPACING == 0.35
+    assert 24.0 < 71 * counters.READ_SPACING < 26.0
 
 
 def test_a_failed_read_is_counted_and_left_out(cfg):
@@ -103,6 +106,11 @@ def test_the_run_logs_its_duration_and_failed_reads(conn, cfg, caplog):
     assert len(line) == 1
     assert "1 failed read(s)" in line[0]
     assert " s," in line[0]
+    # The registers asked for and the values stored are different numbers -
+    # 72 and 92 - and the line used to report only the second under a name
+    # that read like the first.
+    assert "72 register reads" in line[0]
+    assert "91 values stored" in line[0]   # 71 read + 20 derived, one lost
 
 
 # --- off the tick -----------------------------------------------------------
