@@ -177,6 +177,14 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
     }
 
+    location /diagnostic {
+        if ($solar_locked) { return 403; }
+        proxy_pass http://solar_dashboard/diagnostic;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+
     # AC Diagnostic. One prefix block covers /acdiag, /acdiag/stream,
     # /acdiag/log and /acdiag/log/clear. proxy_pass carries no URI, so nginx
     # forwards the original path unchanged.

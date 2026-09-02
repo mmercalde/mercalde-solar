@@ -1038,11 +1038,20 @@ body::before{
 @media(max-width:880px){.hero,.grid3,.grid4{grid-template-columns:1fr 1fr}.hero>:first-child{grid-column:1/-1}}
 @media(max-width:560px){.hero,.grid2,.grid3,.grid4{grid-template-columns:1fr}}
 
-h2.sec{
+h2.sec,summary.sec{
   font-size:.76rem;text-transform:uppercase;letter-spacing:.13em;color:var(--dim2);
   font-weight:650;margin:26px 0 12px;display:flex;align-items:center;gap:12px;
 }
-h2.sec::after{content:'';flex:1;height:1px;background:var(--line)}
+h2.sec::after,summary.sec::after{content:'';flex:1;height:1px;background:var(--line)}
+/* A section heading that opens and closes its own grid. Same typography, and
+   the caret sits past the rule line rather than in front of it: the line is
+   ::after and therefore last in the box, so the two are ordered explicitly. */
+summary.sec{cursor:pointer;list-style:none}
+summary.sec::-webkit-details-marker{display:none}
+summary.sec::after{order:1}
+summary.sec .caret{order:2;color:var(--dim2);transition:transform .3s var(--ease)}
+details.secacc[open]>summary.sec .caret{transform:rotate(90deg)}
+details.secacc>summary.sec:hover{color:var(--txt)}
 
 /* ---------- bars ---------- */
 .track{height:6px;border-radius:99px;background:rgba(255,255,255,.07);overflow:hidden;margin-top:13px;position:relative}
@@ -1150,30 +1159,6 @@ select{flex:1}
 .rise{opacity:0;animation:rise .55s var(--ease) forwards}
 @keyframes rise{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:none}}
 
-/* ---------- AC diagnostic ---------- */
-.mgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(148px,1fr));gap:10px}
-.metric{background:rgba(0,0,0,.22);border:1px solid var(--line);border-radius:11px;padding:12px 13px}
-.metric .k{font-size:.68rem;text-transform:uppercase;letter-spacing:.07em;color:var(--dim2);font-weight:600;margin-bottom:6px}
-.metric .v{font-size:1.22rem;font-weight:650;letter-spacing:-.02em;font-variant-numeric:tabular-nums}
-.metric .s{font-size:.7rem;color:#5f6f83;margin-top:3px;font-variant-numeric:tabular-nums}
-.delta-ok{color:var(--good)}
-.delta-warn{color:var(--warn)}
-.dbar{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px;align-items:center}
-.dstat{font-size:.78rem;color:var(--dim2);margin-top:11px;min-height:1.2em}
-.dstat.running{color:var(--warn)}
-.dstat.done{color:var(--good)}
-.dstat.error{color:var(--bad)}
-.dwrap{max-height:250px;overflow-y:auto;border:1px solid var(--line);border-radius:11px;margin-top:13px}
-.dwrap::-webkit-scrollbar{width:7px}
-.dwrap::-webkit-scrollbar-thumb{background:rgba(255,255,255,.14);border-radius:9px}
-.dtable{width:100%;border-collapse:collapse;font-family:ui-monospace,'SF Mono',Menlo,monospace;font-size:.72rem}
-.dtable th{position:sticky;top:0;background:#141c26;color:var(--dim2);font-weight:600;
-  text-transform:uppercase;letter-spacing:.05em;font-size:.64rem;padding:9px 8px;text-align:right;
-  border-bottom:1px solid var(--line);white-space:nowrap}
-.dtable th:first-child,.dtable td:first-child{text-align:left}
-.dtable td{padding:6px 8px;text-align:right;border-bottom:1px solid rgba(255,255,255,.04);color:var(--txt);white-space:nowrap}
-.dtable tbody tr:hover{background:rgba(255,255,255,.03)}
-.dtable td[colspan]{text-align:center;color:#5f6f83;padding:18px}
 
 input[type=range]{-webkit-appearance:none;appearance:none;background:transparent;height:18px;padding:0}
 input[type=range]::-webkit-slider-runnable-track{height:4px;border-radius:9px;background:rgba(255,255,255,.16)}
@@ -1196,6 +1181,12 @@ input[type=range]::-moz-range-thumb{width:14px;height:14px;border-radius:50%;bac
   padding:13px 16px;pointer-events:auto}
 .hud-tl{top:16px;left:18px;display:flex;align-items:center;gap:11px}
 .hudstack{display:contents}
+/* Below 820px the badge and the ask box are moved into this row; above it
+   they live in .hud-tr and the row is empty. One set of nodes either way. */
+#agentRow{display:none}
+.mobilelinks{display:none;justify-content:center;gap:18px;margin:22px 0 0;
+  font-size:.78rem}
+.mobilelinks a{color:var(--batt);text-decoration:none}
 .hud-tr{top:16px;right:18px;display:flex;align-items:center;gap:14px;font-size:.76rem;
   color:var(--dim2)}
 .hud-tr a{color:var(--batt);text-decoration:none}
@@ -1228,7 +1219,7 @@ input[type=range]::-moz-range-thumb{width:14px;height:14px;border-radius:50%;bac
   /* both cards stack in flow at the top - they cannot overlap */
   .hudstack{display:flex;flex-direction:column;gap:8px;
     position:absolute;top:10px;left:10px;right:10px;z-index:4}
-  .hud-bl,.hud-br{position:static;top:auto;left:auto;right:auto;bottom:auto}
+  .hud-bl,.hud-br,#agentRow{position:static;top:auto;left:auto;right:auto;bottom:auto}
   .hud-bl{gap:10px;padding:8px 12px;justify-content:space-between;align-items:center}
   .hud .v{font-size:1.12rem}
   .hud .k{font-size:.56rem;margin-bottom:2px}
@@ -1239,7 +1230,17 @@ input[type=range]::-moz-range-thumb{width:14px;height:14px;border-radius:50%;bac
   #sunTime{width:78px}
   #sunLabel{display:none}
   .hud-br .btn{padding:4px 8px;font-size:.66rem}
-}  .hud-br .btn{padding:4px 8px;font-size:.66rem}
+  /* the agent row: badge left, ask box filling, one Ask button */
+  #agentRow{display:flex;align-items:center;gap:8px;padding:8px 10px;
+    font-size:.76rem;color:var(--dim2)}
+  #agentRow .agentb{flex:0 0 auto;white-space:nowrap}
+  #agentRow .askbox{display:flex;flex:1 1 auto;min-width:0;gap:6px}
+  #agentRow .askbox input{flex:1 1 auto;width:auto;min-width:0}
+  #agentRow .askbox .btn{flex:0 0 auto;padding:5px 11px;font-size:.7rem}
+  /* the plan is reachable by tapping the badge, so the quick buttons go */
+  #agentRow .qb{display:none}
+  .agentpop{max-height:56vh}
+  .mobilelinks{display:flex}
 }
 
 @media(prefers-reduced-motion:reduce){
@@ -1289,10 +1290,11 @@ input[type=range]::-moz-range-thumb{width:14px;height:14px;border-radius:50%;bac
       <input id='askInput' type='text' placeholder='Ask the agent&hellip;' autocomplete='off'
              onkeydown='if(event.key===\"Enter\"){event.preventDefault();askAgent();}'>
       <button class='btn s sm' onclick='askAgent()'>Ask</button>
-      <button class='btn s sm' onclick='askAgent(\"plan\")'>Plan</button>
-      <button class='btn s sm' onclick='askAgent(\"what is the system doing right now\")'>Status</button>
+      <button class='btn s sm qb' onclick='askAgent(\"plan\")'>Plan</button>
+      <button class='btn s sm qb' onclick='askAgent(\"what is the system doing right now\")'>Status</button>
     </span>
     <a href='/registers'>Registers &rarr;</a>
+    <a href='/diagnostic'>AC Diagnostic &rarr;</a>
   </div>
 
   <div class='hudstack'>
@@ -1330,6 +1332,7 @@ input[type=range]::-moz-range-thumb{width:14px;height:14px;border-radius:50%;bac
     <button class='btn s sm' onclick='resetView()' style='padding:5px 10px'>Reset</button>
     <button class='btn s sm' id='toggle3d' onclick='toggle3D()' style='padding:5px 10px'>3D off</button>
   </div>
+<div class='hud' id='agentRow'></div>
 </div>
 
   <div class='hud hud-gen'>
@@ -1343,7 +1346,8 @@ input[type=range]::-moz-range-thumb{width:14px;height:14px;border-radius:50%;bac
 <div class='banner' id='errorBanner'></div>
 
 <!-- HERO -->
-<h2 class='sec'>Overview</h2>
+<details class='secacc' open>
+<summary class='sec'>Overview <span class='caret'>&#10095;</span></summary>
 <div class='hero'>
   <div class='card hero-main rise' style='--accent:var(--solar);animation-delay:.02s'>
     <div>
@@ -1378,8 +1382,10 @@ input[type=range]::-moz-range-thumb{width:14px;height:14px;border-radius:50%;bac
     <div class='track'><div class='fill' id='totalAC_bar' style='--c1:#4cc9f0;--c2:#7ee0ff'></div></div>
   </div>
 </div>
+</details>
 
-<h2 class='sec'>Inverters</h2>
+<details class='secacc' open>
+<summary class='sec'>Inverters <span class='caret'>&#10095;</span></summary>
 <div class='grid2'>
   <div class='card rise' style='--accent:var(--ac);animation-delay:.18s'>
     <div class='lbl'>&#128268; XW Pro Master &middot; ID 10</div>
@@ -1392,8 +1398,10 @@ input[type=range]::-moz-range-thumb{width:14px;height:14px;border-radius:50%;bac
     <div class='sub'><span class='num' id='acCurrent2_value'>0</span> A &middot; charge <span class='num' id='chargePower2_value'>0</span> W</div>
   </div>
 </div>
+</details>
 
-<h2 class='sec'>Solar Arrays</h2>
+<details class='secacc' open>
+<summary class='sec'>Solar Arrays <span class='caret'>&#10095;</span></summary>
 <div class='grid3'>
   <div class='card rise' style='--accent:var(--solar);animation-delay:.26s'>
     <div class='lbl'>&#9728;&#65039; MPPT 80 &middot; Ground + terrace</div>
@@ -1414,8 +1422,10 @@ input[type=range]::-moz-range-thumb{width:14px;height:14px;border-radius:50%;bac
     <div class='track'><div class='fill' id='west_bar' style='--c1:#ff8a00;--c2:#ffd54a'></div></div>
   </div>
 </div>
+</details>
 
-<h2 class='sec'>Generators</h2>
+<details class='secacc' open>
+<summary class='sec'>Generators <span class='caret'>&#10095;</span></summary>
 <div class='grid2'>
   <div class='card gen-card rise' style='--accent:var(--gen);animation-delay:.38s'>
     <div class='lbl'>&#128295; MEP-803A <span id='mep_chip' class='chip off'>--</span></div>
@@ -1438,34 +1448,7 @@ input[type=range]::-moz-range-thumb{width:14px;height:14px;border-radius:50%;bac
     </div>
   </div>
 </div>
-
-<h2 class='sec'>AC Diagnostic &mdash; Inverter Sync</h2>
-<div class='card' style='--accent:var(--gen)'>
-  <div class='mgrid'>
-    <div class='metric'><div class='k'>Master ID10 &middot; L1</div><div class='v' id='diag_m_v1'>--</div><div class='s'>L2 <span id='diag_m_v2'>--</span></div></div>
-    <div class='metric'><div class='k'>Slave ID12 &middot; L1</div><div class='v' id='diag_s_v1'>--</div><div class='s'>L2 <span id='diag_s_v2'>--</span></div></div>
-    <div class='metric'><div class='k'>&Delta; Voltage (M&minus;S)</div><div class='v' id='diag_dv'>--</div><div class='s'>target &plusmn;0.0&ndash;0.6 V</div></div>
-    <div class='metric'><div class='k'>Master frequency</div><div class='v' id='diag_m_hz'>--</div><div class='s'>Hz</div></div>
-    <div class='metric'><div class='k'>Slave frequency</div><div class='v' id='diag_s_hz'>--</div><div class='s'>Hz</div></div>
-    <div class='metric'><div class='k'>&Delta; Frequency (M&minus;S)</div><div class='v' id='diag_dhz'>--</div><div class='s'>target 0.00 Hz</div></div>
-    <div class='metric'><div class='k'>Master power</div><div class='v' id='diag_m_pw'>--</div><div class='s'>W</div></div>
-    <div class='metric'><div class='k'>Slave power</div><div class='v' id='diag_s_pw'>--</div><div class='s'>W</div></div>
-    <div class='metric'><div class='k'>Last reading</div><div class='v' id='diag_ts' style='font-size:1.05rem'>--</div><div class='s' id='diag_log_count'>Log: 0 entries</div></div>
-  </div>
-  <div class='dbar'>
-    <button class='btn g sm' onclick='diagSnapshot()'>Snapshot</button>
-    <button class='btn v sm' onclick='diagStream()'>Capture 20s</button>
-    <button class='btn s sm' onclick='diagLoadLog()'>Refresh log</button>
-    <button class='btn s sm' onclick='diagClearLog()' style='margin-left:auto'>Clear log</button>
-  </div>
-  <div class='dstat' id='diag_status'>Ready &mdash; Snapshot for one reading, Capture 20s to record a stream.</div>
-  <div class='dwrap'>
-    <table class='dtable'>
-      <thead><tr><th>Time</th><th>M&nbsp;V1</th><th>S&nbsp;V1</th><th>&Delta;V</th><th>M&nbsp;Hz</th><th>S&nbsp;Hz</th><th>&Delta;Hz</th><th>M&nbsp;W</th><th>S&nbsp;W</th></tr></thead>
-      <tbody id='diag_log_body'><tr><td colspan='9'>No log data &mdash; click Snapshot or Capture</td></tr></tbody>
-    </table>
-  </div>
-</div>
+</details>
 
 <h2 class='sec'>Control &amp; Settings</h2>
 
@@ -1530,6 +1513,11 @@ input[type=range]::-moz-range-thumb{width:14px;height:14px;border-radius:50%;bac
     <div class='log' id='eventLog'><div class='e-info'>Loading...</div></div>
   </div>
 </details>
+
+<div class='mobilelinks'>
+  <a href='/diagnostic'>AC Diagnostic &rarr;</a>
+  <a href='/registers'>Registers &rarr;</a>
+</div>
 
 <div class='foot'>Pi 5 &middot; Dashboard V2.8 &middot; uptime <span class='num' id='uptime_value'>--:--:--</span></div>
 </div>
@@ -1927,126 +1915,6 @@ async function askAgent(preset){
   scrollToAsk(askBlocks.indexOf(block));
 }
 
-/* ---- AC diagnostic (ported from V2.4) ---- */
-function fmtV(v){return v!=null?v.toFixed(3)+'V':'--';}
-function fmtHz(v){return v!=null?v.toFixed(2)+'Hz':'--';}
-function fmtW(v){return v!=null?v+'W':'--';}
-function fmtDelta(v,warn){
-  if(v==null)return'--';
-  const s=(v>=0?'+':'')+v.toFixed(4);
-  return'<span class="'+(Math.abs(v)>warn?'delta-warn':'delta-ok')+'">'+s+'</span>';
-}
-
-function diagUpdateCards(d){
-  const m=d.master, s=d.slave, dt=d.delta;
-  document.getElementById('diag_m_v1').textContent=fmtV(m.voltage_l1);
-  document.getElementById('diag_m_v2').textContent=fmtV(m.voltage_l2);
-  document.getElementById('diag_s_v1').textContent=fmtV(s.voltage_l1);
-  document.getElementById('diag_s_v2').textContent=fmtV(s.voltage_l2);
-  document.getElementById('diag_dv').innerHTML=fmtDelta(dt.voltage_l1, 0.1);
-  document.getElementById('diag_m_hz').textContent=fmtHz(m.frequency);
-  document.getElementById('diag_s_hz').textContent=fmtHz(s.frequency);
-  document.getElementById('diag_dhz').innerHTML=fmtDelta(dt.frequency, 0.05);
-  document.getElementById('diag_m_pw').textContent=fmtW(m.power_w);
-  document.getElementById('diag_s_pw').textContent=fmtW(s.power_w);
-  // Show short timestamp HH:MM:SS
-  const ts=d.timestamp?d.timestamp.substring(11,19):'--';
-  document.getElementById('diag_ts').textContent=ts;
-}
-
-function diagAddRows(readings){
-  const tbody=document.getElementById('diag_log_body');
-  // Prepend rows (newest first)
-  const rows=[...readings].reverse().map(d=>{
-    const m=d.master, s=d.slave, dt=d.delta;
-    const ts=d.timestamp?d.timestamp.substring(11,19):'?';
-    return '<tr>'+
-      '<td>'+ts+'</td>'+
-      '<td>'+(m.voltage_l1!=null?m.voltage_l1.toFixed(3):'--')+'</td>'+
-      '<td>'+(s.voltage_l1!=null?s.voltage_l1.toFixed(3):'--')+'</td>'+
-      '<td>'+fmtDelta(dt.voltage_l1,0.1)+'</td>'+
-      '<td>'+(m.frequency!=null?m.frequency.toFixed(2):'--')+'</td>'+
-      '<td>'+(s.frequency!=null?s.frequency.toFixed(2):'--')+'</td>'+
-      '<td>'+fmtDelta(dt.frequency,0.05)+'</td>'+
-      '<td>'+(m.power_w!=null?m.power_w:'--')+'</td>'+
-      '<td>'+(s.power_w!=null?s.power_w:'--')+'</td>'+
-      '</tr>';
-  }).join('');
-  // If placeholder row exists, clear it
-  if(tbody.querySelector('td[colspan]'))tbody.innerHTML='';
-  tbody.insertAdjacentHTML('afterbegin',rows);
-}
-
-async function diagSnapshot(){
-  const st=document.getElementById('diag_status');
-  st.textContent='Reading...';st.className='dstat running';
-  try{
-    const r=await fetch('/acdiag');
-    if(!r.ok)throw new Error('HTTP '+r.status);
-    const d=await r.json();
-    diagUpdateCards(d);
-    diagAddRows([d]);
-    st.textContent='Snapshot complete at '+d.timestamp.substring(11,19);
-    st.className='dstat done';
-  }catch(e){
-    st.textContent='Error: '+e;st.className='dstat error';
-  }
-}
-
-async function diagStream(){
-  const st=document.getElementById('diag_status');
-  st.textContent='Capturing 20 readings over 10 seconds...';st.className='dstat running';
-  try{
-    const r=await fetch('/acdiag/stream?n=20&interval=500');
-    if(!r.ok)throw new Error('HTTP '+r.status);
-    const readings=await r.json();
-    if(readings.length>0){
-      diagUpdateCards(readings[readings.length-1]);
-      diagAddRows(readings);
-    }
-    st.textContent='Stream capture complete — '+readings.length+' readings saved to log.';
-    st.className='dstat done';
-  }catch(e){
-    st.textContent='Error: '+e;st.className='dstat error';
-  }
-}
-
-async function diagLoadLog(){
-  const st=document.getElementById('diag_status');
-  st.textContent='Loading log...';st.className='dstat running';
-  try{
-    const r=await fetch('/acdiag/log?n=50');
-    if(!r.ok)throw new Error('HTTP '+r.status);
-    const entries=await r.json();
-    const tbody=document.getElementById('diag_log_body');
-    tbody.innerHTML='';
-    if(entries.length===0){
-      tbody.innerHTML='<tr><td colspan="9" style="text-align:center;color:#5f6f83;">No log entries</td></tr>';
-    }else{
-      diagAddRows(entries);
-      document.getElementById('diag_log_count').textContent='Log: '+entries.length+' entries shown';
-    }
-    st.textContent='Log loaded — '+entries.length+' entries.';
-    st.className='dstat done';
-  }catch(e){
-    st.textContent='Error: '+e;st.className='dstat error';
-  }
-}
-
-async function diagClearLog(){
-  if(!confirm('Clear all AC diagnostic log entries?'))return;
-  const st=document.getElementById('diag_status');
-  try{
-    await fetch('/acdiag/log/clear');
-    document.getElementById('diag_log_body').innerHTML=
-      '<tr><td colspan="9" style="text-align:center;color:#5f6f83;">Log cleared</td></tr>';
-    document.getElementById('diag_log_count').textContent='Log: 0 entries';
-    st.textContent='Log cleared.';st.className='dstat done';
-  }catch(e){
-    st.textContent='Error: '+e;st.className='dstat error';
-  }
-}
-
 async function fetchData(){
   try{const r=await fetch('/data');if(r.ok)updateUI(await r.json());}
   catch(e){console.error('fetchData:',e);}
@@ -2128,8 +1996,20 @@ function placeAgentPlan(){
   const pop=document.getElementById('agentPop'),badge=document.getElementById('agentBadge');
   if(!pop||!badge)return;
   const r=badge.getBoundingClientRect();
+  /* On a phone the badge is one item in a full-width row, so anchoring the
+     panel to its right edge would hang it off the side. It goes under the
+     whole row instead, edge to edge. */
+  if(window.matchMedia('(max-width:820px)').matches){
+    const row=document.getElementById('agentRow');
+    const b=(row&&row.getBoundingClientRect().height)?row.getBoundingClientRect():r;
+    pop.style.top=Math.round(b.bottom+8)+'px';
+    pop.style.left='10px';pop.style.right='10px';
+    pop.style.width='auto';pop.style.maxWidth='none';
+    return;
+  }
   pop.style.top=Math.round(r.bottom+10)+'px';
   pop.style.right=Math.max(12,Math.round(innerWidth-r.right))+'px';
+  pop.style.left='auto';pop.style.width='';pop.style.maxWidth='';
 }
 
 function showAgentPlan(){
@@ -2212,8 +2092,35 @@ document.addEventListener('visibilitychange',()=>{
   fetchData();fetchConfig();fetchAgent();startPolling();
   if(s3dOn&&window.Site3D&&Site3D.isReady())Site3D.start();
 });
+/* ---- the agent badge and ask box move between the two HUD homes ----
+   Below 820px .hud-tr is display:none, which took the badge and the ask box
+   with it and left the phone with no way to see the agent or talk to it. The
+   same nodes are moved into #agentRow instead of a second copy being made:
+   one #agentBadge, one #askInput, so toggleAgentPlan, askAgent and the status
+   poll go on addressing what they always addressed. */
+const NARROW=window.matchMedia('(max-width:820px)');
+function placeAgentControls(narrow){
+  const row=document.getElementById('agentRow');
+  const tr=document.querySelector('.hud-tr');
+  const badge=document.getElementById('agentBadge');
+  const ask=document.querySelector('.askbox');
+  if(!row||!tr||!badge||!ask)return;
+  if(narrow){
+    if(badge.parentNode!==row){row.appendChild(badge);row.appendChild(ask);}
+  }else if(badge.parentNode!==tr){
+    /* back where they were: after the errors counter, before the links */
+    const links=tr.querySelector('a');
+    tr.insertBefore(badge,links);
+    tr.insertBefore(ask,links);
+  }
+  if(agentPlanShown)placeAgentPlan();
+}
+if(NARROW.addEventListener)NARROW.addEventListener('change',e=>placeAgentControls(e.matches));
+else NARROW.addListener(e=>placeAgentControls(e.matches));
+
 document.addEventListener('DOMContentLoaded',()=>{
   document.getElementById('capKw_value').textContent=(CAPS.total/1000).toFixed(1);
+  placeAgentControls(NARROW.matches);
   fetchData();fetchConfig();fetchAgent();startPolling();
 });
 /* ---- sun position scrubber ---- */
@@ -2959,6 +2866,246 @@ var Site3D=(function(){
 </body>
 </html>"""
 
+DIAGNOSTIC_HTML = """<!DOCTYPE html>
+<html lang='en'>
+<head>
+<meta charset='UTF-8'>
+<meta name='viewport' content='width=device-width, initial-scale=1.0'>
+<meta name='theme-color' content='#0b0f14'>
+<title>AC Diagnostic - Inverter Sync</title>
+<style>
+:root{
+  --bg:#0b0f14; --panel:rgba(255,255,255,0.035);
+  --panel-hi:rgba(255,255,255,0.06); --line:rgba(255,255,255,0.08);
+  --txt:#e8eef5; --dim2:#7d8da1;
+  --solar:#ffb020; --batt:#3ddc97; --ac:#4cc9f0; --gen:#c084fc;
+  --bad:#ff5d5d; --warn:#ffb020; --good:#3ddc97;
+  --r:16px; --ease:cubic-bezier(.22,.61,.36,1);
+}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0}
+body{
+  font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+  background:var(--bg); color:var(--txt); min-height:100vh; padding:18px 14px 40px;
+  -webkit-font-smoothing:antialiased;
+}
+body::before{
+  content:''; position:fixed; inset:0; z-index:-1; pointer-events:none;
+  background:
+    radial-gradient(900px 500px at 12% -8%, rgba(255,176,32,.10), transparent 60%),
+    radial-gradient(800px 500px at 92% 4%, rgba(76,201,240,.09), transparent 60%),
+    linear-gradient(180deg,#0d131b,#080b10 70%);
+}
+.wrap{max-width:1120px;margin:0 auto}
+.card{
+  background:var(--panel);border:1px solid var(--line);border-radius:var(--r);padding:18px;
+  position:relative;overflow:hidden;
+}
+.card::after{
+  content:'';position:absolute;top:0;left:0;right:0;height:1px;
+  background:linear-gradient(90deg,transparent,var(--accent,transparent),transparent);opacity:.55;
+}
+h2.sec{
+  font-size:.76rem;text-transform:uppercase;letter-spacing:.13em;color:var(--dim2);
+  font-weight:650;margin:26px 0 12px;display:flex;align-items:center;gap:12px;
+}
+h2.sec::after{content:'';flex:1;height:1px;background:var(--line)}
+.btn{border:none;border-radius:10px;padding:9px 16px;font-weight:600;cursor:pointer;
+  transition:transform .15s var(--ease),filter .2s,box-shadow .2s;color:#08111a}
+.btn:hover{filter:brightness(1.1)}
+.btn:active{transform:scale(.96)}
+.btn.s{background:rgba(255,255,255,.09);color:var(--txt);border:1px solid var(--line)}
+.btn.g{background:var(--good)}
+.btn.v{background:var(--gen);color:#160c22}
+.btn.sm{padding:7px 13px;font-size:.78rem}
+.back{display:inline-block;margin-bottom:4px;color:var(--batt);
+  text-decoration:none;font-size:.8rem}
+.back:hover{text-decoration:underline}
+
+/* ---------- AC diagnostic ---------- */
+.mgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(148px,1fr));gap:10px}
+.metric{background:rgba(0,0,0,.22);border:1px solid var(--line);border-radius:11px;padding:12px 13px}
+.metric .k{font-size:.68rem;text-transform:uppercase;letter-spacing:.07em;color:var(--dim2);font-weight:600;margin-bottom:6px}
+.metric .v{font-size:1.22rem;font-weight:650;letter-spacing:-.02em;font-variant-numeric:tabular-nums}
+.metric .s{font-size:.7rem;color:#5f6f83;margin-top:3px;font-variant-numeric:tabular-nums}
+.delta-ok{color:var(--good)}
+.delta-warn{color:var(--warn)}
+.dbar{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px;align-items:center}
+.dstat{font-size:.78rem;color:var(--dim2);margin-top:11px;min-height:1.2em}
+.dstat.running{color:var(--warn)}
+.dstat.done{color:var(--good)}
+.dstat.error{color:var(--bad)}
+.dwrap{max-height:250px;overflow-y:auto;border:1px solid var(--line);border-radius:11px;margin-top:13px}
+.dwrap::-webkit-scrollbar{width:7px}
+.dwrap::-webkit-scrollbar-thumb{background:rgba(255,255,255,.14);border-radius:9px}
+.dtable{width:100%;border-collapse:collapse;font-family:ui-monospace,'SF Mono',Menlo,monospace;font-size:.72rem}
+.dtable th{position:sticky;top:0;background:#141c26;color:var(--dim2);font-weight:600;
+  text-transform:uppercase;letter-spacing:.05em;font-size:.64rem;padding:9px 8px;text-align:right;
+  border-bottom:1px solid var(--line);white-space:nowrap}
+.dtable th:first-child,.dtable td:first-child{text-align:left}
+.dtable td{padding:6px 8px;text-align:right;border-bottom:1px solid rgba(255,255,255,.04);color:var(--txt);white-space:nowrap}
+.dtable tbody tr:hover{background:rgba(255,255,255,.03)}
+.dtable td[colspan]{text-align:center;color:#5f6f83;padding:18px}
+</style>
+</head>
+<body>
+<div class='wrap'>
+<a class='back' href='/'>&larr; Dashboard</a>
+<h2 class='sec'>AC Diagnostic &mdash; Inverter Sync</h2>
+<div class='card' style='--accent:var(--gen)'>
+  <div class='mgrid'>
+    <div class='metric'><div class='k'>Master ID10 &middot; L1</div><div class='v' id='diag_m_v1'>--</div><div class='s'>L2 <span id='diag_m_v2'>--</span></div></div>
+    <div class='metric'><div class='k'>Slave ID12 &middot; L1</div><div class='v' id='diag_s_v1'>--</div><div class='s'>L2 <span id='diag_s_v2'>--</span></div></div>
+    <div class='metric'><div class='k'>&Delta; Voltage (M&minus;S)</div><div class='v' id='diag_dv'>--</div><div class='s'>target &plusmn;0.0&ndash;0.6 V</div></div>
+    <div class='metric'><div class='k'>Master frequency</div><div class='v' id='diag_m_hz'>--</div><div class='s'>Hz</div></div>
+    <div class='metric'><div class='k'>Slave frequency</div><div class='v' id='diag_s_hz'>--</div><div class='s'>Hz</div></div>
+    <div class='metric'><div class='k'>&Delta; Frequency (M&minus;S)</div><div class='v' id='diag_dhz'>--</div><div class='s'>target 0.00 Hz</div></div>
+    <div class='metric'><div class='k'>Master power</div><div class='v' id='diag_m_pw'>--</div><div class='s'>W</div></div>
+    <div class='metric'><div class='k'>Slave power</div><div class='v' id='diag_s_pw'>--</div><div class='s'>W</div></div>
+    <div class='metric'><div class='k'>Last reading</div><div class='v' id='diag_ts' style='font-size:1.05rem'>--</div><div class='s' id='diag_log_count'>Log: 0 entries</div></div>
+  </div>
+  <div class='dbar'>
+    <button class='btn g sm' onclick='diagSnapshot()'>Snapshot</button>
+    <button class='btn v sm' onclick='diagStream()'>Capture 20s</button>
+    <button class='btn s sm' onclick='diagLoadLog()'>Refresh log</button>
+    <button class='btn s sm' onclick='diagClearLog()' style='margin-left:auto'>Clear log</button>
+  </div>
+  <div class='dstat' id='diag_status'>Ready &mdash; Snapshot for one reading, Capture 20s to record a stream.</div>
+  <div class='dwrap'>
+    <table class='dtable'>
+      <thead><tr><th>Time</th><th>M&nbsp;V1</th><th>S&nbsp;V1</th><th>&Delta;V</th><th>M&nbsp;Hz</th><th>S&nbsp;Hz</th><th>&Delta;Hz</th><th>M&nbsp;W</th><th>S&nbsp;W</th></tr></thead>
+      <tbody id='diag_log_body'><tr><td colspan='9'>No log data &mdash; click Snapshot or Capture</td></tr></tbody>
+    </table>
+  </div>
+</div>
+</div>
+
+<script>
+/* ---- AC diagnostic (ported from V2.4) ---- */
+function fmtV(v){return v!=null?v.toFixed(3)+'V':'--';}
+function fmtHz(v){return v!=null?v.toFixed(2)+'Hz':'--';}
+function fmtW(v){return v!=null?v+'W':'--';}
+function fmtDelta(v,warn){
+  if(v==null)return'--';
+  const s=(v>=0?'+':'')+v.toFixed(4);
+  return'<span class="'+(Math.abs(v)>warn?'delta-warn':'delta-ok')+'">'+s+'</span>';
+}
+
+function diagUpdateCards(d){
+  const m=d.master, s=d.slave, dt=d.delta;
+  document.getElementById('diag_m_v1').textContent=fmtV(m.voltage_l1);
+  document.getElementById('diag_m_v2').textContent=fmtV(m.voltage_l2);
+  document.getElementById('diag_s_v1').textContent=fmtV(s.voltage_l1);
+  document.getElementById('diag_s_v2').textContent=fmtV(s.voltage_l2);
+  document.getElementById('diag_dv').innerHTML=fmtDelta(dt.voltage_l1, 0.1);
+  document.getElementById('diag_m_hz').textContent=fmtHz(m.frequency);
+  document.getElementById('diag_s_hz').textContent=fmtHz(s.frequency);
+  document.getElementById('diag_dhz').innerHTML=fmtDelta(dt.frequency, 0.05);
+  document.getElementById('diag_m_pw').textContent=fmtW(m.power_w);
+  document.getElementById('diag_s_pw').textContent=fmtW(s.power_w);
+  // Show short timestamp HH:MM:SS
+  const ts=d.timestamp?d.timestamp.substring(11,19):'--';
+  document.getElementById('diag_ts').textContent=ts;
+}
+
+function diagAddRows(readings){
+  const tbody=document.getElementById('diag_log_body');
+  // Prepend rows (newest first)
+  const rows=[...readings].reverse().map(d=>{
+    const m=d.master, s=d.slave, dt=d.delta;
+    const ts=d.timestamp?d.timestamp.substring(11,19):'?';
+    return '<tr>'+
+      '<td>'+ts+'</td>'+
+      '<td>'+(m.voltage_l1!=null?m.voltage_l1.toFixed(3):'--')+'</td>'+
+      '<td>'+(s.voltage_l1!=null?s.voltage_l1.toFixed(3):'--')+'</td>'+
+      '<td>'+fmtDelta(dt.voltage_l1,0.1)+'</td>'+
+      '<td>'+(m.frequency!=null?m.frequency.toFixed(2):'--')+'</td>'+
+      '<td>'+(s.frequency!=null?s.frequency.toFixed(2):'--')+'</td>'+
+      '<td>'+fmtDelta(dt.frequency,0.05)+'</td>'+
+      '<td>'+(m.power_w!=null?m.power_w:'--')+'</td>'+
+      '<td>'+(s.power_w!=null?s.power_w:'--')+'</td>'+
+      '</tr>';
+  }).join('');
+  // If placeholder row exists, clear it
+  if(tbody.querySelector('td[colspan]'))tbody.innerHTML='';
+  tbody.insertAdjacentHTML('afterbegin',rows);
+}
+
+async function diagSnapshot(){
+  const st=document.getElementById('diag_status');
+  st.textContent='Reading...';st.className='dstat running';
+  try{
+    const r=await fetch('/acdiag');
+    if(!r.ok)throw new Error('HTTP '+r.status);
+    const d=await r.json();
+    diagUpdateCards(d);
+    diagAddRows([d]);
+    st.textContent='Snapshot complete at '+d.timestamp.substring(11,19);
+    st.className='dstat done';
+  }catch(e){
+    st.textContent='Error: '+e;st.className='dstat error';
+  }
+}
+
+async function diagStream(){
+  const st=document.getElementById('diag_status');
+  st.textContent='Capturing 20 readings over 10 seconds...';st.className='dstat running';
+  try{
+    const r=await fetch('/acdiag/stream?n=20&interval=500');
+    if(!r.ok)throw new Error('HTTP '+r.status);
+    const readings=await r.json();
+    if(readings.length>0){
+      diagUpdateCards(readings[readings.length-1]);
+      diagAddRows(readings);
+    }
+    st.textContent='Stream capture complete — '+readings.length+' readings saved to log.';
+    st.className='dstat done';
+  }catch(e){
+    st.textContent='Error: '+e;st.className='dstat error';
+  }
+}
+
+async function diagLoadLog(){
+  const st=document.getElementById('diag_status');
+  st.textContent='Loading log...';st.className='dstat running';
+  try{
+    const r=await fetch('/acdiag/log?n=50');
+    if(!r.ok)throw new Error('HTTP '+r.status);
+    const entries=await r.json();
+    const tbody=document.getElementById('diag_log_body');
+    tbody.innerHTML='';
+    if(entries.length===0){
+      tbody.innerHTML='<tr><td colspan="9" style="text-align:center;color:#5f6f83;">No log entries</td></tr>';
+    }else{
+      diagAddRows(entries);
+      document.getElementById('diag_log_count').textContent='Log: '+entries.length+' entries shown';
+    }
+    st.textContent='Log loaded — '+entries.length+' entries.';
+    st.className='dstat done';
+  }catch(e){
+    st.textContent='Error: '+e;st.className='dstat error';
+  }
+}
+
+async function diagClearLog(){
+  if(!confirm('Clear all AC diagnostic log entries?'))return;
+  const st=document.getElementById('diag_status');
+  try{
+    await fetch('/acdiag/log/clear');
+    document.getElementById('diag_log_body').innerHTML=
+      '<tr><td colspan="9" style="text-align:center;color:#5f6f83;">Log cleared</td></tr>';
+    document.getElementById('diag_log_count').textContent='Log: 0 entries';
+    st.textContent='Log cleared.';st.className='dstat done';
+  }catch(e){
+    st.textContent='Error: '+e;st.className='dstat error';
+  }
+}
+
+document.addEventListener('DOMContentLoaded',function(){diagLoadLog();});
+</script>
+</body>
+</html>"""
+
 REGISTERS_HTML = """<!DOCTYPE html>
 <html>
 <head>
@@ -3226,6 +3373,11 @@ def stop_gen_endpoint():
 @app.route('/registers')
 def registers_page():
     return render_template_string(REGISTERS_HTML)
+
+@app.route('/diagnostic')
+def diagnostic_page():
+    # Static HTML, like the dashboard: no Jinja, so CSS and JS braces survive
+    return DIAGNOSTIC_HTML
 
 @app.route('/readreg')
 def read_reg_endpoint():
