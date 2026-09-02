@@ -20,6 +20,7 @@ from datetime import datetime, timedelta
 import requests
 
 import counters
+import fuel as fuelmod
 import guard as guardmod
 import history
 import loadmodel
@@ -283,7 +284,10 @@ SCHEMAS = [
         "name": "get_gen_runtime",
         "description": "Generator runs over the last N days with observed charge "
                        "rates in amps into the pack, per generator totals, and "
-                       "solo vs paired rates.",
+                       "solo vs paired rates. Also `fuel`: hours and estimated "
+                       "gallons per generator for today and month to date, "
+                       "already summed. Quote those figures; never add up the "
+                       "run rows yourself.",
         "parameters": {"type": "object", "properties": {
             "days": {"type": "integer", "description": "How many days back, 1 to 365."}},
             "required": ["days"]}}},
@@ -461,6 +465,58 @@ class Tools:
             out["overnight_drawdown"] = drawdown
         return out
 
+    def fuel_totals(self, now=None):
+        """Hours and gallons per generator, today and month to date.
+
+        Summed here and handed over as named numbers. The model is never
+        asked to add up a list of rows: it has invented a voltage from a
+        prompt before now, and arithmetic over twenty rows is exactly the
+        kind of thing it will do confidently and wrongly. Every figure below
+        is Python's.
+
+        `fuel_*_unpriced_runs` is how many runs in that window had no fuel
+        figure, so a total that is short says so instead of reading as the
+        whole truth.
+        """
+        now = int(now or time.time())
+        tz = history.tzinfo(self.cfg)
+        t = datetime.fromtimestamp(now, tz)
+        day_start = int(t.replace(hour=0, minute=0, second=0,
+                                  microsecond=0).timestamp())
+        month_start = int(t.replace(day=1, hour=0, minute=0, second=0,
+                                    microsecond=0).timestamp())
+        out = {}
+        for gen in history.GENS:
+            row = {}
+            for label, since in (("today", day_start), ("mtd", month_start)):
+                r = self.conn.execute(
+                    "SELECT COALESCE(SUM(duration_min), 0) mins, "
+                    "       SUM(fuel_gal) gal, "
+                    "       SUM(fuel_gal IS NULL) unpriced "
+                    "FROM gen_runs WHERE gen=? AND kind != 'exercise' "
+                    "AND start_ts >= ? AND start_ts <= ?",
+                    (gen, since, now)).fetchone()
+                gal = r["gal"]
+                row[f"hours_{label}"] = round((r["mins"] or 0) / 60.0, 2)
+                row[f"fuel_{label}_gal"] = (round(gal, 2)
+                                            if gal is not None else None)
+                row[f"fuel_{label}_unpriced_runs"] = int(r["unpriced"] or 0)
+                c = fuelmod.cost(self.cfg, gal)
+                if c is not None:
+                    row[f"fuel_{label}_cost"] = c
+            out[gen] = row
+        out["note"] = ("Hours exclude the 09:00 exercise runs, which are not "
+                       "the agent's and are not a signal. Gallons are "
+                       "estimated from each generator's published "
+                       "consumption curve at the gross output the run "
+                       "actually delivered; they have not been checked "
+                       "against a pump. A minute both generators were "
+                       "running is split between them by their learned solo "
+                       "rates before it is priced, so a paired run is no "
+                       "longer read as though one engine did all of it. Say "
+                       "estimated when quoting these.")
+        return out
+
     def get_gen_runtime(self, days):
         days = max(1, min(int(days), 365))
         runs = history.gen_runs(self.conn, days)
@@ -484,6 +540,7 @@ class Tools:
             "today": today, "yesterday": yesterday,
             "totals": {g: {"minutes": round(t["minutes"], 1), "runs": t["runs"]}
                        for g, t in totals.items()},
+            "fuel": self.fuel_totals(now=now),
             "generators_with_no_runs": sorted(set(history.GENS) - set(totals)),
             "charge_rates": self.model.charge_rates(),
             "runs": [{"gen": r["gen"],
@@ -495,6 +552,12 @@ class Tools:
                                          if r["rate_a"] is not None else None),
                       "house_load_w": (round(r["load_w"])
                                        if r["load_w"] is not None else None),
+                      "fuel_gal": r["fuel_gal"],
+                      "gross_w": (round(r["gross_w"])
+                                  if r["gross_w"] is not None else None),
+                      "gross_attributed_w": (round(r["gross_attr_w"])
+                                             if r["gross_attr_w"] is not None
+                                             else None),
                       "observed_v_per_h": (round(r["rate_v_per_h"], 2)
                                            if r["rate_v_per_h"] is not None
                                            else None),

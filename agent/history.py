@@ -116,6 +116,19 @@ CREATE TABLE IF NOT EXISTS gen_runs (
   -- minute. Unlike rate_a this does not move with the house's behaviour, so
   -- it is what a rate is learned from.
   gross_w REAL,
+  -- gross_w is the system's delivery, credited whole to every generator
+  -- that was running, which is what a charge rate is learned from and is
+  -- right for that. It is wrong for fuel: two engines sharing a minute did
+  -- not each produce all of it. gross_attr_w is that minute split between
+  -- them by their learned solo rates, and left whole on the minutes one of
+  -- them ran alone. NULL where the minute samples are gone (they are purged
+  -- at 90 days), in which case fuel falls back to gross_w.
+  gross_attr_w REAL,
+  -- Diesel the run burned, in US gallons, from the generator's consumption
+  -- curve at gross_attr_w / rated_w. NULL where the gross was never measured
+  -- or the generator has no curve: a run that burned fuel must not read as
+  -- nought.
+  fuel_gal REAL,
   solo INTEGER, kind TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS gen_runs_key ON gen_runs (gen, start_ts);
@@ -152,7 +165,9 @@ CREATE INDEX IF NOT EXISTS actions_ts ON actions (ts);
 # Columns added after a table shipped. CREATE TABLE IF NOT EXISTS leaves an
 # existing table alone, so a live database only gains them here.
 MIGRATIONS = [("gen_runs", "load_w", "REAL"),
-              ("gen_runs", "gross_w", "REAL")]
+              ("gen_runs", "gross_w", "REAL"),
+              ("gen_runs", "fuel_gal", "REAL"),
+              ("gen_runs", "gross_attr_w", "REAL")]
 
 
 def migrate(conn):
@@ -370,7 +385,8 @@ def derive_gen_runs(conn, cfg, since=None):
                 if open_run is None:
                     open_run = {"start_ts": r["ts"], "start_v": r["battery_v"],
                                 "mode": r["mode"], "solo": True,
-                                "currents": [], "loads": [], "gross": []}
+                                "currents": [], "loads": [], "gross": [],
+                                "gross_paired": []}
                 if r["other"] == GEN_RUNNING:
                     open_run["solo"] = False
                 # Only samples taken while this gen was running describe its charge rate.
@@ -385,6 +401,12 @@ def derive_gen_runs(conn, cfg, since=None):
                     # to the house. battPower is positive when charging.
                     if r["batt_power"] is not None:
                         open_run["gross"].append(r["batt_power"] + load)
+                        # Whether the other engine was turning for this same
+                        # minute. Gross is the system's delivery, so a minute
+                        # with both running is a minute neither of them made
+                        # on its own.
+                        open_run["gross_paired"].append(
+                            r["other"] == GEN_RUNNING)
             elif open_run is not None:
                 added += _close_run(conn, cfg, gen, open_run, r)
                 open_run = None
@@ -408,12 +430,24 @@ def _close_run(conn, cfg, gen, run, stop_row):
     load_w = sum(run["loads"]) / len(run["loads"]) if run["loads"] else None
     gross_w = sum(run["gross"]) / len(run["gross"]) if run["gross"] else None
     kind = _classify(conn, gen, run["start_ts"], duration_min, run["mode"], cfg)
+    # Priced at close, from this engine's share of the gross. Imported here
+    # rather than at the top because fuel.py is about what a run cost and
+    # history.py is about what happened; the dependency runs one way only.
+    import fuel
+    share, _basis = fuel.solo_share(conn, cfg, now=run["start_ts"])
+    gross_attr_w = fuel.attribute(run["gross"], run.get("gross_paired"),
+                                  (share or {}).get(gen))
+    fuel_gal = fuel.gallons(cfg, gen,
+                            gross_attr_w if gross_attr_w is not None else gross_w,
+                            duration_min)
     cur = conn.execute(
         "INSERT OR IGNORE INTO gen_runs "
         "(gen, start_ts, stop_ts, duration_min, start_v, stop_v, rate_v_per_h, "
-        "rate_a, load_w, gross_w, solo, kind) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        "rate_a, load_w, gross_w, gross_attr_w, fuel_gal, solo, kind) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (gen, run["start_ts"], stop_row["ts"], round(duration_min, 2), start_v, stop_v,
-         rate_v_per_h, rate_a, load_w, gross_w, int(run["solo"]), kind))
+         rate_v_per_h, rate_a, load_w, gross_w, gross_attr_w, fuel_gal,
+         int(run["solo"]), kind))
     return cur.rowcount
 
 

@@ -990,6 +990,15 @@ class LoadModel:
         capacity = rate.get("capacity_wh") or self.capacity_wh()
         return net, (round(100.0 * net / capacity, 2) if capacity else None)
 
+    def gross_for(self, gen, solo=None, now=None):
+        """What this generator delivers gross, learned or assumed, in watts.
+
+        The public form of _rate_for's answer, for callers that want the
+        number rather than the rate dict - fuel.py sizes a planned run on it.
+        """
+        rate = self._rate_for(gen, solo, int(now or time.time()))
+        return (rate or {}).get("gross_w")
+
     def charge_rates(self, now=None):
         out = {}
         for gen in history.GENS:

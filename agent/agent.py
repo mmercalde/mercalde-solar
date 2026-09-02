@@ -27,6 +27,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 import ask_server
 import config
 import counters
+import fuel
 import guard as guardmod
 import history
 import loadmodel
@@ -840,9 +841,15 @@ class Agent:
             if runs:
                 for r in runs:
                     start = history.clock(r["start_ts"], self.cfg)
-                    lines.append(f"{r['gen']} ran {start} for "
-                                 f"{r['duration_min']:.0f} min "
-                                 f"({_fmt(r['start_v'], 1)} -> {_fmt(r['stop_v'], 1)} V)")
+                    line = (f"{r['gen']} ran {start} for "
+                            f"{r['duration_min']:.0f} min "
+                            f"({_fmt(r['start_v'], 1)} -> {_fmt(r['stop_v'], 1)} V)")
+                    # Only when the run has a fuel figure. A run whose gross
+                    # was never measured says nothing here rather than nought.
+                    burned = fuel.phrase(self.cfg, r["fuel_gal"])
+                    if burned:
+                        line += f", {burned}"
+                    lines.append(line)
             else:
                 lines.append("no generator runs overnight")
 

@@ -23,6 +23,7 @@ guard.py still decides whether it may be applied.
 import math
 import re
 
+import fuel as fuelmod
 import history
 import sun as sunmod
 import topup as topupmod
@@ -262,6 +263,26 @@ def _window_for(f, gens):
     return min(chosen) if chosen else None
 
 
+def _fuel(cfg, model, f, gens, reach, solo):
+    """Diesel a planned run would burn, as a phrase and as a number.
+
+    An estimate twice over - the hours come from a learned charge rate and
+    the gallons from a published curve read at a shunt-measured fraction -
+    so it is labelled as one wherever it is printed. It informs nobody's
+    decision: the band that runs was chosen on watt-hours before this was
+    computed, and POLICY says nothing about cost.
+    """
+    hours = (reach or {}).get("hours")
+    if hours is None:
+        return {}
+    est = fuelmod.estimate(cfg, model, gens, hours, solo=solo, now=f.get("now"))
+    if est["gal"] is None:
+        return {}
+    return {"fuel_gal": est["gal"], "fuel_estimate": est,
+            "fuel_note": "est. " + fuelmod.phrase(cfg, est["gal"],
+                                                  noun="gal of diesel")}
+
+
 def _numbers(margin, want, band, reach):
     """The figures a firing top-up carries, for the message the owner reads.
 
@@ -385,11 +406,14 @@ def solo_top_up(cfg, f, model):
 
             parts.append(f"start {start:.1f} is above the pack's {v:.1f} V, so "
                          f"the run begins now")
+            burn = _fuel(cfg, model, f, gens, reach, solo)
+            if burn:
+                parts.append(burn["fuel_note"])
             return _rule(4, name, True, "; ".join(parts),
                          _proposal(cfg, gens, target, start, baseline),
                          gen="+".join(gens), target=target, mode=label.lower(),
                          deficit_wh=deficit, start=start,
-                         **_numbers(margin, want, band, reach))
+                         **_numbers(margin, want, band, reach), **burn)
         tried.append(f"{band} {reach['why']}")
         index += 1
 
@@ -413,12 +437,19 @@ def solo_top_up(cfg, f, model):
                  f"{'it' if solo else 'they'} can reach")
     parts.append(f"start {start:.1f} is above the pack's {v:.1f} V, so the run "
                  f"begins now")
+    window = _window_for(f, gens)
+    burn = _fuel(cfg, model, f, gens, {"hours": window}, solo)
+    if burn:
+        # This band runs to its cap rather than to a computed target, so the
+        # hours are the whole window and the figure is the most it can cost.
+        burn["fuel_note"] = "at most " + burn["fuel_note"]
+        parts.append(burn["fuel_note"])
     return _rule(4, name, True, "; ".join(parts),
                  _proposal(cfg, gens, lower, start, baseline),
                  gen="+".join(gens), target=lower, mode=label.lower(),
                  deficit_wh=deficit, start=start,
                  **_numbers(margin, None, f"{label} band, the most "
-                            f"{'it' if solo else 'they'} reach", None))
+                            f"{'it' if solo else 'they'} reach", None), **burn)
 
 
 # --- POLICY 3: the two stop-voltage cases -----------------------------------
@@ -558,6 +589,8 @@ def numbers_line(evaluation):
             bits.append(f"{r['net_w'] / 1000.0:.1f} kW into the pack")
         if r.get("run_minutes") is not None:
             bits.append(f"about {r['run_minutes']} min of running")
+        if r.get("fuel_note"):
+            bits.append(str(r["fuel_note"]))
         if r.get("reach_basis"):
             bits.append(str(r["reach_basis"]))
         return "; ".join(bits) or None

@@ -52,6 +52,18 @@ generators:
   # pack. assumed_charge_a is the fallback until a generator has runs of its
   # own, and is already a net figure - conservative, allowing for an ordinary
   # house - so it is not netted a second time.
+  # Fuel. `curve` is [load_fraction, gal_per_hr] points, interpolated
+  # linearly between them and held flat beyond either end; load_fraction may
+  # exceed 1.0 and the curve simply stops rising there.
+  #
+  # The load fraction is computed from gross_w, which is shunt-measured DC
+  # delivery - what went into the pack plus what the house took - so it
+  # under-reads the generator's AC output by the charger's efficiency, on the
+  # order of 8-10%. These curves are therefore effectively in DC-delivered
+  # terms rather than in the AC terms their sources are written in. That is a
+  # known bias in one direction, and a tank-fill calibration absorbs it: fill,
+  # run, fill again, and scale the curve by what the pump says against what
+  # this reports.
   mep:
     label: MEP-803A
     ags_slave: 51
@@ -60,6 +72,15 @@ generators:
     feeds: [xw_pro_master, xw_pro_slave]
     assumed_charge_a: 140          # net, conservative, ~7.4 kW at 53 V
     exercise: {every_days: 5, at: "09:00", minutes: 30}
+    fuel:
+      # rated_w is the axis the published points are expressed on, not a
+      # capability claim: the owner runs this at 10 kW.
+      rated_w: 10000
+      # The 1.00 point is published (DoD spec sheet, MEP-803A). The 0.50 point
+      # is community-reported and stands in until the TM table or a tank-fill
+      # calibration replaces it, so a half-load estimate is softer than a
+      # full-load one and should be read that way.
+      curve: [[0.50, 0.55], [1.00, 0.99]]
   kubota:
     label: Kubota
     ags_slave: 50
@@ -68,6 +89,10 @@ generators:
     feeds: [xw_plus_5548]
     assumed_charge_a: 80           # net, conservative, ~4.2 kW at 53 V
     exercise: {every_days: 3, at: "09:00", minutes: 30}
+    fuel:
+      rated_w: 7000
+      # Published: Power Technology CD-7 operator's manual, Kubota D905-B.
+      curve: [[0.25, 0.16], [0.50, 0.32], [0.75, 0.51], [1.00, 0.64]]
     # The Kubota's runs also drive a Magnum MS4048 inverter/charger that is
     # not on Modbus. Nothing the Schneider units report includes what the
     # Magnum is doing, so anything summed from their registers understates a

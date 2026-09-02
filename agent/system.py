@@ -73,6 +73,11 @@ def config_overlay(manifest):
                               for g in ("mep", "kubota")},
         "assumed_charge_a": {g: gens[g]["assumed_charge_a"]
                              for g in ("mep", "kubota")},
+        # Rated watts and the consumption curve, per generator. The price of
+        # a gallon is not here: it is per-install and it moves, so it lives
+        # in config.json and is optional.
+        "fuel": {g: gens[g]["fuel"] for g in ("mep", "kubota")
+                 if gens[g].get("fuel")},
         "exercise": {"mep_days": gens["mep"]["exercise"]["every_days"],
                      "kubota_days": gens["kubota"]["exercise"]["every_days"],
                      "start": gens["mep"]["exercise"]["at"],

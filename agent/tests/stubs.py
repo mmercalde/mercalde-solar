@@ -46,6 +46,10 @@ class StubModel:
     def _rate(self, gen):
         return self.pair if gen is None else self.rates.get(gen)
 
+    def gross_for(self, gen, solo=None, now=None):
+        """What the real model exposes for fuel.py to size a run on."""
+        return (self._rate(gen) or {}).get("gross_w")
+
     def reach(self, gen, from_v, target_v, window_h, solo=None, now=None):
         rate = self._rate(gen)
         who = "both generators" if gen is None else gen
