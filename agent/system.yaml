@@ -114,6 +114,78 @@ battery:
   # The agent does not use the nominal figure to plan. It learns the pack's
   # real capacity from the monitor's own Ah-remaining against SOC.
   capacity_learned_from: Conext Battery Monitor, Ah remaining vs SOC
+
+  # --- what health.py computes from ------------------------------------------
+  #
+  # nominal_ah is the figure the cycle count is expressed against. It differs
+  # from capacity_ah_nominal above by ten amp-hours; the two came from
+  # different reckonings of the same pack and the disagreement is recorded
+  # rather than resolved by picking one. Nothing turns on the difference: it
+  # is half a percent of a cycle count that is itself an estimate.
+  nominal_ah: 1800
+  chemistry_short: NMC 15S
+  # Second-life cells: they arrived with a history nobody here measured, so
+  # every cycle count below is cycles *since this pack was built*, and the
+  # calendar clock started before that.
+  second_life: true
+  # Measured by tank... by discharge: the energy the pack gave up walking
+  # from 59.5 V down to 52.0 V. est_total_kwh extrapolates that span to the
+  # whole curve and is the softer of the two by a long way.
+  measured_kwh_59_5_to_52_0: 40.9
+  est_total_kwh: 83
+  # The battery room, year round. Not instrumented - there is no temperature
+  # anywhere on Modbus - so this is the owner's figure for a room that is
+  # kept, not a reading.
+  ambient_f: 78
+  climate_controlled: true
+
+  # The Battery Monitor's state of charge is not a scale anything should be
+  # quoted from. It is one shunt's integration against a capacity derived
+  # from the same shunt, so it cannot check itself, and on this pack it has
+  # read 100% at 56.2 V and 98% at 55.6 V - voltages three quarters of a volt
+  # apart cannot both be full. The read tools do not return it at all; what
+  # the pack holds is answered in watt-hours between two voltages, and how it
+  # is ageing by the battery_health tool.
+  soc_scale_unreliable: true
+
+  # Parametric NMC fade. Coefficients, not measurements: they come from the
+  # published literature on NMC cells and are here to be argued with and
+  # replaced, which is why every one of them is named and commented rather
+  # than buried in code.
+  aging:
+    # Capacity lost per equivalent full cycle at 100% depth of discharge.
+    # 0.02%/EFC is 20% at 1000 full cycles, the round figure most NMC cycle
+    # studies land near for a 25 C, moderate-rate cell.
+    cycle_fade_pct_per_efc_at_full_dod: 0.02
+    # Fade per *cycle* scales as DoD^n. Cycle-life studies fit lithium-ion
+    # cycles-to-failure as DoD^-n with n around 1.5 to 2.5 for NMC, and fade
+    # per cycle is the reciprocal of that, so n is the same number.
+    #
+    # The direction matters more than the value and is easy to get backwards.
+    # An equivalent full cycle taken in shallow bites contains 1/DoD actual
+    # cycles, so fade per EFC goes as DoD^(n-1): above 1 it falls as the
+    # cycling gets shallower, which is the shallow-is-gentler result the
+    # literature reports. n below 1 inverts it and says shallow cycling is
+    # worse per unit of throughput, which is not what the cells do. At 1.5
+    # and this pack's 21% mean depth an EFC costs 0.46 of a full-depth one.
+    cycle_dod_exponent: 1.5
+    # Calendar fade at the reference point: 25 C (77 F) at mid state of
+    # charge, per year, on a square-root-of-time curve linearised to the
+    # first decade. 2%/yr is mid-range for NMC.
+    calendar_fade_pct_per_year_ref: 2.0
+    calendar_ref_temp_f: 77
+    # Arrhenius activation energy in eV. 0.5 eV is the usual NMC value and
+    # means roughly a doubling of calendar fade per 10 C.
+    calendar_activation_ev: 0.5
+    # Calendar fade rises with resting state of charge. Expressed against the
+    # fraction of the *measured* 52.0-59.5 V span the pack rests at, because
+    # this pack has no state-of-charge scale worth using: see
+    # soc_scale_unreliable. 50% is the reference; each point above or below
+    # moves calendar fade by this much of itself.
+    calendar_band_reference_pct: 50
+    calendar_band_sensitivity_per_pct: 0.012
+    # What counts as worn out.
+    end_of_life_capacity_pct: 80
   floor_v: 52.0                    # never start below this
   ceiling_v: 57.0                  # never stop above this
   full_v: 61.0                     # what full would be; deliberately not a target

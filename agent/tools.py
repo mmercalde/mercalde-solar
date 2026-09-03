@@ -22,6 +22,7 @@ import requests
 import counters
 import fuel as fuelmod
 import guard as guardmod
+import health as healthmod
 import history
 import loadmodel
 import policy as policymod
@@ -292,6 +293,18 @@ SCHEMAS = [
             "days": {"type": "integer", "description": "How many days back, 1 to 365."}},
             "required": ["days"]}}},
     {"type": "function", "function": {
+        "name": "battery_health",
+        "description": "Battery longevity and ageing, all computed: amp-hours "
+                       "out, equivalent full cycles, cycles a year, mean daily "
+                       "depth of discharge, mean resting voltage; a measured "
+                       "capacity series by month with a confidence note; and a "
+                       "projection of years to 80% by cycling and by calendar "
+                       "with its assumptions listed. Call this for any question "
+                       "about battery life, health, capacity, wear or ageing, "
+                       "and answer from these fields. There is no state of "
+                       "charge in it, deliberately.",
+        "parameters": {"type": "object", "properties": {}}}},
+    {"type": "function", "function": {
         "name": "get_voltage_at",
         "description": "Battery voltage, state of charge, house load and "
                        "generator state at one moment in the past, from the "
@@ -368,6 +381,7 @@ SCHEMAS = [
 
 READ_TOOLS = {"get_status", "get_history", "get_load_forecast",
               "get_gen_runtime", "get_voltage_at", "get_weather", "get_ac_diag",
+              "battery_health",
               "get_system_specs", "get_mppt_detail", "get_battery_detail",
               "get_guard_state", "get_recent_actions", "send_telegram"}
 WRITE_TOOLS = {"set_gen_thresholds"}
@@ -409,7 +423,7 @@ class Tools:
                        or data.get("kubotaAction") == history.GEN_RUNNING)
         return {
             "voltage": data.get("batteryVoltage"),
-            "soc_pct": data.get("battSocBM"),
+            "soc_pct_note": "not reported: the Battery Monitor's state of charge scale is unreliable and nothing may be quoted from it. What the pack holds is watt-hours between two voltages; how it is ageing is the battery_health tool.",
             "battery_w": data.get("battPower"),
             "battery_a": data.get("battCurrent"),
             "battery_monitor_online": data.get("battMonitorOnline"),
@@ -485,18 +499,29 @@ class Tools:
                                   microsecond=0).timestamp())
         month_start = int(t.replace(day=1, hour=0, minute=0, second=0,
                                     microsecond=0).timestamp())
+        prev_end = month_start - 1
+        prev_start = int(datetime.fromtimestamp(prev_end, tz).replace(
+            day=1, hour=0, minute=0, second=0, microsecond=0).timestamp())
+        windows = (("today", day_start, now), ("mtd", month_start, now),
+                   ("last_month", prev_start, prev_end))
         out = {}
         for gen in history.GENS:
             row = {}
-            for label, since in (("today", day_start), ("mtd", month_start)):
+            for label, since, until in windows:
                 r = self.conn.execute(
-                    "SELECT COALESCE(SUM(duration_min), 0) mins, "
+                    "SELECT COUNT(*) runs, COALESCE(SUM(duration_min), 0) mins, "
                     "       SUM(fuel_gal) gal, "
                     "       SUM(fuel_gal IS NULL) unpriced "
                     "FROM gen_runs WHERE gen=? AND kind != 'exercise' "
                     "AND start_ts >= ? AND start_ts <= ?",
-                    (gen, since, now)).fetchone()
-                gal = r["gal"]
+                    (gen, since, until)).fetchone()
+                runs, gal = int(r["runs"] or 0), r["gal"]
+                # A window with no runs burned nothing, and nothing is 0.0.
+                # None is reserved for the one case where it means something:
+                # runs happened and not one of them could be priced.
+                if runs == 0:
+                    gal = 0.0
+                row[f"runs_{label}"] = runs
                 row[f"hours_{label}"] = round((r["mins"] or 0) / 60.0, 2)
                 row[f"fuel_{label}_gal"] = (round(gal, 2)
                                             if gal is not None else None)
@@ -505,17 +530,43 @@ class Tools:
                 if c is not None:
                     row[f"fuel_{label}_cost"] = c
             out[gen] = row
-        out["note"] = ("Hours exclude the 09:00 exercise runs, which are not "
-                       "the agent's and are not a signal. Gallons are "
-                       "estimated from each generator's published "
-                       "consumption curve at the gross output the run "
-                       "actually delivered; they have not been checked "
-                       "against a pump. A minute both generators were "
-                       "running is split between them by their learned solo "
-                       "rates before it is priced, so a paired run is no "
-                       "longer read as though one engine did all of it. Say "
-                       "estimated when quoting these.")
+        out["summary"] = self._fuel_summary(out, t, tz, prev_end)
+        out["note"] = ("Gallons are modelled from published consumption "
+                       "curves, not metered: each generator's curve read at "
+                       "the gross output the run actually delivered, with a "
+                       "minute both engines were running split between them "
+                       "by their learned solo rates. Hours exclude the 09:00 "
+                       "exercise runs, which are not the agent's and are not "
+                       "a signal. Quote the summary as it stands and say "
+                       "modelled.")
         return out
+
+    def _fuel_summary(self, per_gen, t, tz, prev_end):
+        """One sentence a person can read, built here rather than by the model.
+
+        Early in a month "no runs this month" is true and useless on its own,
+        so the month before is in the same breath.
+        """
+        def clause(label):
+            parts = []
+            for gen in sorted(g for g in per_gen if g in history.GENS):
+                row = per_gen[gen]
+                if not row[f"runs_{label}"]:
+                    continue
+                gal = row[f"fuel_{label}_gal"]
+                parts.append(f"{gen} {row[f'hours_{label}']:.1f} h"
+                             + (f" / {gal:.2f} gal" if gal is not None
+                                else " / no fuel figure"))
+            return ", ".join(parts) if parts else "no generator runs"
+
+        this_month = t.strftime("%B")
+        last_month = datetime.fromtimestamp(prev_end, tz).strftime("%B")
+        return (f"{this_month} so far: {clause('mtd')}. "
+                f"{last_month}: {clause('last_month')}.")
+
+    def battery_health(self):
+        """Longevity, from what the pack has done. All computed in Python."""
+        return healthmod.battery_health(self.conn, self.cfg)
 
     def get_gen_runtime(self, days):
         days = max(1, min(int(days), 365))
@@ -611,7 +662,8 @@ class Tools:
             "asked_for": asked,
             "sample_at": history.stamp(row["ts"], self.cfg),
             "seconds_from_asked": abs(row["ts"] - when),
-            "voltage": row["battery_v"], "soc_pct": row["batt_soc"],
+            "voltage": row["battery_v"],
+            "soc_pct_note": "not reported: the Battery Monitor's state of charge scale is unreliable and nothing may be quoted from it. What the pack holds is watt-hours between two voltages; how it is ageing is the battery_health tool.",
             "battery_w": row["batt_power"], "battery_a": row["batt_current"],
             "load_w": (None if running
                        else (row["ac_power1"] or 0) + (row["ac_power2"] or 0)),
@@ -677,7 +729,7 @@ class Tools:
                         "slave": b["monitor"]["slave"],
                         "online": data.get("battMonitorOnline")},
             "voltage": data.get("batteryVoltage"),
-            "soc_pct": data.get("battSocBM"),
+            "soc_pct_note": "not reported: the Battery Monitor's state of charge scale is unreliable and nothing may be quoted from it. What the pack holds is watt-hours between two voltages; how it is ageing is the battery_health tool.",
             "ah_remaining": data.get("battAhRemaining"),
             "minutes_to_discharge": data.get("battMinToDischarge"),
             "net_current_a": data.get("battCurrent"),

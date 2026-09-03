@@ -78,6 +78,9 @@ def config_overlay(manifest):
         # in config.json and is optional.
         "fuel": {g: gens[g]["fuel"] for g in ("mep", "kubota")
                  if gens[g].get("fuel")},
+        # Everything health.py reads: the pack's measured facts and the
+        # literature coefficients its projection runs on.
+        "battery": battery,
         "exercise": {"mep_days": gens["mep"]["exercise"]["every_days"],
                      "kubota_days": gens["kubota"]["exercise"]["every_days"],
                      "start": gens["mep"]["exercise"]["at"],

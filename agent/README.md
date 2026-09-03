@@ -87,6 +87,8 @@ instead of a second poller.
 | `agent.py` | the tick loop, plan record, digests, Telegram inbound, anomalies |
 | `policy.py` | the numeric POLICY rules, computed rather than left to the model |
 | `topup.py` | the per-generator top-up state machine POLICY 4 runs on |
+| `fuel.py` | what a run cost in diesel, and whose watts they were |
+| `health.py` | throughput, measured fade and the ageing projection |
 | `guard.py` | the hard rules; every write passes through it |
 | `tools.py` | the eight read tools and the single write, as OpenAI schemas |
 | `eval_cases.py` | Q&A cases and their graders, for `model_eval.py --exam` |
@@ -269,10 +271,52 @@ A stretch of voltage no night crossed is a gap, not a guess: the curve says
 computed, rather than adding up the parts that are there. The same curve
 answers the 52 V projection, so the two cannot disagree about the night.
 
+### How long the pack has got
+
+`health.py` answers that, behind the `battery_health` tool, and every field
+says how it was arrived at. **throughput** is counted: 184,810 Ah out over
+488 days, 103 equivalent full cycles, 77 a year, a mean daily depth of 21%,
+resting at 54.62 V. **measured_fade** is the pack's own capacity as
+watt-hours per volt across a fixed 53.5–57.0 V window, one figure a month.
+**projection** is a parametric NMC model — cycle fade charged per equivalent
+full cycle and scaled by depth, calendar fade moved by temperature on
+Arrhenius and by how full the pack sits — whose coefficients are in
+`system.yaml` under `battery.aging` with the reasoning beside each one, and
+whose every choice comes back as a sentence in `assumptions`.
+
+`measured_fade` reads the **day's charge**, not the night's discharge. A
+night gives up a little of the curve at whatever the evening's load happens
+to be, and a pack's voltage under load moves with current as much as with
+charge: measured that way the months scattered 68% of their own mean. A sunny
+day walks the pack from its pre-dawn low to its afternoon peak in one
+monotone climb of three or four volts, driven by something that does not care
+what the house is doing. Same history, same window: **35%**.
+
+It still shows no fade, and says so. Twelve months, a straight line accounts
+for 13% of the variation, and the fitted slope is **positive** — a pack
+gaining capacity, which is not a thing. Look at the months and the reason is
+plain: they are seasonal, low in early summer and high in autumn. So the tool
+also compares the same month a year apart, which is the only honest way to
+read a series with a season in it, and that does not show fade either
+(+11.6% mean across four pairs). Any real fade is smaller than the method can
+resolve, `confidence` says so in a sentence, and `usable_for_projection` is
+what keeps that slope away from the model. The projection stays on the
+literature coefficients until a real trend appears.
+
+The projection's headline is `years_to_80pct_combined`, the two mechanisms
+added. Adding them overstates the rate — both eat the same lithium — so the
+combined figure is a floor, and `years_to_80pct_cycle` and
+`years_to_80pct_calendar` are given behind it with `dominant_mechanism`
+naming the shorter leg. On this pack: **8.0 years combined, calendar
+dominant** at 11.1 against 28.4 for cycling.
+
 ### The Battery Monitor's SOC
 
-Display only. It appears in the plan record, in `get_status`, in the
-dashboard and in the prompt — labelled — and reaches no rule, no guard check
+Not reported at all any more. It used to be display-only — labelled, in the
+plan record and in `get_status`, reaching no rule. But a number on a screen
+gets quoted, and this one has read 100% at 56.2 V and 98% at 55.6 V, which
+cannot both be full. The read tools now return `soc_pct_note` in its place,
+saying why there is no number there. It still reaches no rule, no guard check
 and no threshold. The model's decision methods do not accept one: `reach`,
 `best_reachable_target`, `hours_to_target` and `topup_target` take a pack
 voltage and read where it stands off a learned curve, because a shunt reading

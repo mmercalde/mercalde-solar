@@ -372,6 +372,71 @@ def test_the_runtime_tool_serves_summed_figures(conn, cfg):
     assert f["fuel_today_unpriced_runs"] == 0
 
 
+def test_a_window_with_no_runs_burned_nothing(conn, cfg):
+    """Nothing is 0.0, not None. None means the runs happened and could not
+    be priced, which is a different thing and must stay tellable apart."""
+    import tools as toolsmod
+    f = toolsmod.Tools(conn, cfg).fuel_totals(
+        now=ts_at(cfg, "2026-09-02", 22))["kubota"]
+    assert f["runs_today"] == 0 and f["fuel_today_gal"] == 0.0
+    assert f["runs_mtd"] == 0 and f["fuel_mtd_gal"] == 0.0
+    assert f["hours_today"] == 0.0
+
+
+def test_runs_that_happened_and_could_not_be_priced_stay_none(conn, cfg):
+    import tools as toolsmod
+    add_run(conn, "kubota", ts_at(cfg, "2026-09-02", 2), 60, None, None)
+    f = toolsmod.Tools(conn, cfg).fuel_totals(
+        now=ts_at(cfg, "2026-09-02", 22))["kubota"]
+    assert f["runs_today"] == 1
+    assert f["fuel_today_gal"] is None
+    assert f["fuel_today_unpriced_runs"] == 1
+
+
+def test_last_month_is_carried_so_the_second_of_the_month_has_context(conn, cfg):
+    import tools as toolsmod
+    add_run(conn, "kubota", ts_at(cfg, "2026-08-15", 2), 90, 3500, 0.48)
+    add_run(conn, "kubota", ts_at(cfg, "2026-08-20", 2), 60, 3500, 0.32)
+    f = toolsmod.Tools(conn, cfg).fuel_totals(
+        now=ts_at(cfg, "2026-09-02", 22))["kubota"]
+    assert f["runs_mtd"] == 0 and f["fuel_mtd_gal"] == 0.0
+    assert f["runs_last_month"] == 2
+    assert f["hours_last_month"] == 2.5
+    assert f["fuel_last_month_gal"] == pytest.approx(0.80)
+
+
+def test_the_summary_names_the_previous_month(conn, cfg):
+    """Early in a month "no runs" is true and useless on its own."""
+    import tools as toolsmod
+    add_run(conn, "kubota", ts_at(cfg, "2026-08-15", 2), 288, 3500, 2.38)
+    add_run(conn, "mep", ts_at(cfg, "2026-08-20", 2), 228, 10000, 3.09)
+    summary = toolsmod.Tools(conn, cfg).fuel_totals(
+        now=ts_at(cfg, "2026-09-02", 22))["summary"]
+    assert summary.startswith("September so far: no generator runs.")
+    assert "August:" in summary
+    assert "kubota 4.8 h / 2.38 gal" in summary
+    assert "mep 3.8 h / 3.09 gal" in summary
+
+
+def test_the_summary_reads_a_month_that_had_runs(conn, cfg):
+    import tools as toolsmod
+    add_run(conn, "mep", ts_at(cfg, "2026-09-01", 2), 60, 10000, 0.99)
+    summary = toolsmod.Tools(conn, cfg).fuel_totals(
+        now=ts_at(cfg, "2026-09-02", 22))["summary"]
+    assert "September so far: mep 1.0 h / 0.99 gal." in summary
+    assert "August: no generator runs." in summary
+
+
+def test_the_note_reads_as_provenance_not_absence(conn, cfg):
+    """"Not checked against a pump" invites the reader to discount it. Where
+    the number comes from is the useful thing to say."""
+    import tools as toolsmod
+    note = toolsmod.Tools(conn, cfg).fuel_totals()["note"]
+    assert note.startswith("Gallons are modelled from published consumption "
+                           "curves, not metered")
+    assert "have not been checked" not in note
+
+
 def test_a_run_with_no_figure_makes_the_total_say_so(conn, cfg):
     now = ts_at(cfg, "2026-08-20", 22)
     add_run(conn, "kubota", ts_at(cfg, "2026-08-20", 2), 90, 3500, 0.48)
