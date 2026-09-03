@@ -25,6 +25,7 @@ import guard as guardmod
 import health as healthmod
 import history
 import loadmodel
+import monthly as monthlymod
 import policy as policymod
 import system as systemmod
 import telegram
@@ -293,6 +294,20 @@ SCHEMAS = [
             "days": {"type": "integer", "description": "How many days back, 1 to 365."}},
             "required": ["days"]}}},
     {"type": "function", "function": {
+        "name": "get_monthly_summary",
+        "description": "Every calendar month of the record: solar kWh, load "
+                       "kWh, net kWh, generator hours and gallons per "
+                       "generator, minimum and maximum pack voltage, the best "
+                       "and worst solar day, and how many days of data the "
+                       "month has. Plus `superlatives`: worst_solar_month, "
+                       "best_solar_month, highest_load_month, "
+                       "most_fuel_month, each already worked out. Call this "
+                       "for any question about which month was best, worst, "
+                       "highest or used the most fuel, and read the answer "
+                       "out of the superlative field. Do not rank the months "
+                       "yourself.",
+        "parameters": {"type": "object", "properties": {}}}},
+    {"type": "function", "function": {
         "name": "battery_health",
         "description": "Battery longevity and ageing, all computed: amp-hours "
                        "out, equivalent full cycles, cycles a year, mean daily "
@@ -381,7 +396,7 @@ SCHEMAS = [
 
 READ_TOOLS = {"get_status", "get_history", "get_load_forecast",
               "get_gen_runtime", "get_voltage_at", "get_weather", "get_ac_diag",
-              "battery_health",
+              "battery_health", "get_monthly_summary",
               "get_system_specs", "get_mppt_detail", "get_battery_detail",
               "get_guard_state", "get_recent_actions", "send_telegram"}
 WRITE_TOOLS = {"set_gen_thresholds"}
@@ -563,6 +578,10 @@ class Tools:
         last_month = datetime.fromtimestamp(prev_end, tz).strftime("%B")
         return (f"{this_month} so far: {clause('mtd')}. "
                 f"{last_month}: {clause('last_month')}.")
+
+    def get_monthly_summary(self):
+        """Every calendar month, and which months stand out. All in Python."""
+        return monthlymod.monthly_summary(self.conn, self.cfg)
 
     def battery_health(self):
         """Longevity, from what the pack has done. All computed in Python."""

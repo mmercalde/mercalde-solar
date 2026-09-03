@@ -89,6 +89,7 @@ instead of a second poller.
 | `topup.py` | the per-generator top-up state machine POLICY 4 runs on |
 | `fuel.py` | what a run cost in diesel, and whose watts they were |
 | `health.py` | throughput, measured fade and the ageing projection |
+| `monthly.py` | every calendar month, and the months that stand out |
 | `guard.py` | the hard rules; every write passes through it |
 | `tools.py` | the eight read tools and the single write, as OpenAI schemas |
 | `eval_cases.py` | Q&A cases and their graders, for `model_eval.py --exam` |
@@ -370,6 +371,53 @@ all night.
 The return is driven by the state, not only by the ledger: any stop sitting
 below the owner's baseline with no live reason comes back, whether or not
 this bookkeeping recorded putting it there.
+
+## Which month was the worst
+
+`get_monthly_summary` answers that, and answers it in Python. Every calendar
+month of the record gets a row — solar, load and net kWh, generator hours and
+gallons per generator, the voltage extremes, the best and worst solar day,
+and how many days of data stand behind it — and then a `superlatives` block
+that has already done the ranking: `worst_solar_month`, `best_solar_month`,
+`highest_load_month`, `most_fuel_month`, each a month and a value.
+
+The block is the point. Handed seventeen rows and asked which month was
+worst, the model will rank them itself, and ranking rows is exactly the
+arithmetic it does confidently and wrongly. The prompt tells it to read the
+superlative and forbids deriving a monthly ranking from any other tool's
+series.
+
+Generator activity comes from two sources that **tile rather than overlap**,
+and saying which is which is most of the work. `gen_runs` — and
+`daily.mep_minutes`, which `rollup_daily` computes from it and which
+therefore inherits exactly the same gap — begins when the agent did, on
+2026-08-28. Before that the only record is the scraped `/SYS/GEN/ENERGY_HOUR`
+counter: metered energy rather than run times, silent about which engine
+produced it, and counted in whole-hour buckets.
+
+Read off the runs alone, December 2025 was 554 kWh in deficit with zero
+generator hours, which cannot happen. It was 673 kWh of generator energy over
+141 buckets. So fuel is reported both ways — `fuel_gal_modelled` from the
+runs where there are any, `fuel_gal_estimated` from metered energy at
+full-load gallons per kilowatt-hour everywhere else — added, because August
+2026 is scraped to the 27th and has runs from the 28th. `fuel_basis` says
+what a month rests on, and `most_fuel_month` ranks on the complete series.
+
+Pricing the *hour buckets* instead is reported as
+`fuel_gal_estimated_from_hours` and not used: a twenty-minute run fills a
+bucket, so it runs about 1.8× high. And `gen_kwh_implied` — load less solar
+less what the pack gave up — is the check that makes a gap look like a gap: a
+month deep in deficit beside no generator hours is then visibly inconsistent
+rather than quietly wrong.
+
+Two filters, both because a partial period is not a bad one. A day can only
+be the best or worst if it has 20 of its 24 hourly rows: without that the
+worst solar day on this record is 2026-08-28 at 0.0 kWh — the afternoon live
+sampling started — rather than 2025-11-15 at 2.7, which was actually a dark
+November day. And a month can only be a superlative if it has 20 days:
+September 2026 is two days old and would otherwise be the worst month for
+solar by a factor of eight. Both exclusions are counted and returned, and the
+short month stays in the series — the owner may well be asking about it.
 
 ## The top-up state machine
 
