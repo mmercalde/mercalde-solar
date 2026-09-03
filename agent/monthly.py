@@ -44,6 +44,7 @@ Both exclusions are counted and returned rather than done quietly.
 
 import collections
 import logging
+import re
 import time
 
 import fuel
@@ -145,15 +146,68 @@ def _runs_by_month(conn, cfg):
 # which month was worst needs one field, not seventeen rows of prose.
 COMPACT_MONTHS = 12
 
+# How a month may be named. The model asked about December 2025 and called
+# months=1, which returns the most recent month - September 2026 - and then
+# answered about December out of September's row and the superlatives. That
+# is the argument shape inviting the mistake: "months=1" reads like "one
+# month" and says nothing about which end of the record it comes from. So a
+# named month has its own argument, and it takes whatever spelling arrives.
+MONTH_NAMES = {}
+for _i, _name in enumerate(
+        ["january", "february", "march", "april", "may", "june", "july",
+         "august", "september", "october", "november", "december"], start=1):
+    MONTH_NAMES[_name] = _i
+    MONTH_NAMES[_name[:3]] = _i
+MONTH_NAMES["sept"] = 9
 
-def monthly_summary(conn, cfg, months=COMPACT_MONTHS, detail=False, now=None):
-    """The months that stand out, and a table of the recent ones.
 
-    `detail` returns everything about every month - the day names, the
-    per-generator dicts, the per-month provenance sentences - and is for a
-    question about one particular month. The default is a compact table of
-    the last `months` and the superlatives, which is what a question about
-    which month was best or worst actually needs.
+def parse_month(text):
+    """("YYYY-MM", None) for anything that names a month and a year.
+
+    "2025-12", "12-2025", "Dec 2025", "December 2025", "2025/12" and
+    "december, 2025" all arrive here and all mean the same month. Anything
+    without both halves comes back as (None, why), because guessing the year
+    for a bare "December" is the same class of error this argument exists to
+    stop.
+    """
+    if not text:
+        return None, "no month given"
+    tokens = re.findall(r"[a-z]+|\d+", str(text).strip().lower())
+    year = month = None
+    for tok in tokens:
+        if tok.isdigit():
+            n = int(tok)
+            if len(tok) == 4 and 1900 <= n <= 2999 and year is None:
+                year = n
+            elif 1 <= n <= 12 and month is None:
+                month = n
+        elif tok in MONTH_NAMES and month is None:
+            month = MONTH_NAMES[tok]
+    if year is None and month is None:
+        return None, f"{text!r} does not name a month"
+    if year is None:
+        return None, (f"{text!r} names a month but not a year, and this "
+                      f"record covers more than one of them; ask for "
+                      f"\"{list(MONTH_NAMES)[0].title()} 2026\" and so on")
+    if month is None:
+        return None, f"{text!r} names a year but not a month"
+    return f"{year:04d}-{month:02d}", None
+
+
+def monthly_summary(conn, cfg, months=COMPACT_MONTHS, detail=False,
+                    month=None, now=None):
+    """The months that stand out, and a table of the ones asked for.
+
+    `month` names one - any spelling parse_month takes - and the table is
+    that month and nothing else. `months` means the most recent N and is for
+    looking at a trend; it is ignored when `month` is given, because a
+    question about December is not a question about however many months
+    happen to sit at the end of the record.
+
+    `detail` returns everything about the months in the table - the day
+    names, the per-generator dicts, the provenance sentences. The default is
+    compact, which is what a question about which month was best or worst
+    actually needs.
 
     The superlatives always rank over the whole record however short the
     table is. Ranking only what was printed would make the answer depend on
@@ -182,8 +236,11 @@ def monthly_summary(conn, cfg, months=COMPACT_MONTHS, detail=False, now=None):
 
     partial_days = []
     months = []
-    for month in sorted(by_month):
-        rows = by_month[month]
+    # `ym`, not `month`: the argument of that name is the month the caller
+    # asked for, and letting the loop walk over it is how every named month
+    # came back as the last one in the record.
+    for ym in sorted(by_month):
+        rows = by_month[ym]
         solar = sum(r["solar_wh"] or 0 for r in rows)
         load = sum(r["load_wh"] or 0 for r in rows)
         volts = [r["min_v"] for r in rows if r["min_v"] is not None]
@@ -196,9 +253,9 @@ def monthly_summary(conn, cfg, months=COMPACT_MONTHS, detail=False, now=None):
         best = max(full, key=lambda r: r["solar_wh"]) if full else None
         worst = min(full, key=lambda r: r["solar_wh"]) if full else None
 
-        gen = runs.get(month) or {g: {"hours": 0.0, "gal": 0.0, "runs": 0,
+        gen = runs.get(ym) or {g: {"hours": 0.0, "gal": 0.0, "runs": 0,
                                       "unpriced": 0} for g in history.GENS}
-        met = metered.get(month) or {"kwh": 0.0, "hours": 0}
+        met = metered.get(ym) or {"kwh": 0.0, "hours": 0}
         run_hours = sum(gen[g]["hours"] for g in history.GENS)
         run_gal = sum(gen[g]["gal"] for g in history.GENS)
         has_runs = any(gen[g]["runs"] for g in history.GENS)
@@ -218,11 +275,11 @@ def monthly_summary(conn, cfg, months=COMPACT_MONTHS, detail=False, now=None):
         # What the month must have got from somewhere other than the sun and
         # the pack. A month deep in deficit beside no generator hours is then
         # visibly inconsistent rather than quietly wrong.
-        batt_net = battery.get(month, 0.0)
+        batt_net = battery.get(ym, 0.0)
         implied = max(0.0, (load - solar) / 1000.0 - batt_net)
 
         months.append({
-            "month": month,
+            "month": ym,
             "days_with_data": len(rows),
             "days_ranked": len(full),
             "solar_kwh": round(solar / 1000.0, 1),
@@ -267,28 +324,52 @@ def monthly_summary(conn, cfg, months=COMPACT_MONTHS, detail=False, now=None):
         })
 
     superlatives = _superlatives(months)
-    window = months if months_wanted >= len(months) else months[-months_wanted:]
+    asked_for = None
+    not_on_record = None
+
+    if month:
+        wanted, why = parse_month(month)
+        if wanted is None:
+            window, not_on_record = [], why
+        else:
+            asked_for = wanted
+            window = [m for m in months if m["month"] == wanted]
+            if not window:
+                not_on_record = (
+                    f"{wanted} is not in the record, which runs "
+                    f"{months[0]['month']} to {months[-1]['month']}")
+    else:
+        window = (months if months_wanted >= len(months)
+                  else months[-months_wanted:])
 
     if not detail:
         return {
             "superlatives": superlatives,
+            "asked_for_month": asked_for,
+            "not_on_record": not_on_record,
             "months_shown": len(window), "months_on_record": len(months),
             "first_month": months[0]["month"], "last_month": months[-1]["month"],
             "columns": COMPACT_COLUMNS,
             "months": [_compact(m) for m in window],
             "basis": (
-                f"Superlatives rank the whole record, not the table; a month "
-                f"needs {MIN_DAYS_FOR_MONTH_RANKING} days to rank. Rows "
-                f"follow `columns`. shortfall_kwh is load_kwh less solar_kwh "
-                f"floored at zero, how short the month was; gen_kwh is what "
-                f"covered it, modelled from recorded runs since 2026-08-28 "
-                f"and estimated from the metered counter before that. "
-                f"Gallons come from published curves, never metered. "
-                f"detail=true for one month's days."),
+                f"Superlatives rank the whole record, not the table "
+                f"({MIN_DAYS_FOR_MONTH_RANKING}+ days to rank). Rows follow "
+                f"`columns`. shortfall_kwh is load_kwh less solar_kwh "
+                f"floored at zero; gen_kwh is what covered it, from recorded "
+                f"runs since 2026-08-28 and the metered counter before that. "
+                f"Gallons are modelled, never metered. "
+                + (f"Table is {asked_for} alone, asked for by name: answer "
+                   f"from that row, not the superlatives. "
+                   if asked_for else
+                   f"Table is the {len(window)} most recent months; pass "
+                   f"month= for a named one. ")
+                + f"detail=true for its days."),
         }
 
     return {
         "months": window,
+        "asked_for_month": asked_for,
+        "not_on_record": not_on_record,
         "months_shown": len(window), "months_on_record": len(months),
         "first_month": months[0]["month"], "last_month": months[-1]["month"],
         "superlatives": superlatives,

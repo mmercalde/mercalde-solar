@@ -238,13 +238,13 @@ def test_the_tool_returns_the_summary(a_year, cfg):
     assert len(out["months"]) == 4
 
 
-def test_the_tool_is_registered_with_its_two_arguments():
+def test_the_tool_is_registered_with_its_three_arguments():
     import tools as toolsmod
     assert "get_monthly_summary" in toolsmod.READ_TOOLS
     schema = next(s for s in toolsmod.SCHEMAS
                   if s["function"]["name"] == "get_monthly_summary")
     props = schema["function"]["parameters"]["properties"]
-    assert set(props) == {"months", "detail"}
+    assert set(props) == {"month", "months", "detail"}
     assert "superlative" in schema["function"]["description"]
     assert "detail only when" in schema["function"]["description"]
 
@@ -581,3 +581,147 @@ def test_the_extra_column_keeps_the_payload_small(seventeen_months, cfg):
                                         cfg).get_monthly_summary(),
                          default=str)
     assert len(payload) < 2500, f"{len(payload)} chars"
+
+
+# --- asking for a month by name ---------------------------------------------------
+#
+# The model was asked about December 2025 and called months=1, which returns
+# the most recent month - September 2026 - and then answered about December
+# out of September's row and the superlatives. "months=1" reads like "one
+# month" and says nothing about which end of the record it comes from, so a
+# named month gets its own argument.
+
+@pytest.mark.parametrize("spelling", [
+    "2025-12", "12-2025", "Dec 2025", "December 2025", "2025/12",
+    "december, 2025", "2025 Dec", "DECEMBER 2025", "  2025-12  ",
+])
+def test_a_month_is_taken_however_it_is_spelled(spelling):
+    assert monthly.parse_month(spelling) == ("2025-12", None)
+
+
+@pytest.mark.parametrize("spelling,expected", [
+    ("2026-9", "2026-09"), ("sept 2026", "2026-09"), ("Sep 2026", "2026-09"),
+    ("1-2026", "2026-01"), ("January 2026", "2026-01"),
+])
+def test_the_other_spellings_land_where_they_should(spelling, expected):
+    assert monthly.parse_month(spelling)[0] == expected
+
+
+def test_a_month_without_a_year_is_refused_rather_than_guessed():
+    """Guessing the year for a bare "December" is the same class of error
+    this argument exists to stop."""
+    got, why = monthly.parse_month("December")
+    assert got is None and "not a year" in why
+
+
+@pytest.mark.parametrize("junk", ["", None, "banana", "2025", "next month"])
+def test_nonsense_is_refused_with_a_reason(junk):
+    got, why = monthly.parse_month(junk)
+    assert got is None and why
+
+
+def test_a_named_month_returns_exactly_that_row(seventeen_months, cfg):
+    import tools as toolsmod
+    out = toolsmod.Tools(seventeen_months, cfg).get_monthly_summary(
+        month="December 2025")
+    assert out["asked_for_month"] == "2025-12"
+    assert out["not_on_record"] is None
+    assert out["months_shown"] == 1
+    assert [r[0] for r in out["months"]] == ["2025-12"]
+
+
+def test_months_is_ignored_when_a_month_is_named(seventeen_months, cfg):
+    """A question about December is not a question about however many months
+    happen to sit at the end of the record."""
+    import tools as toolsmod
+    out = toolsmod.Tools(seventeen_months, cfg).get_monthly_summary(
+        month="2025-12", months=12)
+    assert [r[0] for r in out["months"]] == ["2025-12"]
+
+
+def test_the_named_month_is_not_the_last_month(seventeen_months, cfg):
+    """The bug itself: months=1 gives September 2026, month= gives December
+    2025, and they must not be the same row."""
+    import tools as toolsmod
+    t = toolsmod.Tools(seventeen_months, cfg)
+    by_name = t.get_monthly_summary(month="December 2025")
+    by_count = t.get_monthly_summary(months=1)
+    assert by_name["months"][0][0] == "2025-12"
+    assert by_count["months"][0][0] == "2026-09"
+    assert by_name["months"][0] != by_count["months"][0]
+
+
+def test_the_basis_says_which_month_the_table_is(seventeen_months, cfg):
+    import tools as toolsmod
+    out = toolsmod.Tools(seventeen_months, cfg).get_monthly_summary(
+        month="2025-12")
+    assert "Table is 2025-12 alone" in out["basis"]
+    assert "not the superlatives" in out["basis"]
+
+
+def test_detail_with_a_named_month_gives_that_month_in_full(seventeen_months,
+                                                            cfg):
+    import tools as toolsmod
+    out = toolsmod.Tools(seventeen_months, cfg).get_monthly_summary(
+        month="Dec 2025", detail=True)
+    assert out["months_shown"] == 1
+    m = out["months"][0]
+    assert m["month"] == "2025-12"
+    assert m["best_solar_day"]["date"].startswith("2025-12")
+    assert set(m["gen_hours_recorded"]) == set(history.GENS)
+
+
+def test_a_month_outside_the_record_says_so(seventeen_months, cfg):
+    """An empty table is a question the model will answer anyway. A sentence
+    saying the month is not there is one it cannot."""
+    import tools as toolsmod
+    out = toolsmod.Tools(seventeen_months, cfg).get_monthly_summary(
+        month="2024-03")
+    assert out["months"] == []
+    assert out["asked_for_month"] == "2024-03"
+    assert "2024-03 is not in the record" in out["not_on_record"]
+    assert "2025-05 to 2026-09" in out["not_on_record"]
+
+
+def test_an_unparseable_month_says_why(seventeen_months, cfg):
+    import tools as toolsmod
+    out = toolsmod.Tools(seventeen_months, cfg).get_monthly_summary(
+        month="banana")
+    assert out["months"] == [] and out["asked_for_month"] is None
+    assert "does not name a month" in out["not_on_record"]
+
+
+def test_without_a_month_the_fields_are_quiet(seventeen_months, cfg):
+    import tools as toolsmod
+    out = toolsmod.Tools(seventeen_months, cfg).get_monthly_summary()
+    assert out["asked_for_month"] is None and out["not_on_record"] is None
+    assert out["months_shown"] == 12
+
+
+def test_a_single_month_payload_is_tiny(seventeen_months, cfg):
+    import json
+    import tools as toolsmod
+    payload = json.dumps(toolsmod.Tools(seventeen_months, cfg)
+                         .get_monthly_summary(month="2025-12"), default=str)
+    assert len(payload) < 1500, f"{len(payload)} chars"
+
+
+def test_the_tool_description_says_which_argument_to_use():
+    """The description is the only place the model learns the difference,
+    and it got it wrong once already."""
+    import tools as toolsmod
+    schema = next(s for s in toolsmod.SCHEMAS
+                  if s["function"]["name"] == "get_monthly_summary")
+    desc = schema["function"]["description"]
+    assert "For a question about a specific month, pass month=" in desc
+    assert "never use months=1 to get a named month" in desc
+    assert '{"month": "2025-12"}' in desc and '{"months": 6}' in desc
+
+
+def test_the_ask_prompt_sends_a_named_month_to_month(seventeen_months, cfg):
+    import prompts
+    p = prompts.ask_prompt()
+    assert "month= set to that month" in p
+    assert "Never use months=1 to reach a named month" in p
+    assert '"which month" questions only' in p
+    assert "never for a month the owner has already named" in p

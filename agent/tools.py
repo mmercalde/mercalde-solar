@@ -308,13 +308,30 @@ SCHEMAS = [
                        "yourself. By default it returns the superlatives and "
                        "a compact table of recent months, which is what those "
                        "questions need; ask for detail only when the question "
-                       "is about one particular month's days.",
+                       "is about one particular month's days. "
+                       "For a question about a specific month, pass month=. "
+                       "months=N means the most recent N months and is for "
+                       "trends; never use months=1 to get a named month - it "
+                       "returns the latest month, not the one you meant. "
+                       "For December 2025: {\"month\": \"2025-12\"}. "
+                       "For the last six months: {\"months\": 6}.",
         "parameters": {"type": "object", "properties": {
+            "month": {"type": "string",
+                      "description": "One month by name, and the table is "
+                                     "that month alone. \"2025-12\", "
+                                     "\"12-2025\", \"Dec 2025\" and "
+                                     "\"December 2025\" all work. Use this "
+                                     "whenever the question names a month. "
+                                     "`months` is ignored when it is set."},
             "months": {"type": "integer",
-                       "description": "How many recent months to table. "
-                                      "Default 12; a large number gives all "
-                                      "of them. The superlatives always rank "
-                                      "the whole record whatever this is."},
+                       "description": "How many of the MOST RECENT months to "
+                                      "table, for looking at a trend. Default "
+                                      "12; a large number gives all of them. "
+                                      "This cannot reach a named month: "
+                                      "months=1 is the latest month, not the "
+                                      "one asked about. The superlatives "
+                                      "always rank the whole record whatever "
+                                      "this is."},
             "detail": {"type": "boolean",
                        "description": "Default false. True adds each month's "
                                       "best and worst solar day, "
@@ -600,11 +617,12 @@ class Tools:
                 f"{last_month}: {clause('last_month')}.")
 
     def get_monthly_summary(self, months=monthlymod.COMPACT_MONTHS,
-                            detail=False):
+                            detail=False, month=None):
         """Every calendar month, and which months stand out. All in Python."""
         return monthlymod.monthly_summary(self.conn, self.cfg,
                                           months=int(months),
-                                          detail=bool(detail))
+                                          detail=bool(detail),
+                                          month=month)
 
     def battery_health(self):
         """Longevity, from what the pack has done. All computed in Python."""

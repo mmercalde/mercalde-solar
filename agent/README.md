@@ -422,6 +422,15 @@ particular month. The superlatives rank the whole record whatever the table
 is, because an answer that depended on how much of it was printed would be a
 different bug.
 
+A month is asked for **by name**: `month="December 2025"`, or `"2025-12"`, or
+`"12-2025"`, or `"Dec 2025"` — parsed leniently, and `months` is ignored when
+it is set. That argument exists because the model asked about December 2025,
+called `months=1`, got September 2026 — the most recent month — and answered
+about December out of September's row. `months=1` reads like "one month" and
+says nothing about which end of the record it comes from. A month that is not
+on the record comes back with `not_on_record` saying so and naming the span
+that is, because an empty table is a question the model will answer anyway.
+
 Every tool result is now journaled at INFO with its size —
 `tool get_monthly_summary() -> 1837 chars` — and warned above 6,000. Tool
 calls were not in the journal at all before, so a tick could only be

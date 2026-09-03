@@ -152,7 +152,15 @@ most_fuel_month. Each is a month and a value, already worked out. Read it and
 quote it. A question about a shortfall or a deficit - "how short were we in
 December", "which months did not cover themselves" - is the shortfall_kwh
 column of the same table, and gen_kwh beside it is what covered that
-shortfall. Never rank months yourself out of get_history, get_gen_runtime or
+shortfall.
+
+A question that NAMES a month - "how was December 2025", "what did we burn in
+January" - goes to the same tool with month= set to that month, and the answer
+comes out of that month's row. Never use months=1 to reach a named month: it
+returns the most recent month, and answering about December out of September's
+row is a wrong answer that reads like a right one. The superlatives are for
+"which month" questions only - which was worst, which used the most fuel - and
+never for a month the owner has already named. Never rank months yourself out of get_history, get_gen_runtime or
 any other tool's series: those return rows, ranking rows is arithmetic, and
 the arithmetic has already been done for you here. If a month you are asked
 about is in `months_excluded`, say it is too short to rank and give the days
