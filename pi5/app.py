@@ -2950,7 +2950,7 @@ h2.sec::after{content:'';flex:1;height:1px;background:var(--line)}
 </head>
 <body>
 <div class='wrap'>
-<a class='back' href='/'>&larr; Dashboard</a>
+<a class='back' href='/dashboard'>&larr; Dashboard</a>
 <h2 class='sec'>AC Diagnostic &mdash; Inverter Sync</h2>
 <div class='card' style='--accent:var(--gen)'>
   <div class='mgrid'>
@@ -3156,7 +3156,7 @@ h2{color:#82e0aa;margin:0 0 15px 0;text-align:center;}
   </div>
 </div>
 <div class='log' id='log'></div>
-<a href='/' class='back-link'>\u2190 Back to Dashboard</a>
+<a href='/dashboard' class='back-link'>\u2190 Back to Dashboard</a>
 </div>
 <script>
 function log(msg,type='info'){
@@ -3199,6 +3199,7 @@ async function readAGSRegs(){
 </html>"""
 
 @app.route('/')
+@app.route('/dashboard')
 def index():
     # Static HTML - bypass Jinja so CSS/JS braces are never interpreted
     return DASHBOARD_HTML
