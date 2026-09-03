@@ -438,10 +438,10 @@ def test_the_default_table_is_rows_under_named_columns(seventeen_months, cfg):
     import tools as toolsmod
     out = toolsmod.Tools(seventeen_months, cfg).get_monthly_summary()
     assert out["columns"] == ["month", "solar_kwh", "load_kwh", "gen_kwh",
-                              "fuel_gal", "min_v", "max_v"]
+                              "shortfall_kwh", "fuel_gal", "min_v", "max_v"]
     row = out["months"][0]
     assert len(row) == len(out["columns"])
-    assert isinstance(row[1], int) and isinstance(row[4], int)
+    assert all(isinstance(row[i], int) for i in range(1, 6))
     assert "basis" in out and len(out["basis"]) < 400
 
 
@@ -510,3 +510,74 @@ def test_the_arguments_are_journaled_too(seventeen_months, cfg, caplog):
     line = next(r.getMessage() for r in caplog.records
                 if "get_monthly_summary" in r.getMessage())
     assert "detail=False" in line and "months=3" in line
+
+
+# --- how short the month was -----------------------------------------------------
+
+def test_the_shortfall_column_is_load_less_solar(seventeen_months, cfg):
+    """The plain question. gen_kwh beside it is what covered it."""
+    import tools as toolsmod
+    out = toolsmod.Tools(seventeen_months, cfg).get_monthly_summary()
+    assert out["columns"] == ["month", "solar_kwh", "load_kwh", "gen_kwh",
+                              "shortfall_kwh", "fuel_gal", "min_v", "max_v"]
+    i = out["columns"].index("shortfall_kwh")
+    for row in out["months"]:
+        solar, load = row[1], row[2]
+        assert row[i] == max(0, load - solar)
+        assert isinstance(row[i], int)
+
+
+def test_a_month_the_sun_covered_is_short_by_nothing(conn, cfg):
+    """Floored at zero: a surplus month is not short by a negative amount."""
+    a_month(conn, cfg, "2026-04", days=30, solar_kwh=38.0, load_kwh=30.0)
+    import tools as toolsmod
+    out = toolsmod.Tools(conn, cfg).get_monthly_summary()
+    i = out["columns"].index("shortfall_kwh")
+    assert out["months"][0][i] == 0
+
+
+def test_a_deep_month_is_short_by_what_it_had_to_import(conn, cfg):
+    """December 2025's shape: 542 kWh of sun against 1,096 of load."""
+    a_month(conn, cfg, "2025-12", days=31, solar_kwh=17.0, load_kwh=35.0)
+    import tools as toolsmod
+    out = toolsmod.Tools(conn, cfg).get_monthly_summary()
+    row = out["months"][0]
+    i = out["columns"].index("shortfall_kwh")
+    assert row[i] == 558, "31 days short by 18 kWh each"
+    assert row[i] == row[2] - row[1]
+
+
+def test_the_shortfall_and_what_covered_it_sit_side_by_side(conn, cfg):
+    a_month(conn, cfg, "2025-12", days=31, solar_kwh=17.0, load_kwh=35.0)
+    for d in range(1, 16):
+        for h in (2, 3, 4):
+            gen_hour(conn, cfg, f"2025-12-{d:02d}", h, 12.0)
+    import tools as toolsmod
+    out = toolsmod.Tools(conn, cfg).get_monthly_summary()
+    row = out["months"][0]
+    short = row[out["columns"].index("shortfall_kwh")]
+    gen = row[out["columns"].index("gen_kwh")]
+    assert short == 558 and gen == 540
+    assert "shortfall_kwh is load_kwh less solar_kwh" in out["basis"]
+    assert "gen_kwh is what covered it" in out["basis"]
+
+
+def test_the_detail_form_carries_the_same_figure(conn, cfg):
+    """And is not the same as gen_kwh_implied, which also nets off what the
+    pack gave up over the month."""
+    a_month(conn, cfg, "2025-12", days=31, solar_kwh=17.0, load_kwh=35.0)
+    batt_hour(conn, cfg, "2025-12-15", 3, kwh_in=100.0, kwh_out=90.0)
+    m = monthly.monthly_summary(conn, cfg, months=999,
+                                detail=True)["months"][0]
+    assert m["shortfall_kwh"] == pytest.approx(558.0)
+    assert m["gen_kwh_implied"] == pytest.approx(548.0, abs=0.5)
+    assert m["shortfall_kwh"] > m["gen_kwh_implied"]
+
+
+def test_the_extra_column_keeps_the_payload_small(seventeen_months, cfg):
+    import json
+    import tools as toolsmod
+    payload = json.dumps(toolsmod.Tools(seventeen_months,
+                                        cfg).get_monthly_summary(),
+                         default=str)
+    assert len(payload) < 2500, f"{len(payload)} chars"

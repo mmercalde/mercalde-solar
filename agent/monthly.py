@@ -228,6 +228,11 @@ def monthly_summary(conn, cfg, months=COMPACT_MONTHS, detail=False, now=None):
             "solar_kwh": round(solar / 1000.0, 1),
             "load_kwh": round(load / 1000.0, 1),
             "net_kwh": round((solar - load) / 1000.0, 1),
+            # What the sun did not cover. Deliberately simpler than
+            # gen_kwh_implied below, which also nets off what the pack gave
+            # up over the month: this is the plain question "how short was
+            # the month", and gen_kwh is the answer to what covered it.
+            "shortfall_kwh": round(max(0.0, (load - solar) / 1000.0), 1),
             "battery_net_kwh": round(batt_net, 1),
             "gen_kwh_implied": round(implied, 1),
             "gen_kwh_metered": round(met["kwh"], 1),
@@ -272,13 +277,14 @@ def monthly_summary(conn, cfg, months=COMPACT_MONTHS, detail=False, now=None):
             "columns": COMPACT_COLUMNS,
             "months": [_compact(m) for m in window],
             "basis": (
-                f"Superlatives rank the whole record, not the table. A month "
-                f"needs {MIN_DAYS_FOR_MONTH_RANKING} days to rank. gen_kwh "
-                f"and fuel_gal: modelled from recorded runs since 2026-08-28, "
-                f"estimated from the metered generator counter before that; "
-                f"gallons from published curves, never metered. Rows are in "
-                f"`columns` order. detail=true for one month's days and "
-                f"per-generator figures."),
+                f"Superlatives rank the whole record, not the table; a month "
+                f"needs {MIN_DAYS_FOR_MONTH_RANKING} days to rank. Rows "
+                f"follow `columns`. shortfall_kwh is load_kwh less solar_kwh "
+                f"floored at zero, how short the month was; gen_kwh is what "
+                f"covered it, modelled from recorded runs since 2026-08-28 "
+                f"and estimated from the metered counter before that. "
+                f"Gallons come from published curves, never metered. "
+                f"detail=true for one month's days."),
         }
 
     return {
@@ -309,8 +315,8 @@ def monthly_summary(conn, cfg, months=COMPACT_MONTHS, detail=False, now=None):
 # The compact table's fields, named once at the top of it rather than on
 # every row. Twelve rows of {"month": ..., "solar_kwh": ...} spend 780
 # characters repeating seven key names, which is a third of the whole budget.
-COMPACT_COLUMNS = ["month", "solar_kwh", "load_kwh", "gen_kwh", "fuel_gal",
-                   "min_v", "max_v"]
+COMPACT_COLUMNS = ["month", "solar_kwh", "load_kwh", "gen_kwh",
+                   "shortfall_kwh", "fuel_gal", "min_v", "max_v"]
 
 
 def _compact(m):
@@ -327,6 +333,7 @@ def _compact(m):
         round(m["solar_kwh"]),
         round(m["load_kwh"]),
         round(m["gen_kwh_total"] or 0),
+        round(m["shortfall_kwh"]),
         round(m["fuel_gal_total"]),
         round(m["min_v"], 1) if m["min_v"] is not None else None,
         round(m["max_v"], 1) if m["max_v"] is not None else None,

@@ -414,8 +414,9 @@ rather than quietly wrong.
 seventeen months — about 4,400 tokens — and on the KAMRUI's integrated GPU an
 answer carrying it went past the 180 s model timeout: the owner asked which
 month was worst and got "the agent is not answering". So the default is the
-superlatives plus a twelve-row table of integers under a `columns` header,
-**1,837 characters**, and `detail=true` brings back the day names,
+superlatives plus a twelve-row table of integers under a `columns` header —
+month, solar, load, generator, shortfall, gallons, and the voltage extremes —
+**under 2,000 characters**, and `detail=true` brings back the day names,
 per-generator dicts and provenance sentences for a question about one
 particular month. The superlatives rank the whole record whatever the table
 is, because an answer that depended on how much of it was printed would be a

@@ -149,7 +149,10 @@ month for solar", "when did we burn the most fuel", "which month used the most
 power" - must be answered with get_monthly_summary, and out of its
 `superlatives`: worst_solar_month, best_solar_month, highest_load_month,
 most_fuel_month. Each is a month and a value, already worked out. Read it and
-quote it. Never rank months yourself out of get_history, get_gen_runtime or
+quote it. A question about a shortfall or a deficit - "how short were we in
+December", "which months did not cover themselves" - is the shortfall_kwh
+column of the same table, and gen_kwh beside it is what covered that
+shortfall. Never rank months yourself out of get_history, get_gen_runtime or
 any other tool's series: those return rows, ranking rows is arithmetic, and
 the arithmetic has already been done for you here. If a month you are asked
 about is in `months_excluded`, say it is too short to rank and give the days
