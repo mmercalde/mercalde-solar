@@ -527,6 +527,31 @@ Keying staleness off uptime would never fire, so the rule uses `clockTime`,
 which carries the meaning the rule intends. `lastUpdate` is still recorded in
 `samples`.
 
+## The first question after a restart
+
+The model server caches the prompt by prefix. The first call after
+`solar-agent` restarts rebuilds that cache — about 50 s on the KAMRUI's
+integrated GPU — and a question landing in that window paid it, plus a tool
+call, plus a second turn: 80 to 100 s against a dashboard that gave up at 90.
+The answer arrived and the owner was told the agent was not answering.
+
+So the agent pays instead. On startup a thread sends one throwaway question
+with the system text `ask_prompt` produces and the tool schemas every turn
+sends — a cache is a prefix, and a prefix that differs anywhere is a cache
+that misses — and logs `prompt cache warmed in 47.3 s`. It is a daemon
+thread, it never blocks startup, and a missing llama-server is survived
+quietly: the agent still starts, samples, plans, and refuses to answer.
+
+The clock line moved to the end of the prompt for the same reason. Sitting
+between POLICY and HOW TO ANSWER it was the only part that changed between
+questions, so it put the cache break 60% of the way in and left the last
+3,900 characters to be reprocessed on *every* call, not just the first. Last,
+the shared prefix is over 99%.
+
+Both timeouts moved up with it: the dashboard allows 150 s (was 90) and nginx
+170 s (was 120), the latter having to outlast the former or the owner sees a
+failure that did not happen.
+
 ## Talking to it
 
 **Telegram** — message the bot from the configured chat; anything else is

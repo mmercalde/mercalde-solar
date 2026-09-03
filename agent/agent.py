@@ -44,6 +44,15 @@ log = logging.getLogger(__name__)
 
 MAX_TOOL_ROUNDS = 4
 ANOMALY_COOLDOWN = 1800
+# The warm-up question. Short, answerable without a tool, and thrown away: it
+# is sent for the prefix it carries and not for the reply.
+WARMUP_QUESTION = "Say OK."
+WARMUP_MAX_TOKENS = 4
+# llama-server may still be loading its weights when the agent starts, so the
+# warm-up gets a few tries before it gives up. It is a daemon thread and the
+# waits are on stop_event, so none of this delays a shutdown.
+WARMUP_ATTEMPTS = 3
+WARMUP_RETRY_SECONDS = 20
 # Anomalies that are worth saying less often than every half hour. A shunt
 # does not drift back by itself, so once the owner has been told, telling
 # them again before tomorrow adds nothing.
@@ -1254,6 +1263,10 @@ class Agent:
                                   host=ask_host, db_path=self.db_path)
         threading.Thread(target=self.telegram_loop, name="telegram",
                          daemon=True).start()
+        # In the background: startup must not wait on the model, and the
+        # model may not be there at all.
+        threading.Thread(target=self.warm_prompt_cache, name="warmup",
+                         daemon=True).start()
 
         log.info("solar agent running: tick every %s min, digests at %s, "
                  "counters hourly at :%02d",
@@ -1268,6 +1281,58 @@ class Agent:
             sched.shutdown(wait=False)
             if server:
                 server.shutdown()
+
+    def warm_prompt_cache(self):
+        """Pay for the prompt cache before a person is waiting on it.
+
+        The first model call after a restart rebuilds the cache, about 50 s on
+        the KAMRUI's integrated GPU. A question in that window costs that plus
+        a tool call plus a second turn - 80 to 100 s - and the Pi5 dashboard
+        gave up at 90, so the owner read "not answering" about an answer that
+        arrived. Nothing was broken; the first caller was simply the one who
+        paid.
+
+        So the agent pays instead, at startup, with a throwaway question. The
+        system text is exactly what ask_prompt produces and the tool schemas
+        are the ones every turn sends, because a cache is a prefix and a
+        prefix that differs anywhere is a cache that misses. Only the NOW line
+        and the question itself change afterwards, and both come after the
+        POLICY block that is most of the bytes.
+
+        Runs in its own thread and never raises. A missing llama-server is a
+        thing the agent is expected to survive - it starts, samples, plans and
+        refuses to answer - so a warm-up that cannot connect says so quietly
+        and stops.
+        """
+        for attempt in range(WARMUP_ATTEMPTS):
+            if self.stop_event.is_set():
+                return None
+            started = time.monotonic()
+            try:
+                self.llm.chat(
+                    [{"role": "system",
+                      "content": prompts.ask_prompt(
+                          now_text=history.stamp(int(time.time()), self.cfg))},
+                     {"role": "user", "content": WARMUP_QUESTION}],
+                    tools=toolsmod.SCHEMAS, temperature=0.0,
+                    max_tokens=WARMUP_MAX_TOKENS)
+            except LLMError as e:
+                if attempt + 1 < WARMUP_ATTEMPTS:
+                    log.debug("prompt cache warm-up: %s; trying again in %ss",
+                              e, WARMUP_RETRY_SECONDS)
+                    self.stop_event.wait(WARMUP_RETRY_SECONDS)
+                    continue
+                log.info("prompt cache not warmed: llama-server is not "
+                         "answering. The agent runs without it; the first "
+                         "question will pay for the cache.")
+                return None
+            except Exception:                        # noqa: BLE001
+                log.exception("prompt cache warm-up failed")
+                return None
+            elapsed = time.monotonic() - started
+            log.info("prompt cache warmed in %.1f s", elapsed)
+            return elapsed
+        return None
 
     def purge(self):
         conn = self.connection()

@@ -191,14 +191,23 @@ def ask_prompt(lang=None, now_text=None):
     what day it is: asked for the voltage at 2:47 am it supplied a date of its
     own invention, three years out, and the reading it wanted was never
     looked up.
+
+    It goes last, and that is about latency rather than about wording. The
+    server caches the prompt by prefix, and this line is the only part that
+    changes between one question and the next - so anything after it has to be
+    reprocessed every single time. Sitting between POLICY and HOW TO ANSWER it
+    put the break 60% of the way in and made the last 3,900 characters
+    uncacheable for good. Last, the cache reaches almost the whole prompt, and
+    the warm-up at startup buys the whole of it rather than most of it.
     """
     p = (f"MISSION\n{MISSION}\n\n"
          f"SYSTEM\n{system_section()}\n\n"
          f"POLICY\n{POLICY}\n\n"
-         + (f"NOW\nIt is {now_text}.\n\n" if now_text else "")
-         + f"HOW TO ANSWER\n{ASK_CONTRACT}")
+         f"HOW TO ANSWER\n{ASK_CONTRACT}")
     if lang == "es":
         p += "\n\nResponde en espanol."
     elif lang == "en":
         p += "\n\nAnswer in English."
+    if now_text:
+        p += f"\n\nNOW\nIt is {now_text}."
     return p

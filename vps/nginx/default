@@ -114,10 +114,12 @@ server {
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        # The dashboard allows the agent 90s to think; this has to outlast it
+        # The dashboard allows the agent 150s to think; this has to outlast it
         # or nginx times the request out first and the owner sees a failure
-        # that did not happen.
-        proxy_read_timeout 120s;
+        # that did not happen. It was 120s against the dashboard's 90s, and
+        # both went up together when a cold prompt cache turned an ordinary
+        # question into an 80-100s one.
+        proxy_read_timeout 170s;
     }
 
     location /setmpptmode {

@@ -3309,7 +3309,15 @@ def config_endpoint():
 AGENT_PLAN_URL = "http://192.168.3.152:8090/plan"
 AGENT_PLAN_TIMEOUT = 3
 AGENT_ASK_URL = "http://192.168.3.152:8090/ask"
-AGENT_ASK_TIMEOUT = 90
+# 90 was not enough. The first model call after a solar-agent restart rebuilds
+# the prompt cache, about 50 s on the KAMRUI's integrated GPU, and a question
+# in that window pays that plus a tool call plus a second turn: 80 to 100 s.
+# The answer arrived and this gave up before it, so the owner was told the
+# agent was not answering when it was. The agent warms the cache at startup
+# now, which should keep an ordinary question near 20 s; this is the margin
+# for the ones that still land in a cold window. nginx on the VPS allows 170 s
+# and has to stay above it.
+AGENT_ASK_TIMEOUT = 150
 
 
 @app.route('/agent/plan')
