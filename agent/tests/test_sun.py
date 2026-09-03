@@ -105,3 +105,81 @@ def test_it_needs_no_network(cfg, monkeypatch):
         AssertionError("sun times must not reach the network")))
     assert sun.times(cfg, "2026-08-29") is not None
     assert sun.next_sunrise(cfg, now=history.day_bounds("2026-08-29", cfg)[0])
+
+
+# --- Windows the owner names -------------------------------------------------
+#
+# "load energy used overnight?" was answered with get_history(hours=24):
+# 25,273 Wh, a correct day reported as a night. The tool could not say
+# "overnight", so the model picked the nearest number it could pass.
+
+def at(cfg, when):
+    tz = history.tzinfo(cfg)
+    return int(datetime(*when, tzinfo=tz).timestamp())
+
+
+def test_overnight_in_the_evening_runs_from_tonights_sunset(cfg):
+    now = at(cfg, (2026, 9, 2, 22, 0))
+    start, end, label = sun.window_span(cfg, "overnight", now)
+    assert clock(start, cfg) == "7:11 pm"       # sunset, 2026-09-02
+    assert history.local_day(start, cfg) == "2026-09-02"
+    assert end == now
+    assert "sunset" in label
+
+
+def test_overnight_in_the_small_hours_reaches_back_to_yesterdays_sunset(cfg):
+    """3 am belongs to the night that began the previous evening."""
+    now = at(cfg, (2026, 9, 3, 3, 0))
+    start, end, _ = sun.window_span(cfg, "overnight", now)
+    assert history.local_day(start, cfg) == "2026-09-02"
+    assert clock(start, cfg) == "7:11 pm"
+    assert end == now
+    assert (end - start) / 3600 == pytest.approx(7.8, abs=0.1)
+
+
+def test_overnight_after_sunrise_is_the_night_that_just_ended(cfg):
+    """Asked at lunchtime, "last night" is last night - not the last 12 hours."""
+    now = at(cfg, (2026, 9, 3, 12, 0))
+    start, end, label = sun.window_span(cfg, "overnight", now)
+    assert clock(start, cfg) == "7:11 pm"
+    assert clock(end, cfg) == "6:24 am"          # sunrise, 2026-09-03
+    assert end < now
+    assert "sunrise" in label
+
+
+def test_the_window_flips_at_sunrise_and_not_before(cfg):
+    sunrise, _ = sun.times(cfg, "2026-09-03")
+    before = sun.window_span(cfg, "overnight", sunrise - 60)
+    after = sun.window_span(cfg, "overnight", sunrise + 60)
+    assert before[0] == after[0]                 # same night either side
+    assert before[1] == sunrise - 60             # still running: ends now
+    assert after[1] == sunrise                   # ended: ends at sunrise
+
+
+def test_today_is_local_midnight_to_now(cfg):
+    now = at(cfg, (2026, 9, 3, 12, 0))
+    start, end, _ = sun.window_span(cfg, "today", now)
+    assert history.clock(start, cfg) == "12:00 am"
+    assert history.local_day(start, cfg) == "2026-09-03"
+    assert end == now
+
+
+def test_yesterday_is_a_whole_local_day(cfg):
+    now = at(cfg, (2026, 9, 3, 12, 0))
+    start, end, _ = sun.window_span(cfg, "yesterday", now)
+    assert history.local_day(start, cfg) == "2026-09-02"
+    assert end - start == 24 * 3600
+    assert end == at(cfg, (2026, 9, 3, 0, 0))
+
+
+def test_the_owners_other_words_for_the_same_night(cfg):
+    now = at(cfg, (2026, 9, 3, 3, 0))
+    for word in ("last night", "since sunset", "OVERNIGHT", " tonight "):
+        assert sun.window_span(cfg, word, now)[0] == \
+            sun.window_span(cfg, "overnight", now)[0], word
+
+
+def test_a_word_it_does_not_know_says_so_rather_than_guessing(cfg):
+    start, end, why = sun.window_span(cfg, "last fortnight", at(cfg, (2026, 9, 3, 12, 0)))
+    assert start is None and end is None
+    assert "overnight" in why and "today" in why

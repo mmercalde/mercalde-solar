@@ -108,6 +108,54 @@ def next_sunrise(cfg, now=None, days=3):
     return None
 
 
+WINDOWS = ("overnight", "today", "yesterday")
+
+
+def window_span(cfg, name, now=None):
+    """(start, end, label) for a window the owner named, or (None, None, why).
+
+    The owner says "overnight". The tool had only a number of trailing hours,
+    so the model reached for 24 and reported a whole day's load - 25,273 Wh -
+    as the night's. A word the owner uses should be a value the tool takes.
+
+    overnight is the most recent sunset to now while the night is still
+    running, and the night that just ended once the sun is up: asked at
+    lunchtime, "last night" is last night and not the twelve hours behind us.
+    """
+    now = int(now or datetime.now().timestamp())
+    name = str(name or "").strip().lower().replace("_", " ")
+    aliases = {"last night": "overnight", "tonight": "overnight",
+               "since sunset": "overnight", "this morning": "today"}
+    name = aliases.get(name, name)
+    if name not in WINDOWS:
+        return None, None, (f"{name!r} is not a window; use one of "
+                            f"{', '.join(WINDOWS)}")
+
+    tz = history.tzinfo(cfg)
+    local_now = datetime.fromtimestamp(now, tz)
+    midnight = int(local_now.replace(hour=0, minute=0, second=0,
+                                     microsecond=0).timestamp())
+    if name == "today":
+        return midnight, now, "today, since local midnight"
+    if name == "yesterday":
+        return midnight - 86400, midnight, "yesterday, midnight to midnight"
+
+    today = history.local_day(now, cfg)
+    yesterday = history.local_day(now - 86400, cfg)
+    t_today, t_yest = times(cfg, today), times(cfg, yesterday)
+    if not t_today or not t_yest:
+        return None, None, "sunrise and sunset are not computable here"
+    sunrise, sunset = t_today
+    if now >= sunset:
+        # The evening: the night is running and has not ended yet.
+        return sunset, now, "overnight, since sunset"
+    if now < sunrise:
+        # The small hours: still last night, which began yesterday evening.
+        return t_yest[1], now, "overnight, since sunset yesterday"
+    # Daylight: the night that just ended, sunset to sunrise.
+    return t_yest[1], sunrise, "last night, sunset to sunrise"
+
+
 def daylight(cfg, ts):
     """(sunrise, sunset) when `ts` falls between them, else None."""
     st = times(cfg, history.local_day(ts, cfg))

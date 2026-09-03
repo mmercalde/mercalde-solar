@@ -27,6 +27,7 @@ import history
 import loadmodel
 import monthly as monthlymod
 import policy as policymod
+import sun as sunmod
 import system as systemmod
 import telegram
 import weather
@@ -270,11 +271,23 @@ SCHEMAS = [
         "parameters": {"type": "object", "properties": {}, "required": []}}},
     {"type": "function", "function": {
         "name": "get_history",
-        "description": "Min/max/average voltage, solar Wh, load Wh and generator "
-                       "minutes over the last N hours.",
+        "description": "Voltage, solar Wh, load Wh, battery Wh out and generator "
+                       "minutes over a span. For overnight / last night / since "
+                       "sunset use window=\"overnight\"; for today or yesterday "
+                       "use window=\"today\" or window=\"yesterday\". hours=N is "
+                       "a trailing window ending now and is NOT overnight. "
+                       "Example: get_history(window=\"overnight\") for last "
+                       "night; get_history(hours=72) for the last three days.",
         "parameters": {"type": "object", "properties": {
-            "hours": {"type": "integer", "description": "How many hours back, 1 to 720."}},
-            "required": ["hours"]}}},
+            "hours": {"type": "integer", "description": "Trailing hours ending "
+                      "now, 1 to 720. Ignored when window is given."},
+            "window": {"type": "string", "enum": ["overnight", "today", "yesterday"],
+                       "description": "A named span. overnight is sunset to now, "
+                       "or the night just ended once the sun is up; today is "
+                       "since local midnight; yesterday is the previous local "
+                       "day. Preferred whenever the question uses one of these "
+                       "words."}},
+            "required": []}}},
     {"type": "function", "function": {
         "name": "get_load_forecast",
         "description": "Expected house consumption in Wh for the next N hours, "
@@ -507,9 +520,34 @@ class Tools:
             "last_update": data.get("lastUpdate"),
         }
 
-    def get_history(self, hours):
-        hours = max(1, min(int(hours), 720))
-        out = history.summary(self.conn, hours)
+    def get_history(self, hours=24, window=None):
+        """A trailing window of `hours`, or a window the owner named.
+
+        `window` wins when both arrive: "overnight" is a span with a sunset
+        at one end, and no number of trailing hours is that span.
+        """
+        if window:
+            since, until, label = sunmod.window_span(self.cfg, window,
+                                                     int(time.time()))
+            if since is None:
+                return {"error": label, "windows": list(sunmod.WINDOWS)}
+            out = history.summary(self.conn, since=since, until=until,
+                                  cfg=self.cfg)
+            out["window"] = window
+            out["window_label"] = label
+            out["window_note"] = (
+                f"This is {label} - state that span in the answer. It is not "
+                f"the last {out['hours']:.0f} hours and must not be called "
+                f"a day's figure.")
+            hours = out["hours"]
+        else:
+            hours = max(1, min(int(hours), 720))
+            out = history.summary(self.conn, hours, cfg=self.cfg)
+            out["window"] = None
+            out["window_note"] = (
+                f"A trailing {hours}-hour window ending now. This is NOT "
+                f"overnight and NOT a calendar day; for those pass "
+                f"window='overnight', 'today' or 'yesterday'.")
         today = history.local_day(int(time.time()), self.cfg)
         row = self.conn.execute("SELECT * FROM daily WHERE day=?", (today,)).fetchone()
         if row:

@@ -131,6 +131,21 @@ Never reach for get_history and offer its minimum, maximum or average as the
 reading at a moment: they are different questions and the answer will be
 wrong. If get_voltage_at reports no sample near enough, say that.
 
+A question about a span the owner named - "overnight", "last night", "since
+sunset", "today", "yesterday" - goes to get_history with window= set to that
+word: window="overnight", window="today", window="yesterday". Do not translate
+the word into a number of hours. hours=24 is the last twenty-four hours, which
+is a whole day and its sunlight; answering "how much did we use overnight"
+with it reported 25,273 Wh for a night that used about half of that. Then say
+which span the answer covers - the result carries window_start and window_end
+for exactly that - so "since sunset yesterday, 12,000 Wh" and never a bare
+number. hours=N stays right for a trailing stretch nobody named: the last
+three days, the last week.
+
+load_wh and battery_out_wh are one flow seen from two sides - what the house
+drew, and what the pack gave up to supply it. Never add them. Quote load_wh
+for what was used.
+
 A question about battery life, health, capacity, wear or ageing - "how long
 will the bank last", "is it degrading", "how many cycles has it done", "am I
 being kind to it" - must be answered with battery_health, and from its fields.

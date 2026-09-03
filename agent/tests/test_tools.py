@@ -650,3 +650,135 @@ def test_recent_actions_is_bounded(conn, cfg):
                               ts=1000 + i)
     assert tools.Tools(conn, cfg).get_recent_actions(500)["count"] == 50
     assert tools.Tools(conn, cfg).get_recent_actions(0)["count"] == 1
+
+
+# --- Named windows -----------------------------------------------------------
+#
+# On 2026-09-02 "load energy used overnight?" was answered with
+# get_history(hours=24): 25,273 Wh, the day's correct load, called a night's.
+# The tool had no way to say "since sunset", so the model passed the nearest
+# number it could. These tests are about the words being arguments.
+
+import sun as sunmod  # noqa: E402
+
+
+def a_day_and_a_night(conn, cfg, day="2026-09-02"):
+    """A day whose sunlit hours draw twice what its dark hours do.
+
+    Load lands 500 Wh in every hour from 07:00 to 18:00 and 250 Wh in each of
+    the rest, so a night and a day are told apart by the number, not by
+    trusting the span the tool reports.
+    """
+    tz = history.tzinfo(cfg)
+    from datetime import datetime as dt
+    for d in (day, "2026-09-03"):
+        base = int(dt.strptime(d, "%Y-%m-%d").replace(tzinfo=tz).timestamp())
+        for h in range(24):
+            ts = base + h * 3600
+            lit = 7 <= h < 18
+            history.put_hourly(conn, ts, "load", None, None, None,
+                               500.0 if lit else 250.0, None, None, 60, "live")
+            history.put_hourly(conn, ts, "solar", None, None,
+                               1200.0 if lit else 0.0, None, None, None,
+                               60, "live")
+            history.put_hourly(conn, ts, "battery", 54.0, None, None,
+                               300.0 if not lit else 0.0, None, None,
+                               60, "live")
+            conn.execute("INSERT INTO samples (ts, battery_v) VALUES (?,?)",
+                         (ts, 57.0 if lit else 53.0))
+    conn.commit()
+
+
+def at(cfg, when):
+    from datetime import datetime as dt
+    return int(dt(*when, tzinfo=history.tzinfo(cfg)).timestamp())
+
+
+def frozen(monkeypatch, ts):
+    monkeypatch.setattr(tools.time, "time", lambda: ts)
+
+
+def test_overnight_is_the_night_and_not_the_last_24_hours(conn, cfg, monkeypatch):
+    """The incident, in one assertion."""
+    a_day_and_a_night(conn, cfg)
+    frozen(monkeypatch, at(cfg, (2026, 9, 3, 6, 0)))
+    t = tools.Tools(conn, cfg)
+    night = t.get_history(window="overnight")
+    day = t.get_history(hours=24)
+    # Sunset 7:11 pm to 6 am: eleven dark hours at 250 Wh, plus the hour the
+    # sun set in. The day behind it includes eleven lit hours at 500.
+    assert night["load_wh"] < 4000
+    assert day["load_wh"] > 7000
+    assert night["hours"] < 12 and day["hours"] == 24
+
+
+def test_a_named_window_states_its_own_span(conn, cfg, monkeypatch):
+    a_day_and_a_night(conn, cfg)
+    frozen(monkeypatch, at(cfg, (2026, 9, 3, 6, 0)))
+    out = tools.Tools(conn, cfg).get_history(window="overnight")
+    assert out["window"] == "overnight"
+    assert "7:11 pm" in out["window_start"]
+    assert "6:00 am" in out["window_end"]
+    assert "sunset" in out["window_label"]
+
+
+def test_trailing_hours_say_they_are_not_overnight(conn, cfg, monkeypatch):
+    a_day_and_a_night(conn, cfg)
+    frozen(monkeypatch, at(cfg, (2026, 9, 3, 6, 0)))
+    out = tools.Tools(conn, cfg).get_history(hours=24)
+    assert out["window"] is None
+    assert "overnight" in out["window_note"]
+    assert out["window_start"] and out["window_end"]
+
+
+def test_today_and_yesterday_are_calendar_days(conn, cfg, monkeypatch):
+    a_day_and_a_night(conn, cfg)
+    frozen(monkeypatch, at(cfg, (2026, 9, 3, 6, 0)))
+    t = tools.Tools(conn, cfg)
+    today = t.get_history(window="today")
+    yesterday = t.get_history(window="yesterday")
+    assert today["hours"] == 6                      # midnight to 6 am
+    assert today["load_wh"] == 1500                 # six dark hours at 250
+    assert yesterday["hours"] == 24
+    assert yesterday["load_wh"] == 8750             # 11*500 + 13*250
+    # Yesterday stops at yesterday: today's hours must not leak in.
+    assert yesterday["solar_wh"] == 13200
+
+
+def test_the_default_is_still_a_trailing_day(conn, cfg, monkeypatch):
+    a_day_and_a_night(conn, cfg)
+    frozen(monkeypatch, at(cfg, (2026, 9, 3, 6, 0)))
+    t = tools.Tools(conn, cfg)
+    assert t.get_history(24) == t.get_history()
+    assert t.get_history(hours=1000)["hours"] == 720
+    assert t.get_history(hours=0)["hours"] == 1
+
+
+def test_load_and_battery_out_are_never_offered_as_two_flows(conn, cfg, monkeypatch):
+    """26,356 Wh "used" was 25,273 of load plus what the pack gave up."""
+    a_day_and_a_night(conn, cfg)
+    frozen(monkeypatch, at(cfg, (2026, 9, 3, 6, 0)))
+    out = tools.Tools(conn, cfg).get_history(window="overnight")
+    assert out["battery_out_wh"] > 0 and out["load_wh"] > 0
+    assert "never add them" in out["load_vs_battery_note"]
+    assert "load_wh" in out["load_vs_battery_note"]
+
+
+def test_a_window_it_does_not_know_names_the_ones_it_does(conn, cfg, monkeypatch):
+    frozen(monkeypatch, at(cfg, (2026, 9, 3, 6, 0)))
+    out = tools.Tools(conn, cfg).get_history(window="last fortnight")
+    assert "error" in out
+    assert out["windows"] == list(sunmod.WINDOWS)
+
+
+def test_the_window_reaches_the_model_through_call(conn, cfg, monkeypatch):
+    a_day_and_a_night(conn, cfg)
+    frozen(monkeypatch, at(cfg, (2026, 9, 3, 6, 0)))
+    out = json.loads(tools.Tools(conn, cfg).call(
+        "get_history", {"window": "overnight"}))
+    assert out["window"] == "overnight"
+    schema = [s for s in tools.SCHEMAS
+              if s["function"]["name"] == "get_history"][0]["function"]
+    assert schema["parameters"]["properties"]["window"]["enum"] == \
+        list(sunmod.WINDOWS)
+    assert "overnight" in schema["description"]

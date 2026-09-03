@@ -645,19 +645,41 @@ def latest_sample(conn, at=None):
                         "ORDER BY ts DESC LIMIT 1", (int(at),)).fetchone()
 
 
-def summary(conn, hours, now=None):
-    """min/max/avg V, solar Wh, load Wh and generator minutes over the last N hours."""
+def summary(conn, hours=None, now=None, since=None, until=None,
+            cfg=None):
+    """Voltage, energy and generator minutes over a span.
+
+    `hours` is a trailing window ending now. `since`/`until` is an explicit
+    one, which is what a named window - overnight, today, yesterday - needs:
+    "since sunset" is not a number of hours and asking the model to turn it
+    into one is how 25,273 Wh of a whole day got reported as an overnight
+    figure.
+    """
     now = int(now or time.time())
-    lo = now - hours * 3600
+    if since is not None:
+        lo = int(since)
+        now = int(until) if until is not None else now
+        hours = round((now - lo) / 3600.0, 2)
+    else:
+        lo = now - (hours or 24) * 3600
     v = conn.execute(
         "SELECT MIN(battery_v) minv, MAX(battery_v) maxv, AVG(battery_v) avgv, "
-        "MIN(batt_soc) minsoc, MAX(batt_soc) maxsoc, COUNT(*) n "
-        "FROM samples WHERE ts >= ?", (lo,)).fetchone()
+        "COUNT(*) n FROM samples WHERE ts >= ? AND ts <= ?",
+        (lo, now)).fetchone()
+    # A trailing window ends mid-hour and wants the hour it is standing in;
+    # a named one that ends on the hour - yesterday, at midnight - must not
+    # reach past its own end into the next day.
+    hi = now if now == hour_floor(now) else hour_floor(now) + 3600
     e = conn.execute(
         "SELECT "
-        " (SELECT SUM(wh_in)  FROM hourly WHERE device='solar' AND hour_ts>=?) solar,"
-        " (SELECT SUM(wh_out) FROM hourly WHERE device='load'  AND hour_ts>=?) load",
-        (hour_floor(lo), hour_floor(lo))).fetchone()
+        " (SELECT SUM(wh_in)  FROM hourly WHERE device='solar'"
+        "  AND hour_ts>=? AND hour_ts<?) solar,"
+        " (SELECT SUM(wh_out) FROM hourly WHERE device='load'"
+        "  AND hour_ts>=? AND hour_ts<?) load,"
+        " (SELECT SUM(wh_out) FROM hourly WHERE device='battery'"
+        "  AND hour_ts>=? AND hour_ts<?) batt_out",
+        (hour_floor(lo), hi, hour_floor(lo), hi,
+         hour_floor(lo), hi)).fetchone()
     gen = {}
     for g in GENS:
         rows = conn.execute(
@@ -665,14 +687,27 @@ def summary(conn, hours, now=None):
             "WHERE gen=? AND COALESCE(stop_ts, start_ts) >= ?", (g, lo)).fetchall()
         gen[g] = round(sum(max(0, min(r["stop_ts"], now) - max(r["start_ts"], lo))
                            for r in rows) / 60.0, 1)
-    return {
+    out = {
         "hours": hours,
+        "window_start": stamp(lo, cfg) if cfg else None,
+        "window_end": stamp(now, cfg) if cfg else None,
         "samples": v["n"],
         "min_v": _r(v["minv"], 2), "max_v": _r(v["maxv"], 2), "avg_v": _r(v["avgv"], 2),
-        "min_soc": v["minsoc"], "max_soc": v["maxsoc"],
-        "solar_wh": _r(e["solar"], 0), "load_wh": _r(e["load"], 0),
+        "solar_wh": _i(e["solar"]), "load_wh": _i(e["load"]),
+        "battery_out_wh": _i(e["batt_out"]),
         "gen_minutes": gen,
     }
+    # The house's watt-hours and the pack's are the same energy counted on
+    # two sides of the inverters, and on 2026-09-02 they were added: 25,273
+    # of load plus what the pack gave up came back as 26,356 Wh "used". They
+    # are both worth having and neither is a component of the other, so the
+    # result says so where they sit.
+    if out["load_wh"] is not None and out["battery_out_wh"] is not None:
+        out["load_vs_battery_note"] = (
+            "load_wh is what the house drew and battery_out_wh is what the "
+            "pack gave up to supply it. Overlapping views of one flow, not "
+            "two flows: never add them. Quote load_wh for what was used.")
+    return out
 
 
 def gen_runs(conn, days, now=None, include_exercise=False):
@@ -822,6 +857,12 @@ def recent_actions(conn, limit=5):
 
 def _r(v, places):
     return None if v is None else round(v, places)
+
+
+def _i(v):
+    """Whole units. A watt-hour figure with a .0 on it invites a decimal in
+    the answer, and nobody asked how many tenths of a watt-hour they used."""
+    return None if v is None else int(round(v))
 
 
 # --- sampler entry point ----------------------------------------------------

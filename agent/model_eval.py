@@ -45,6 +45,7 @@ import llm as llmmod
 import loadmodel
 import policy as policymod
 import prompts
+import sun as sunmod
 import tools as toolsmod
 
 log = logging.getLogger(__name__)
@@ -172,9 +173,20 @@ class EvalTools(toolsmod.Tools):
             "as_of": history.stamp(self.at, self.cfg),
         }
 
-    def get_history(self, hours):
+    def get_history(self, hours=24, window=None):
+        # Same shape as the live tool, anchored at self.at: a replay that
+        # cannot say "overnight" cannot replay the question that needed it.
+        if window:
+            since, until, label = sunmod.window_span(self.cfg, window, self.at)
+            if since is None:
+                return {"error": label, "windows": list(sunmod.WINDOWS)}
+            out = history.summary(self.conn, since=since, until=until,
+                                  now=self.at, cfg=self.cfg)
+            out["window"] = window
+            out["window_label"] = label
+            return out
         hours = max(1, min(int(hours), 720))
-        return history.summary(self.conn, hours, now=self.at)
+        return history.summary(self.conn, hours, now=self.at, cfg=self.cfg)
 
     def get_load_forecast(self, hours):
         hours = max(1, min(int(hours), 48))

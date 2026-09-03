@@ -126,7 +126,7 @@ Standard OpenAI tool schemas in `agent/tools.py`; each maps to a Python function
 
 Read (always allowed):
 - `get_status()` — condensed `/data` + `/config`
-- `get_history(hours)` — min/max/avg V, solar Wh, load Wh, gen minutes
+- `get_history(hours | window)` — min/max/avg V, solar Wh, load Wh, battery Wh out, gen minutes
 - `get_load_forecast(hours)` — expected Wh from the load model for the next N hours, and projected time to reach 52.0 V
 - `get_gen_runtime(days)` — per-gen totals and run list with charge rates
 - `get_weather()` — next 48 h summary
@@ -135,6 +135,12 @@ Read (always allowed):
 
 Write (through guard):
 - `set_gen_thresholds(mep_start, mep_stop, kub_start, kub_stop, reason)`
+
+Every time-word the owner uses — "overnight", "this month", "December" — is a
+literal argument value the tool takes, never something the model has to
+translate into a number. A model asked for "overnight" with only `hours=` will
+pass 24 and report a day as a night; asked for December with only `months=` it
+will pass 1 and report September. Both happened. The word is the argument.
 
 ## 7. Guard — hard rules, not model-editable
 
