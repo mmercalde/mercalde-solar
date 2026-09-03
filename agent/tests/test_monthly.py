@@ -55,7 +55,7 @@ def add_run(conn, gen, start_ts, minutes, fuel_gal, kind="auto"):
 
 def test_a_month_sums_its_days(conn, cfg):
     a_month(conn, cfg, "2026-04", days=30, solar_kwh=30.0, load_kwh=25.0)
-    m = monthly.monthly_summary(conn, cfg)["months"][0]
+    m = monthly.monthly_summary(conn, cfg, months=999, detail=True)["months"][0]
     assert m["month"] == "2026-04" and m["days_with_data"] == 30
     assert m["solar_kwh"] == pytest.approx(900.0)
     assert m["load_kwh"] == pytest.approx(750.0)
@@ -65,14 +65,14 @@ def test_a_month_sums_its_days(conn, cfg):
 def test_net_is_solar_less_load_and_goes_negative(conn, cfg):
     """A December that lives off the generator and the battery."""
     a_month(conn, cfg, "2025-12", days=31, solar_kwh=17.0, load_kwh=35.0)
-    m = monthly.monthly_summary(conn, cfg)["months"][0]
+    m = monthly.monthly_summary(conn, cfg, months=999, detail=True)["months"][0]
     assert m["net_kwh"] == pytest.approx(-558.0)
 
 
 def test_the_voltage_extremes_are_the_month_s(conn, cfg):
     a_month(conn, cfg, "2026-04", days=10, min_v=53.0, peak_v=57.0)
     a_day(conn, cfg, "2026-04-11", min_v=51.4, peak_v=60.2)
-    m = monthly.monthly_summary(conn, cfg)["months"][0]
+    m = monthly.monthly_summary(conn, cfg, months=999, detail=True)["months"][0]
     assert m["min_v"] == 51.4 and m["max_v"] == 60.2
 
 
@@ -80,7 +80,7 @@ def test_the_best_and_worst_solar_day_are_named_with_their_kwh(conn, cfg):
     a_month(conn, cfg, "2026-04", days=28, solar_kwh=30.0)
     a_day(conn, cfg, "2026-04-29", solar_kwh=45.0)
     a_day(conn, cfg, "2026-04-30", solar_kwh=12.0)
-    m = monthly.monthly_summary(conn, cfg)["months"][0]
+    m = monthly.monthly_summary(conn, cfg, months=999, detail=True)["months"][0]
     assert m["best_solar_day"] == {"date": "2026-04-29", "kwh": 45.0}
     assert m["worst_solar_day"] == {"date": "2026-04-30", "kwh": 12.0}
 
@@ -92,7 +92,7 @@ def test_a_short_day_cannot_be_the_worst_solar_day(conn, cfg):
     a_month(conn, cfg, "2026-08", days=30, solar_kwh=30.0)
     a_day(conn, cfg, "2026-08-24", solar_kwh=14.0)          # genuinely dark
     a_day(conn, cfg, "2026-08-31", solar_kwh=0.6, hours=6)  # a stub of a day
-    out = monthly.monthly_summary(conn, cfg)
+    out = monthly.monthly_summary(conn, cfg, months=999, detail=True)
     m = out["months"][0]
     assert m["worst_solar_day"] == {"date": "2026-08-24", "kwh": 14.0}
     assert "2026-08-31" in out["partial_days_excluded_from_day_ranking"]
@@ -104,7 +104,7 @@ def test_generator_hours_and_gallons_come_from_the_runs(conn, cfg):
     add_run(conn, "kubota", ts_at(cfg, "2026-08-10", 2), 90, 0.48)
     add_run(conn, "kubota", ts_at(cfg, "2026-08-20", 2), 60, 0.32)
     add_run(conn, "mep", ts_at(cfg, "2026-08-15", 2), 120, 1.98)
-    m = monthly.monthly_summary(conn, cfg)["months"][0]
+    m = monthly.monthly_summary(conn, cfg, months=999, detail=True)["months"][0]
     assert m["gen_hours_recorded"] == {"mep": 2.0, "kubota": 2.5}
     assert m["gen_hours"] == pytest.approx(4.5)
     assert m["fuel_gal_modelled"]["kubota"] == pytest.approx(0.80)
@@ -116,7 +116,7 @@ def test_generator_hours_and_gallons_come_from_the_runs(conn, cfg):
 
 def test_a_month_with_no_runs_reports_nought_not_nothing(conn, cfg):
     a_month(conn, cfg, "2026-04", days=30)
-    m = monthly.monthly_summary(conn, cfg)["months"][0]
+    m = monthly.monthly_summary(conn, cfg, months=999, detail=True)["months"][0]
     assert m["gen_hours_recorded"] == {"mep": 0.0, "kubota": 0.0}
     assert m["gen_hours"] == 0.0
     assert m["fuel_gal_modelled"] == {"mep": 0.0, "kubota": 0.0}
@@ -130,7 +130,7 @@ def test_the_exercise_runs_are_left_out(conn, cfg):
     a_month(conn, cfg, "2026-08", days=31)
     add_run(conn, "kubota", ts_at(cfg, "2026-08-10", 9), 30, 0.16,
             kind="exercise")
-    m = monthly.monthly_summary(conn, cfg)["months"][0]
+    m = monthly.monthly_summary(conn, cfg, months=999, detail=True)["months"][0]
     assert m["gen_hours_recorded"]["kubota"] == 0.0
     assert m["gen_runs"]["kubota"] == 0
 
@@ -139,7 +139,7 @@ def test_a_run_belongs_to_the_month_it_began_in(conn, cfg):
     a_month(conn, cfg, "2026-07", days=31)
     a_month(conn, cfg, "2026-08", days=31)
     add_run(conn, "kubota", ts_at(cfg, "2026-07-31", 23), 120, 0.64)
-    out = {m["month"]: m for m in monthly.monthly_summary(conn, cfg)["months"]}
+    out = {m["month"]: m for m in monthly.monthly_summary(conn, cfg, months=999, detail=True)["months"]}
     assert out["2026-07"]["gen_hours_recorded"]["kubota"] == 2.0
     assert out["2026-08"]["gen_hours_recorded"]["kubota"] == 0.0
 
@@ -165,7 +165,7 @@ def a_year(conn, cfg):
 
 
 def test_the_superlatives_name_a_month_and_a_value(a_year, cfg):
-    s = monthly.monthly_summary(a_year, cfg)["superlatives"]
+    s = monthly.monthly_summary(a_year, cfg, months=999)["superlatives"]
     assert s["worst_solar_month"]["month"] == "2025-12"
     assert s["worst_solar_month"]["value"] == pytest.approx(527.0)
     assert s["best_solar_month"]["month"] == "2026-04"
@@ -177,7 +177,7 @@ def test_the_superlatives_name_a_month_and_a_value(a_year, cfg):
 
 
 def test_every_superlative_carries_its_units(a_year, cfg):
-    s = monthly.monthly_summary(a_year, cfg)["superlatives"]
+    s = monthly.monthly_summary(a_year, cfg, months=999)["superlatives"]
     for key in ("worst_solar_month", "best_solar_month", "highest_load_month",
                 "most_fuel_month"):
         assert s[key]["units"], key
@@ -189,11 +189,12 @@ def test_a_month_too_short_to_rank_cannot_win(conn, cfg):
     a_month(conn, cfg, "2026-04", days=30, solar_kwh=38.0)
     a_month(conn, cfg, "2026-08", days=31, solar_kwh=30.0)
     a_month(conn, cfg, "2026-09", days=2, solar_kwh=37.0)
-    s = monthly.monthly_summary(conn, cfg)["superlatives"]
+    s = monthly.monthly_summary(conn, cfg, months=999)["superlatives"]
     assert s["worst_solar_month"]["month"] == "2026-08"
     assert s["months_ranked"] == 2
-    assert s["months_excluded"] == [{"month": "2026-09", "days_with_data": 2}]
-    assert "too short to rank" in s["basis"]
+    assert s["months_excluded"] == ["2026-09 (2 days)"]
+    # Each superlative carries how many months it ranked over.
+    assert ">=20 days each" in s["worst_solar_month"]["basis"]
 
 
 def test_the_short_month_is_still_in_the_series(conn, cfg):
@@ -201,22 +202,22 @@ def test_the_short_month_is_still_in_the_series(conn, cfg):
     about this month."""
     a_month(conn, cfg, "2026-08", days=31)
     a_month(conn, cfg, "2026-09", days=2)
-    out = monthly.monthly_summary(conn, cfg)
+    out = monthly.monthly_summary(conn, cfg, months=999, detail=True)
     assert [m["month"] for m in out["months"]] == ["2026-08", "2026-09"]
     assert out["last_month"] == "2026-09"
 
 
 def test_with_no_generator_month_the_fuel_superlative_says_so(conn, cfg):
     a_month(conn, cfg, "2026-04", days=30)
-    s = monthly.monthly_summary(conn, cfg)["superlatives"]
+    s = monthly.monthly_summary(conn, cfg, months=999)["superlatives"]
     assert s["most_fuel_month"]["month"] is None
     assert s["most_fuel_month"]["value"] == 0.0
-    assert "no generator activity" in s["most_fuel_month"]["note"]
+    assert "no generator activity" in s["most_fuel_month"]["basis"]
 
 
 def test_with_no_month_long_enough_nothing_is_ranked(conn, cfg):
     a_month(conn, cfg, "2026-09", days=2)
-    s = monthly.monthly_summary(conn, cfg)["superlatives"]
+    s = monthly.monthly_summary(conn, cfg, months=999)["superlatives"]
     assert s["months_ranked"] == 0
     assert "worst_solar_month" not in s
     assert "20 days" in s["note"]
@@ -237,13 +238,15 @@ def test_the_tool_returns_the_summary(a_year, cfg):
     assert len(out["months"]) == 4
 
 
-def test_the_tool_is_registered_and_takes_no_arguments():
+def test_the_tool_is_registered_with_its_two_arguments():
     import tools as toolsmod
     assert "get_monthly_summary" in toolsmod.READ_TOOLS
     schema = next(s for s in toolsmod.SCHEMAS
                   if s["function"]["name"] == "get_monthly_summary")
-    assert schema["function"]["parameters"]["properties"] == {}
+    props = schema["function"]["parameters"]["properties"]
+    assert set(props) == {"months", "detail"}
     assert "superlative" in schema["function"]["description"]
+    assert "detail only when" in schema["function"]["description"]
 
 
 def test_the_ask_prompt_sends_a_which_month_question_to_the_tool():
@@ -287,7 +290,7 @@ def test_the_scraped_counter_carries_the_months_before_the_agent(conn, cfg):
     for d in range(1, 6):
         for h in (2, 3, 4):
             gen_hour(conn, cfg, f"2025-12-{d:02d}", h, 4.5)
-    m = monthly.monthly_summary(conn, cfg)["months"][0]
+    m = monthly.monthly_summary(conn, cfg, months=999, detail=True)["months"][0]
     assert m["gen_runs"] == {"mep": 0, "kubota": 0}, "no runs recorded then"
     assert m["gen_hours_recorded"] == {"mep": 0.0, "kubota": 0.0}
     assert m["gen_kwh_metered"] == pytest.approx(67.5)
@@ -308,7 +311,7 @@ def test_metered_energy_is_priced_at_full_load_gallons_per_kwh(conn, cfg):
     a_month(conn, cfg, "2025-12", days=31)
     for d in range(1, 11):
         gen_hour(conn, cfg, f"2025-12-{d:02d}", 3, 10.5)
-    m = monthly.monthly_summary(conn, cfg)["months"][0]
+    m = monthly.monthly_summary(conn, cfg, months=999, detail=True)["months"][0]
     assert m["gen_kwh_metered"] == pytest.approx(105.0)
     assert m["fuel_gal_estimated"] == pytest.approx(105.0 / mean, rel=1e-3)
     assert m["fuel_gal_total"] == m["fuel_gal_estimated"]
@@ -322,7 +325,7 @@ def test_the_hours_route_is_reported_and_runs_high(conn, cfg):
     a_month(conn, cfg, "2025-12", days=31)
     for d in range(1, 11):
         gen_hour(conn, cfg, f"2025-12-{d:02d}", 3, 4.0)   # a partial hour
-    m = monthly.monthly_summary(conn, cfg)["months"][0]
+    m = monthly.monthly_summary(conn, cfg, months=999, detail=True)["months"][0]
     assert m["fuel_gal_estimated_from_hours"] > m["fuel_gal_estimated"]
     assert m["fuel_gal_total"] == m["fuel_gal_estimated"]
 
@@ -333,7 +336,7 @@ def test_a_month_with_both_sources_adds_them(conn, cfg):
     a_month(conn, cfg, "2026-08", days=31)
     gen_hour(conn, cfg, "2026-08-10", 3, 21.0)          # scraped era
     add_run(conn, "kubota", ts_at(cfg, "2026-08-29", 2), 90, 0.48)
-    m = monthly.monthly_summary(conn, cfg)["months"][0]
+    m = monthly.monthly_summary(conn, cfg, months=999, detail=True)["months"][0]
     assert m["fuel_gal_estimated"] > 0 and m["fuel_gal_modelled"]["kubota"] == 0.48
     assert m["fuel_gal_total"] == pytest.approx(
         m["fuel_gal_estimated"] + 0.48, abs=0.01)
@@ -349,14 +352,14 @@ def test_the_implied_generator_energy_is_what_the_month_had_to_import(conn, cfg)
     somewhere else."""
     a_month(conn, cfg, "2025-12", days=31, solar_kwh=17.0, load_kwh=35.0)
     batt_hour(conn, cfg, "2025-12-15", 3, kwh_in=100.0, kwh_out=90.0)
-    m = monthly.monthly_summary(conn, cfg)["months"][0]
+    m = monthly.monthly_summary(conn, cfg, months=999, detail=True)["months"][0]
     assert m["battery_net_kwh"] == pytest.approx(10.0)
     assert m["gen_kwh_implied"] == pytest.approx(558.0 - 10.0, abs=0.5)
 
 
 def test_a_month_in_surplus_implies_no_import(conn, cfg):
     a_month(conn, cfg, "2026-04", days=30, solar_kwh=38.0, load_kwh=35.0)
-    m = monthly.monthly_summary(conn, cfg)["months"][0]
+    m = monthly.monthly_summary(conn, cfg, months=999, detail=True)["months"][0]
     assert m["gen_kwh_implied"] == 0.0
 
 
@@ -364,7 +367,7 @@ def test_a_deficit_with_no_generator_hours_is_visibly_inconsistent(conn, cfg):
     """The whole point of the field. The record being incomplete must look
     like the record being incomplete, not like a house that ran on nothing."""
     a_month(conn, cfg, "2025-12", days=31, solar_kwh=17.0, load_kwh=35.0)
-    m = monthly.monthly_summary(conn, cfg)["months"][0]
+    m = monthly.monthly_summary(conn, cfg, months=999, detail=True)["months"][0]
     assert m["gen_kwh_implied"] > 500
     assert m["gen_hours"] == 0.0 and m["gen_kwh_metered"] == 0.0
     assert m["fuel_basis"] == "no generator activity"
@@ -381,7 +384,129 @@ def test_most_fuel_ranks_on_the_complete_series_not_the_runs(conn, cfg):
         for h in (2, 3, 4):
             gen_hour(conn, cfg, f"2025-12-{d:02d}", h, 15.0)
     add_run(conn, "kubota", ts_at(cfg, "2026-08-29", 2), 90, 0.48)
-    s = monthly.monthly_summary(conn, cfg)["superlatives"]
+    s = monthly.monthly_summary(conn, cfg, months=999)["superlatives"]
     assert s["most_fuel_month"]["month"] == "2025-12"
     assert s["most_fuel_month"]["value"] > 50
-    assert "not on the runs alone" in s["most_fuel_month"]["basis"]
+    assert "not the runs alone" in s["most_fuel_month"]["basis"]
+
+
+# --- what it costs to read -----------------------------------------------------
+#
+# The full form ran to 17,630 characters over seventeen months, about 4,400
+# tokens, and on the KAMRUI's integrated GPU an answer carrying it went past
+# the 180 s model timeout: the owner asked which month was worst and got "the
+# agent is not answering". The payload is the thing that has to be small.
+
+@pytest.fixture
+def seventeen_months(conn, cfg):
+    """A year and a half, the shape of the real record."""
+    for i in range(17):
+        year, month = divmod(4 + i, 12)
+        year, month = 2025 + year, month + 1
+        a_month(conn, cfg, f"{year}-{month:02d}", days=28,
+                solar_kwh=20.0 + i, load_kwh=30.0)
+        gen_hour(conn, cfg, f"{year}-{month:02d}-05", 3, 10.0 + i)
+    return conn
+
+
+def test_the_default_payload_is_small_enough_to_read(seventeen_months, cfg):
+    """Under 2,500 characters over seventeen months. The full form is seven
+    times that and is what timed out."""
+    import json
+    import tools as toolsmod
+    out = toolsmod.Tools(seventeen_months, cfg).get_monthly_summary()
+    payload = json.dumps(out, default=str)
+    assert len(payload) < 2500, f"{len(payload)} chars"
+    assert out["months_shown"] == 12 and out["months_on_record"] == 17
+
+
+def test_the_default_still_answers_the_question_it_is_for(seventeen_months, cfg):
+    """Small is only useful if the superlatives survive, and they rank the
+    whole record rather than the twelve months printed."""
+    import tools as toolsmod
+    out = toolsmod.Tools(seventeen_months, cfg).get_monthly_summary()
+    s = out["superlatives"]
+    assert s["worst_solar_month"]["month"] == "2025-05"   # the first, dimmest
+    assert s["best_solar_month"]["month"] == "2026-09"
+    assert s["months_ranked"] == 17, "ranked over all of them, not the table"
+    for key in ("worst_solar_month", "best_solar_month", "highest_load_month",
+                "lowest_load_month", "most_fuel_month"):
+        assert set(s[key]) >= {"month", "value", "basis"}, key
+
+
+def test_the_default_table_is_rows_under_named_columns(seventeen_months, cfg):
+    import tools as toolsmod
+    out = toolsmod.Tools(seventeen_months, cfg).get_monthly_summary()
+    assert out["columns"] == ["month", "solar_kwh", "load_kwh", "gen_kwh",
+                              "fuel_gal", "min_v", "max_v"]
+    row = out["months"][0]
+    assert len(row) == len(out["columns"])
+    assert isinstance(row[1], int) and isinstance(row[4], int)
+    assert "basis" in out and len(out["basis"]) < 400
+
+
+def test_the_default_carries_no_day_names_or_per_generator_dicts(
+        seventeen_months, cfg):
+    import json
+    import tools as toolsmod
+    payload = json.dumps(toolsmod.Tools(seventeen_months,
+                                        cfg).get_monthly_summary())
+    for word in ("best_solar_day", "worst_solar_day", "gen_hours_recorded",
+                 "fuel_gal_modelled", "fuel_basis", "gen_hours_basis"):
+        assert word not in payload, word
+
+
+def test_detail_gives_back_everything(seventeen_months, cfg):
+    """The day fields are still there for a question about one month."""
+    import tools as toolsmod
+    out = toolsmod.Tools(seventeen_months, cfg).get_monthly_summary(
+        months=999, detail=True)
+    assert out["months_shown"] == 17
+    m = out["months"][0]
+    assert m["best_solar_day"]["date"] and m["worst_solar_day"]["date"]
+    assert set(m["gen_hours_recorded"]) == set(history.GENS)
+    assert set(m["fuel_gal_modelled"]) == set(history.GENS)
+    assert m["fuel_basis"] and m["gen_hours_basis"]
+
+
+def test_asking_for_fewer_months_shortens_the_table_only(seventeen_months, cfg):
+    import tools as toolsmod
+    out = toolsmod.Tools(seventeen_months, cfg).get_monthly_summary(months=3)
+    assert out["months_shown"] == 3
+    assert out["superlatives"]["months_ranked"] == 17
+    assert out["months"][-1][0] == "2026-09", "the most recent months"
+
+
+def test_a_tool_result_is_journaled_with_its_size(seventeen_months, cfg, caplog):
+    """Tool calls were not in the journal at all, and the size is the thing
+    that broke."""
+    import tools as toolsmod
+    t = toolsmod.Tools(seventeen_months, cfg)
+    with caplog.at_level("INFO", logger="tools"):
+        t.call("get_monthly_summary", {})
+    line = [r.getMessage() for r in caplog.records
+            if "get_monthly_summary" in r.getMessage()]
+    assert len(line) == 1
+    assert "chars" in line[0]
+
+
+def test_an_oversized_result_is_warned_about(seventeen_months, cfg, caplog,
+                                             monkeypatch):
+    import tools as toolsmod
+    monkeypatch.setattr(toolsmod, "TOOL_RESULT_WARN_CHARS", 100)
+    t = toolsmod.Tools(seventeen_months, cfg)
+    with caplog.at_level("INFO", logger="tools"):
+        t.call("get_monthly_summary", {})
+    rec = [r for r in caplog.records if "get_monthly_summary" in r.getMessage()]
+    assert len(rec) == 1 and rec[0].levelname == "WARNING"
+    assert "over the 100" in rec[0].getMessage()
+
+
+def test_the_arguments_are_journaled_too(seventeen_months, cfg, caplog):
+    import tools as toolsmod
+    t = toolsmod.Tools(seventeen_months, cfg)
+    with caplog.at_level("INFO", logger="tools"):
+        t.call("get_monthly_summary", {"months": 3, "detail": False})
+    line = next(r.getMessage() for r in caplog.records
+                if "get_monthly_summary" in r.getMessage())
+    assert "detail=False" in line and "months=3" in line

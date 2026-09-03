@@ -410,6 +410,22 @@ less what the pack gave up — is the check that makes a gap look like a gap: a
 month deep in deficit beside no generator hours is then visibly inconsistent
 rather than quietly wrong.
 
+**The default answer is small.** The full form ran to 17,630 characters over
+seventeen months — about 4,400 tokens — and on the KAMRUI's integrated GPU an
+answer carrying it went past the 180 s model timeout: the owner asked which
+month was worst and got "the agent is not answering". So the default is the
+superlatives plus a twelve-row table of integers under a `columns` header,
+**1,837 characters**, and `detail=true` brings back the day names,
+per-generator dicts and provenance sentences for a question about one
+particular month. The superlatives rank the whole record whatever the table
+is, because an answer that depended on how much of it was printed would be a
+different bug.
+
+Every tool result is now journaled at INFO with its size —
+`tool get_monthly_summary() -> 1837 chars` — and warned above 6,000. Tool
+calls were not in the journal at all before, so a tick could only be
+reconstructed from what the model said afterwards.
+
 Two filters, both because a partial period is not a bad one. A day can only
 be the best or worst if it has 20 of its 24 hourly rows: without that the
 worst solar day on this record is 2026-08-28 at 0.0 kWh — the afternoon live

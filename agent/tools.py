@@ -305,8 +305,23 @@ SCHEMAS = [
                        "for any question about which month was best, worst, "
                        "highest or used the most fuel, and read the answer "
                        "out of the superlative field. Do not rank the months "
-                       "yourself.",
-        "parameters": {"type": "object", "properties": {}}}},
+                       "yourself. By default it returns the superlatives and "
+                       "a compact table of recent months, which is what those "
+                       "questions need; ask for detail only when the question "
+                       "is about one particular month's days.",
+        "parameters": {"type": "object", "properties": {
+            "months": {"type": "integer",
+                       "description": "How many recent months to table. "
+                                      "Default 12; a large number gives all "
+                                      "of them. The superlatives always rank "
+                                      "the whole record whatever this is."},
+            "detail": {"type": "boolean",
+                       "description": "Default false. True adds each month's "
+                                      "best and worst solar day, "
+                                      "per-generator hours and gallons, and "
+                                      "its provenance notes - several times "
+                                      "the size. Use it only when asked "
+                                      "about a specific month's days."}}}}},
     {"type": "function", "function": {
         "name": "battery_health",
         "description": "Battery longevity and ageing, all computed: amp-hours "
@@ -400,6 +415,11 @@ READ_TOOLS = {"get_status", "get_history", "get_load_forecast",
               "get_system_specs", "get_mppt_detail", "get_battery_detail",
               "get_guard_state", "get_recent_actions", "send_telegram"}
 WRITE_TOOLS = {"set_gen_thresholds"}
+
+# What a tool result may cost before it is worth saying so out loud. Roughly
+# 1,500 tokens: enough for any answer here, and well inside what the KAMRUI
+# can read and reason over inside the model timeout.
+TOOL_RESULT_WARN_CHARS = 6000
 
 
 class Tools:
@@ -579,9 +599,12 @@ class Tools:
         return (f"{this_month} so far: {clause('mtd')}. "
                 f"{last_month}: {clause('last_month')}.")
 
-    def get_monthly_summary(self):
+    def get_monthly_summary(self, months=monthlymod.COMPACT_MONTHS,
+                            detail=False):
         """Every calendar month, and which months stand out. All in Python."""
-        return monthlymod.monthly_summary(self.conn, self.cfg)
+        return monthlymod.monthly_summary(self.conn, self.cfg,
+                                          months=int(months),
+                                          detail=bool(detail))
 
     def battery_health(self):
         """Longevity, from what the pack has done. All computed in Python."""
@@ -890,7 +913,17 @@ class Tools:
     # --- dispatch -----------------------------------------------------------
 
     def call(self, name, args):
-        """Run one tool. Returns a JSON string for the model."""
+        """Run one tool. Returns a JSON string for the model.
+
+        Every call is journaled with the size of what it returned. Two
+        reasons. Tool calls were not in the journal at all, so a tick could
+        only be reconstructed from what the model said afterwards. And the
+        size is the thing that broke: get_monthly_summary answered with
+        17,630 characters, about 4,400 tokens, and on the KAMRUI's integrated
+        GPU the answer carrying it went past the 180 s model timeout and the
+        owner got "the agent is not answering". A payload has a cost and the
+        cost belongs in the log where it can be seen growing.
+        """
         fn = getattr(self, name, None)
         if fn is None or name not in READ_TOOLS | WRITE_TOOLS:
             return json.dumps({"error": f"no such tool: {name}"})
@@ -904,4 +937,16 @@ class Tools:
             log.exception("tool %s failed", name)
             result = {"error": f"{name} failed: {e}"}
         self.calls.append((name, args, result))
-        return json.dumps(result, default=str)
+        payload = json.dumps(result, default=str)
+        self._journal(name, args, len(payload))
+        return payload
+
+    @staticmethod
+    def _journal(name, args, size):
+        shown = ", ".join(f"{k}={v!r}" for k, v in sorted((args or {}).items()))
+        if size > TOOL_RESULT_WARN_CHARS:
+            log.warning("tool %s(%s) -> %d chars, over the %d a slow model "
+                        "should be asked to read", name, shown, size,
+                        TOOL_RESULT_WARN_CHARS)
+        else:
+            log.info("tool %s(%s) -> %d chars", name, shown, size)

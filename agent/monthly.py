@@ -137,8 +137,28 @@ def _runs_by_month(conn, cfg):
     return out
 
 
-def monthly_summary(conn, cfg, now=None):
-    """One row per calendar month, plus the months that stand out."""
+# What a tool result may cost. get_monthly_summary's full form ran to 17,630
+# characters over seventeen months - about 4,400 tokens - and on the KAMRUI's
+# integrated GPU an answer carrying it went past the 180 s model timeout and
+# the owner got "the agent is not answering". The compact form is the default
+# now, and the fix is the payload rather than the timeout: a question about
+# which month was worst needs one field, not seventeen rows of prose.
+COMPACT_MONTHS = 12
+
+
+def monthly_summary(conn, cfg, months=COMPACT_MONTHS, detail=False, now=None):
+    """The months that stand out, and a table of the recent ones.
+
+    `detail` returns everything about every month - the day names, the
+    per-generator dicts, the per-month provenance sentences - and is for a
+    question about one particular month. The default is a compact table of
+    the last `months` and the superlatives, which is what a question about
+    which month was best or worst actually needs.
+
+    The superlatives always rank over the whole record however short the
+    table is. Ranking only what was printed would make the answer depend on
+    how much of it was asked for.
+    """
     now = int(now or time.time())
     days = conn.execute(
         "SELECT day, solar_wh, load_wh, peak_v, min_v FROM daily "
@@ -147,6 +167,7 @@ def monthly_summary(conn, cfg, now=None):
         return {"months": [], "superlatives": {},
                 "note": "no daily rollup yet; nothing to summarise"}
 
+    months_wanted = max(1, int(months or COMPACT_MONTHS))
     hours = _hours_per_day(conn, cfg)
     runs = _runs_by_month(conn, cfg)
     metered = _metered_by_month(conn, cfg)
@@ -221,6 +242,13 @@ def monthly_summary(conn, cfg, now=None):
             "fuel_gal_estimated": round(est_gal, 2),
             "fuel_gal_estimated_from_hours": round(est_from_hours, 2),
             "fuel_gal_total": round(run_gal + est_gal, 2),
+            # Generator energy on one axis for the whole record: metered
+            # where the scrape reaches, and backed out of the modelled
+            # gallons where only the runs do. It is fuel_gal_total times
+            # kilowatt-hours per gallon by construction, so the two cannot
+            # disagree.
+            "gen_kwh_total": round((run_gal + est_gal) * mean_gal, 1)
+                             if mean_gal else None,
             "fuel_basis": _fuel_basis(has_runs, met["kwh"]),
             "fuel_unpriced_runs": sum(gen[g]["unpriced"] for g in history.GENS),
             "min_v": round(min(volts), 2) if volts else None,
@@ -233,10 +261,31 @@ def monthly_summary(conn, cfg, now=None):
                                 if worst else None),
         })
 
+    superlatives = _superlatives(months)
+    window = months if months_wanted >= len(months) else months[-months_wanted:]
+
+    if not detail:
+        return {
+            "superlatives": superlatives,
+            "months_shown": len(window), "months_on_record": len(months),
+            "first_month": months[0]["month"], "last_month": months[-1]["month"],
+            "columns": COMPACT_COLUMNS,
+            "months": [_compact(m) for m in window],
+            "basis": (
+                f"Superlatives rank the whole record, not the table. A month "
+                f"needs {MIN_DAYS_FOR_MONTH_RANKING} days to rank. gen_kwh "
+                f"and fuel_gal: modelled from recorded runs since 2026-08-28, "
+                f"estimated from the metered generator counter before that; "
+                f"gallons from published curves, never metered. Rows are in "
+                f"`columns` order. detail=true for one month's days and "
+                f"per-generator figures."),
+        }
+
     return {
-        "months": months,
+        "months": window,
+        "months_shown": len(window), "months_on_record": len(months),
         "first_month": months[0]["month"], "last_month": months[-1]["month"],
-        "superlatives": _superlatives(months),
+        "superlatives": superlatives,
         "partial_days_excluded_from_day_ranking": sorted(partial_days),
         "day_ranking_needs_hours": MIN_HOURS_FOR_DAY_RANKING,
         "month_ranking_needs_days": MIN_DAYS_FOR_MONTH_RANKING,
@@ -255,6 +304,33 @@ def monthly_summary(conn, cfg, now=None):
                  "beside no generator hours means the record is incomplete, "
                  "not that the house ran on nothing."),
     }
+
+
+# The compact table's fields, named once at the top of it rather than on
+# every row. Twelve rows of {"month": ..., "solar_kwh": ...} spend 780
+# characters repeating seven key names, which is a third of the whole budget.
+COMPACT_COLUMNS = ["month", "solar_kwh", "load_kwh", "gen_kwh", "fuel_gal",
+                   "min_v", "max_v"]
+
+
+def _compact(m):
+    """One month as a row under COMPACT_COLUMNS.
+
+    Whole numbers where a decimal buys nothing: a kilowatt-hour either way in
+    a month of a thousand is below the noise in the counters. The voltages
+    keep one decimal, because the pack lives its whole life between 51 and 60
+    and rounding them to whole numbers would throw the field away to save two
+    characters.
+    """
+    return [
+        m["month"],
+        round(m["solar_kwh"]),
+        round(m["load_kwh"]),
+        round(m["gen_kwh_total"] or 0),
+        round(m["fuel_gal_total"]),
+        round(m["min_v"], 1) if m["min_v"] is not None else None,
+        round(m["max_v"], 1) if m["max_v"] is not None else None,
+    ]
 
 
 def _hours_basis(run_hours, metered_hours):
@@ -287,7 +363,7 @@ def _superlatives(months):
     """
     ranked = [m for m in months
               if m["days_with_data"] >= MIN_DAYS_FOR_MONTH_RANKING]
-    excluded = [{"month": m["month"], "days_with_data": m["days_with_data"]}
+    excluded = [f"{m['month']} ({m['days_with_data']} days)"
                 for m in months if m not in ranked]
     out = {"months_ranked": len(ranked), "months_excluded": excluded}
     if not ranked:
@@ -295,28 +371,26 @@ def _superlatives(months):
                        f"days a ranking needs")
         return out
 
-    def pick(key, chooser, field):
+    ranked_note = (f"{len(ranked)} of {len(months)} months, "
+                   f">={MIN_DAYS_FOR_MONTH_RANKING} days each")
+
+    def pick(key, chooser, field, basis=ranked_note):
         m = chooser(ranked, key=lambda r: r[key])
-        return {"month": m["month"], "value": m[key], "units": field}
+        return {"month": m["month"], "value": m[key], "units": field,
+                "basis": basis}
 
     out.update({
         "worst_solar_month": pick("solar_kwh", min, "kWh"),
         "best_solar_month": pick("solar_kwh", max, "kWh"),
         "highest_load_month": pick("load_kwh", max, "kWh"),
         "lowest_load_month": pick("load_kwh", min, "kWh"),
-        "most_fuel_month": pick("fuel_gal_total", max, "US gallons"),
+        "most_fuel_month": pick("fuel_gal_total", max, "US gallons",
+                                basis=f"{ranked_note}; complete fuel series, "
+                                      f"recorded runs plus metered energy, "
+                                      f"not the runs alone"),
     })
-    out["most_fuel_month"]["basis"] = (
-        "ranked on the complete fuel series - modelled from recorded runs "
-        "where there are any, estimated from metered generator energy "
-        "everywhere else - and not on the runs alone, which begin only when "
-        "the agent did")
     if out["most_fuel_month"]["value"] == 0:
         out["most_fuel_month"] = {
             "month": None, "value": 0.0, "units": "US gallons",
-            "note": "no generator activity in any month long enough to rank"}
-    out["basis"] = (f"over the {len(ranked)} month(s) with at least "
-                    f"{MIN_DAYS_FOR_MONTH_RANKING} days of data"
-                    + (f"; {len(excluded)} month(s) too short to rank"
-                       if excluded else ""))
+            "basis": "no generator activity in any month long enough to rank"}
     return out
