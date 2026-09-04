@@ -42,7 +42,10 @@ def night(cfg):
         "peak_today": 55.0,
         "sunrise_ts": ts_at(cfg, "2026-08-28", 6, 21),
         "projection": {"reached": ts_at(cfg, "2026-08-28", 3, 8), "at": "3:08 am"},
-        "tomorrow_cloud": 20,
+        # The day the sun next comes up on, named. At 10 pm on the 27th
+        # that is the 28th, and it stays the 28th past midnight.
+        "next_daylight_cloud": 20,
+        "next_daylight_date": "2026-08-28",
         "sunset_ts": ts_at(cfg, "2026-08-27", 19, 24),
         "remaining_solar_wh": 0,
         # 100 kWh of pack, and ten points of charge to the volt, so a
@@ -292,7 +295,7 @@ def test_without_a_sunset_the_rule_is_not_held(cfg, night, model):
 # --- POLICY 3: storm ---------------------------------------------------------
 
 def test_heavy_cloud_raises_both_stops(cfg, night, model):
-    night["tomorrow_cloud"] = 85
+    night["next_daylight_cloud"] = 85
     r = policy.storm_stop(cfg, night)
     assert r["fires"] and "85% daylight cloud ≥ 70%" in r["detail"]
     assert r["proposal"] == {"mep_start": 52.0, "mep_stop": 57.0,
@@ -305,14 +308,14 @@ def test_a_fair_forecast_does_not_raise_the_stops(cfg, night, model):
 
 
 def test_stops_already_at_57_do_not_fire_again(cfg, night, model):
-    night["tomorrow_cloud"] = 85
+    night["next_daylight_cloud"] = 85
     night["thresholds"].update(mep_stop=57.0, kub_stop=57.0)
     r = policy.storm_stop(cfg, night)
     assert not r["fires"] and "already 57.0" in r["detail"]
 
 
 def test_an_unknown_forecast_does_not_fire(cfg, night, model):
-    night["tomorrow_cloud"] = None
+    night["next_daylight_cloud"] = None
     assert not policy.storm_stop(cfg, night)["fires"]
 
 
@@ -320,16 +323,27 @@ def test_a_storm_stop_waits_for_the_night(cfg, night, model):
     """A stop is what tonight's run stops at, and it is set tonight. The
     forecast at 9:36 am is not the forecast the evening will have."""
     night = daytime(cfg, night)
-    night["tomorrow_cloud"] = 85
+    night["next_daylight_cloud"] = 85
     r = policy.storm_stop(cfg, night)
     assert not r["fires"] and r["held"]
     # Computed from the site, like the guard's own daylight hold, so the
     # window holds whether or not a forecast came back.
-    assert r["detail"] == "tomorrow 85% daylight cloud; held until sunset 7:18 pm"
+    assert r["detail"] == ("next daylight (Fri Aug 28) 85% daylight cloud; "
+                           "held until sunset 7:18 pm")
+
+
+def test_the_old_field_name_is_still_read(cfg, night, model):
+    """`tomorrow_cloud` survives as an alias for one release, so a replay or
+    a fact dict built before the rename still reaches the rule. The day it
+    cannot name is left unnamed rather than guessed."""
+    del night["next_daylight_cloud"], night["next_daylight_date"]
+    night["tomorrow_cloud"] = 85
+    r = policy.storm_stop(cfg, night)
+    assert r["fires"] and r["detail"].startswith("next daylight 85% daylight")
 
 
 def test_a_storm_stop_fires_once_the_sun_is_down(cfg, night, model):
-    night["tomorrow_cloud"] = 85
+    night["next_daylight_cloud"] = 85
     r = policy.storm_stop(cfg, night)
     assert r["fires"] and not r.get("held")
     assert r["proposal"]["mep_stop"] == 57.0
@@ -338,7 +352,7 @@ def test_a_storm_stop_fires_once_the_sun_is_down(cfg, night, model):
 def test_the_storm_hold_still_says_what_the_forecast_is(cfg, night, model):
     """Held is not silent: the number that would have fired is still shown."""
     night = daytime(cfg, night)
-    night["tomorrow_cloud"] = None
+    night["next_daylight_cloud"] = None
     r = policy.storm_stop(cfg, night)
     assert r["held"] and r["detail"] == "held until sunset 7:18 pm"
 
@@ -406,7 +420,7 @@ def test_three_hours_before_sunrise_is_not_shortly_before(cfg, night, model):
 
 def test_a_cloudy_sunrise_is_not_a_clear_one(cfg, night, model):
     night["projection"] = {"reached": ts_at(cfg, "2026-08-28", 5, 0)}
-    night["tomorrow_cloud"] = 60
+    night["next_daylight_cloud"] = 60
     r = policy.predawn_stop(cfg, night)
     assert not r["fires"] and "not a clear sunrise" in r["detail"]
 

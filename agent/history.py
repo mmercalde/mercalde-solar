@@ -286,6 +286,17 @@ def local_day(ts, cfg):
     return local(ts, cfg).strftime("%Y-%m-%d")
 
 
+def day_label(day):
+    """A local YYYY-MM-DD as the owner reads it: "Fri Sep 4".
+
+    Which day a forecast is about has to be on the page. "tomorrow" is a
+    different day at 6:59 pm and at 12:13 am, and on 2026-09-04 that
+    difference put a storm's stop voltage on the wrong night.
+    """
+    t = datetime.strptime(day, "%Y-%m-%d")
+    return f"{t.strftime('%a %b')} {t.day}"
+
+
 def day_bounds(day, cfg):
     """Unix-second [start, end) of a local YYYY-MM-DD."""
     tz = tzinfo(cfg)

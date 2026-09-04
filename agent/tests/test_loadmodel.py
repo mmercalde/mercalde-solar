@@ -962,6 +962,70 @@ def test_solar_model_learns_cloud_derating(conn, cfg, lm, monkeypatch):
     assert est["wh"] == pytest.approx(42000, rel=0.05)
 
 
+def learned_solar(conn, monkeypatch, clear=60000):
+    """A fitted solar model, and two days of flat hourly forecast."""
+    arch = {}
+    for i in range(20):
+        day = f"2026-09-{i+1:02d}"
+        conn.execute("INSERT INTO daily (day, solar_wh) VALUES (?,?)",
+                     (day, clear))
+        arch[day] = {"cloud": 0, "radiation_mj": 28.0}
+    conn.commit()
+    monkeypatch.setattr(weather, "archive_daily", lambda *a, **k: arch)
+
+
+def flat_forecast(cfg, monkeypatch, days=("2026-09-04", "2026-09-05")):
+    """700 W/m2 from 7 am to 6 pm, nothing outside it, over `days`."""
+    rows = []
+    for day in days:
+        for hour in range(24):
+            rows.append({"ts": ts_at(cfg, day, hour), "hour": hour,
+                         "cloud": 0,
+                         "radiation": 700.0 if 7 <= hour < 19 else 0.0,
+                         "temp": 24.0})
+    monkeypatch.setattr(weather, "hourly",
+                        lambda c, hours=48, now=None, data=None:
+                        [r for r in rows if now - 3600 <= r["ts"]
+                         <= now + hours * 3600])
+
+
+def test_what_is_left_of_the_day_ends_at_sunset(conn, cfg, lm, monkeypatch):
+    """"Remaining solar today" is remaining before the sunset that ends the
+    day, not before midnight. In the small hours the day whose sunset is
+    still ahead is this one, and none of tomorrow's sun counts."""
+    learned_solar(conn, monkeypatch)
+    flat_forecast(cfg, monkeypatch)
+    whole_day = lm.remaining_solar_wh(now=ts_at(cfg, "2026-09-04", 0))
+    midday = lm.remaining_solar_wh(now=ts_at(cfg, "2026-09-04", 13))
+    after_sunset = lm.remaining_solar_wh(now=ts_at(cfg, "2026-09-04", 21))
+    assert whole_day == 60000
+    assert 0 < midday < whole_day
+    # Sunset is 7:08 pm on the 4th; at nine the next sun is fourteen hours
+    # off and belongs to the next day, not to this one.
+    assert after_sunset == 0
+
+
+def test_the_estimate_takes_the_month_from_the_day_it_is_for(conn, cfg, lm,
+                                                            monkeypatch):
+    """August and September get their own fits, and a plan written at 11 pm
+    on the 31st is estimating a September day."""
+    arch = {}
+    for month, clear in ((8, 60000), (9, 40000)):
+        for i in range(20):
+            day = f"2026-{month:02d}-{i+1:02d}"
+            conn.execute("INSERT INTO daily (day, solar_wh) VALUES (?,?)",
+                         (day, clear))
+            arch[day] = {"cloud": 0, "radiation_mj": 28.0}
+    conn.commit()
+    monkeypatch.setattr(weather, "archive_daily", lambda *a, **k: arch)
+
+    late_august = ts_at(cfg, "2026-08-31", 23)
+    # `now` is still August; the day being forecast is the 1st of September.
+    assert lm.estimate_solar_wh(0, now=late_august)["clear_day_wh"] == 60000
+    assert lm.estimate_solar_wh(0, day="2026-09-01",
+                                now=late_august)["clear_day_wh"] == 40000
+
+
 def test_solar_model_will_not_fit_on_thin_evidence(conn, cfg, lm, monkeypatch):
     monkeypatch.setattr(weather, "archive_daily", lambda *a, **k: {})
     for i in range(3):

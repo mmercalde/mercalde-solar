@@ -116,6 +116,31 @@ def _kwh(wh):
     return "?" if wh is None else f"{wh / 1000.0:.1f}"
 
 
+def _peak_label(facts):
+    """"peak today", or the day itself when that is not today.
+
+    Between midnight and sunrise the peak on the page belongs to yesterday's
+    sun, and calling it today's told the owner the wrong thing about the
+    night they were in.
+    """
+    day = facts.get("peak_day")
+    if not day or day == facts.get("today"):
+        return "peak today"
+    return f"peak {history.day_label(day)}"
+
+
+def _month_of(day, now, cfg):
+    """The month name a clear-day reference belongs to.
+
+    The day being forecast names it, not the instant the plan is written: on
+    the last night of a month those are two different months and the solar
+    fit is per month.
+    """
+    if day:
+        return datetime.strptime(day, "%Y-%m-%d").strftime("%b")
+    return history.local(now, cfg).strftime("%b")
+
+
 class Agent:
     def __init__(self, cfg, dry_run=False, db_path=None):
         self.cfg = cfg
@@ -176,11 +201,23 @@ class Agent:
         gen_running = (data.get("mep803aAction") == history.GEN_RUNNING
                        or data.get("kubotaAction") == history.GEN_RUNNING)
 
-        # Solar's peak, not a generator's: POLICY 4 asks whether the day's sun
-        # reached 57.0. The live reading only counts while nothing is running.
-        peak_today = history.solar_peak(self.conn, self.cfg, today, now=now)
-        if not gen_running and (peak_today is None
-                                or (data.get("batteryVoltage") or 0) > peak_today):
+        # Solar's peak, not a generator's: the question is whether the day's
+        # sun reached 57.0. The day is the one the night in progress is
+        # living off - the day of the last sunrise - and not the calendar
+        # day, which between midnight and sunrise has had no sun in it yet.
+        # At 12:13 am "peak today" was the live voltage of a day that had
+        # not started.
+        st = sunmod.times(self.cfg, today)
+        sun_up = bool(st and st[0] <= now <= st[1])
+        peak_day = (history.local_day(now - 86400, self.cfg)
+                    if st and now < st[0] else today)
+        peak_today = history.solar_peak(self.conn, self.cfg, peak_day, now=now)
+        # The live reading counts only while the sun is still able to raise
+        # it. A voltage read at 2 am is the night, not the day's peak, and
+        # nothing running is not the same as the sun being up.
+        if sun_up and not gen_running and (
+                peak_today is None
+                or (data.get("batteryVoltage") or 0) > peak_today):
             peak_today = data.get("batteryVoltage")
 
         wx = weather.summary(self.cfg, now=now)
@@ -197,14 +234,20 @@ class Agent:
         gate = self.model.learning_status(now=now)
         soc_curve = self.model.soc_curve_status()
 
-        tomorrow_cloud = None
+        # The forecast that matters is the coming daylight's, which after
+        # midnight is today's and not the calendar day after now. weather.py
+        # names the day; everything downstream carries the name with the
+        # number so no reader has to work out which day "tomorrow" was.
+        next_daylight_date = wx.get("next_daylight_date")
+        next_daylight_cloud = None
         est_solar = None
-        if wx.get("tomorrow"):
-            t = wx["tomorrow"]
-            tomorrow_cloud = (t.get("daylight_cloud_pct")
-                              if t.get("daylight_cloud_pct") is not None
-                              else t.get("cloud_pct"))
-            est_solar = self.model.estimate_solar_wh(tomorrow_cloud, now=now)
+        if wx.get("next_daylight"):
+            next_daylight_cloud = weather.cloud_of(wx["next_daylight"])
+            # The month of the day being estimated, not of this instant: the
+            # solar fit is per month and a night at the end of one estimates
+            # a day in the next.
+            est_solar = self.model.estimate_solar_wh(
+                next_daylight_cloud, day=next_daylight_date, now=now)
 
         # POLICY 4 and 5 ask the load model whether a target is reachable; the
         # windows are the only part of that question the dashboard owns.
@@ -227,14 +270,20 @@ class Agent:
             "load_w": None if gen_running else (data.get("acPower1") or 0)
                                               + (data.get("acPower2") or 0),
             "solar_w": solar_w, "gen_running": gen_running,
-            "peak_today": peak_today,
+            "peak_today": peak_today, "peak_day": peak_day,
             "weather": wx, "sunrise_ts": sunrise_ts,
             "sunset_ts": sunset_ts, "remaining_solar_wh": remaining_solar_wh,
             "forecast": forecast, "projection": projection,
             "deficit": deficit,
             "drawdown": drawdown, "overhead": overhead,
             "gate": gate, "soc_curve": soc_curve,
-            "tomorrow_cloud": tomorrow_cloud, "est_solar": est_solar,
+            "next_daylight_cloud": next_daylight_cloud,
+            "next_daylight_date": next_daylight_date,
+            "next_daylight_label": wx.get("next_daylight_label"),
+            # Alias, for one release, so a replay or a stored fact dict built
+            # before the rename still reads. Goes with weather.summary's.
+            "tomorrow_cloud": next_daylight_cloud,
+            "est_solar": est_solar,
             "summary_24h": history.summary(self.conn, 24, now=now,
                                            cfg=self.cfg),
             "thresholds": toolsmod.thresholds_from_config(live),
@@ -311,14 +360,15 @@ class Agent:
                      f"load {load_kw}")
 
         peak = facts["peak_today"]
+        label = _peak_label(facts)
         thresh = self.cfg["solo_peak_threshold"]
         if peak is None:
-            lines.append(f"peak today: ?  (threshold {thresh})")
+            lines.append(f"{label}: ?  (threshold {thresh})")
         elif peak < thresh:
-            lines.append(f"peak today: {peak:.1f} V  "
+            lines.append(f"{label}: {peak:.1f} V  "
                          f"(threshold {thresh} -> solar shortfall)")
         else:
-            lines.append(f"peak today: {peak:.1f} V  (threshold {thresh} -> reached)")
+            lines.append(f"{label}: {peak:.1f} V  (threshold {thresh} -> reached)")
 
         if facts["drawdown"]:
             d = facts["drawdown"]
@@ -340,7 +390,6 @@ class Agent:
         else:
             lines.append("system overhead: not learned yet")
 
-        month = t.strftime("%b")
         proj = facts["projection"]
         sunrise = (history.clock(facts["sunrise_ts"], self.cfg)
                    if facts["sunrise_ts"] else "?")
@@ -353,16 +402,21 @@ class Agent:
             lines.append(f"projected 52.0 V at: not projected ({why})   "
                          f"sunrise {sunrise}")
 
-        if facts["tomorrow_cloud"] is None:
-            lines.append("forecast tomorrow: unavailable")
+        # Named, not "tomorrow". The line is read at 6:59 pm and again at
+        # 12:13 am, when "tomorrow" means two different days; the one this
+        # forecast is about is the day the sun next comes up on.
+        cloud, day = policymod.next_daylight(facts)
+        if cloud is None:
+            lines.append(f"{day}: forecast unavailable")
         elif facts["est_solar"]:
             e = facts["est_solar"]
-            lines.append(f"forecast tomorrow: {facts['tomorrow_cloud']}% cloud, "
+            month = _month_of(facts.get("next_daylight_date"), facts["now"],
+                              self.cfg)
+            lines.append(f"{day}: {cloud}% cloud, "
                          f"est. solar {_kwh(e['wh'])} kWh "
                          f"({month} clear-day {_kwh(e['clear_day_wh'])})")
         else:
-            lines.append(f"forecast tomorrow: {facts['tomorrow_cloud']}% cloud, "
-                         f"est. solar not learned yet")
+            lines.append(f"{day}: {cloud}% cloud, est. solar not learned yet")
 
         # What is running and why, in the AGS's words. A generator turning is
         # the loudest thing on the system and the record used to say only
@@ -434,7 +488,7 @@ class Agent:
             f", AGS {'online' if f['data'].get('mepAgsOnline') else 'OFFLINE'}"
             f"; Kubota {'RUNNING' if f['data'].get('kubotaAction') == history.GEN_RUNNING else 'stopped'}"
             f", AGS {'online' if f['data'].get('kubotaAgsOnline') else 'OFFLINE'}",
-            f"  peak voltage today {_fmt(f['peak_today'], 2)} V",
+            f"  {_peak_label(f)} {_fmt(f['peak_today'], 2)} V",
             "",
             "LIVE THRESHOLDS",
             f"  MEP start {th['mep_start']} stop {th['mep_stop']}"
@@ -484,11 +538,13 @@ class Agent:
         if sc.get("soc_at_start_threshold") is not None:
             parts.append(f"  learned: {sc['start_threshold_v']} V is about "
                          f"{sc['soc_at_start_threshold']}% SOC")
-        if wx.get("tomorrow"):
-            parts.append(f"  tomorrow: {f['tomorrow_cloud']}% daylight cloud, "
-                         f"max {wx['tomorrow']['max_temp_c']} C")
+        cloud, day = policymod.next_daylight(f)
+        if wx.get("next_daylight"):
+            parts.append(f"  {day}: {cloud}% daylight cloud, "
+                         f"max {wx['next_daylight']['max_temp_c']} C")
         if f["est_solar"]:
-            parts.append(f"  estimated solar tomorrow: {_kwh(f['est_solar']['wh'])} kWh "
+            parts.append(f"  estimated solar on {day}: "
+                         f"{_kwh(f['est_solar']['wh'])} kWh "
                          f"(clear day {_kwh(f['est_solar']['clear_day_wh'])} kWh)")
         parts.append(f"  sunrise {wx.get('next_sunrise', '?')}, "
                      f"sunset {wx.get('sunset', '?')}")
@@ -627,6 +683,12 @@ class Agent:
         history.record_plan(self.conn, record, {
             "voltage": facts["voltage"], "soc": facts["soc"],
             "peak_today": facts["peak_today"],
+            "peak_day": facts.get("peak_day"),
+            # Which day's forecast this plan acted on. "tomorrow" in a stored
+            # record could not be resolved back to a date once the night had
+            # rolled over; the date can.
+            "next_daylight_date": facts.get("next_daylight_date"),
+            "next_daylight_cloud": facts.get("next_daylight_cloud"),
             "thresholds": facts["thresholds"],
             "gate_open": facts["gate"]["open"],
             "projection": facts["projection"],
@@ -862,7 +924,7 @@ class Agent:
         head = "Evening plan" if evening else "Overnight report"
         lines = [f"<b>{head}</b>",
                  f"V {_fmt(facts['voltage'], 2)}  SOC {facts['soc']}%  "
-                 f"peak today {_fmt(facts['peak_today'], 2)} V"]
+                 f"{_peak_label(facts)} {_fmt(facts['peak_today'], 2)} V"]
 
         if evening:
             plan = history.latest_plan(self.conn)

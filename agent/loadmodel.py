@@ -858,10 +858,16 @@ class LoadModel:
                 "clear_day_wh": round(clear), "cloud_derate": round(k, 3)}
 
     def remaining_solar_wh(self, now=None, until=None):
-        """Wh of solar still expected today, from now to sunset.
+        """Wh of solar still expected before the sunset that ends this day.
 
         The same walk project_voltage does, so the two cannot disagree about
         how much of the day is left. None until the solar model is learned.
+
+        The end of the window is a sun event, not midnight. The calendar day
+        gave the same answer here - a forecast hour outside daylight carries
+        no radiation, so the hours past sunset contributed nothing either way
+        - but "how much sun is left" is a question about the sun, and after
+        midnight the day whose sunset is still ahead is this one.
         """
         now = int(now or time.time())
         m = self.solar_model(now=now)
@@ -872,17 +878,30 @@ class LoadModel:
             return None
         day_rad = sum(f["radiation"] for f in forecast[:24]) or 1
         per_unit = m["clear_day_wh"] / day_rad
-        today = history.local_day(now, self.cfg)
+        if until is None:
+            times = sun.times(self.cfg, now=now)
+            # Past sunset there is no sun left to come, and `until` in the
+            # past empties the walk on its own.
+            until = times[1] if times else None
         total = 0.0
         for f in forecast:
-            if f["ts"] < now - 3600 or history.local_day(f["ts"], self.cfg) != today:
+            if f["ts"] < now - 3600:
                 continue
             if until is not None and f["ts"] >= until:
                 continue
             total += f["radiation"] * per_unit
         return round(total)
 
-    def estimate_solar_wh(self, cloud_pct, month=None, now=None):
+    def estimate_solar_wh(self, cloud_pct, month=None, day=None, now=None):
+        """Wh a day of `cloud_pct` yields, from the fit for its month.
+
+        `day` is a local YYYY-MM-DD and names the month itself, which is what
+        a forecast for the coming daylight needs: at 11 pm on the 30th the
+        day being estimated is in next month, and `now`'s month is the wrong
+        fit to ask.
+        """
+        if month is None and day:
+            month = int(day[5:7])
         m = self.solar_model(month, now)
         if not m.get("learned"):
             return None

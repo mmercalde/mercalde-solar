@@ -175,7 +175,7 @@ will pass 1 and report September. Both happened. The word is the argument.
 peak today: 55.8 V  (threshold 57.0 → solar shortfall)
 overnight Wh (profile, Aug weekday): 10,800
 projected 52.0 V at: 04:10   sunrise 06:31
-forecast tomorrow: 20% cloud, est. solar 61 kWh (Aug clear-day 68)
+next daylight (Fri Aug 29): 20% cloud, est. solar 61 kWh (Aug clear-day 68)
 recommend: Kubota solo, start 56.0 / stop 57.0; MEP 52.0 / 54.5   — peak <57, >55 so Kubota
 applied: no (learning phase)
 ```

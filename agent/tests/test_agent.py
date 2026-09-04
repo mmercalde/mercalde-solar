@@ -35,7 +35,7 @@ def base_facts(cfg, gate_open=False, model=None):
                       "start_threshold_v": 52.0, "volts_low": 51.8,
                       "volts_high": 55.4, "observations": 9000,
                       "scraped_observations": 9000},
-        "tomorrow_cloud": 20,
+        "next_daylight_cloud": 20, "next_daylight_date": "2026-08-29",
         "est_solar": {"wh": 61000, "clear_day_wh": 68000},
         "summary_24h": {}, "intended": {},
         "thresholds": {"mep_start": 52.0, "mep_stop": 56.0,
@@ -72,12 +72,15 @@ def test_plan_record_matches_the_spec_shape(a, cfg):
     assert lines[3] == ("system overhead: 1.180x (pack out ÷ house in, "
                         "1.090-1.340 over 12 nights, last 14 nights)")
     assert lines[4] == "projected 52.0 V at: 4:10 am   sunrise 6:31 am"
-    assert lines[5] == ("forecast tomorrow: 20% cloud, est. solar 61.0 kWh "
-                        "(Aug clear-day 68.0)")
+    # The day is named, not called "tomorrow": read at 4 pm and read again
+    # after midnight, "tomorrow" is two different days.
+    assert lines[5] == ("next daylight (Sat Aug 29): 20% cloud, "
+                        "est. solar 61.0 kWh (Aug clear-day 68.0)")
     # Four in the afternoon: both stop rules are held until sunset, and say
     # what they would have been looking at.
-    assert lines[6] == ("POLICY 3 storm stop 57.0: held (tomorrow 20% daylight "
-                        "cloud; held until sunset 7:17 pm)")
+    assert lines[6] == ("POLICY 3 storm stop 57.0: held (next daylight "
+                        "(Sat Aug 29) 20% daylight cloud; held until sunset "
+                        "7:17 pm)")
     assert lines[7] == ("POLICY 3 pre-dawn stop 54.5: held (52 V projected "
                         "4:10 am; held until sunset 7:17 pm)")
     assert lines[8].startswith("POLICY 4 top-up: FIRES (deficit 9,000 Wh to "
@@ -895,6 +898,50 @@ def test_the_baseline_is_adopted_only_once(rebooted):
                                        "kub_start": 53.0, "kub_stop": 55.0}
     a.gather()
     assert a.guard.baseline()["mep_start"] == 53.0, "not re-adopted every tick"
+
+
+# --- which day the peak belongs to ------------------------------------------
+
+def test_the_peak_after_midnight_belongs_to_the_day_that_made_it(a, conn, cfg,
+                                                                 monkeypatch):
+    """At 12:13 am the calendar day has had no sun in it yet. The peak the
+    night is living off is yesterday's, and the record names the day rather
+    than calling a dark hour's live voltage "peak today"."""
+    monkeypatch.setattr(agentmod.history, "fetch_config", lambda *x, **k: OWNERS)
+    monkeypatch.setattr(agentmod.history, "fetch_data", lambda *x, **k: {
+        "batteryVoltage": 54.2, "battSocBM": 63, "battMonitorOnline": True,
+        "mep803aAction": history.GEN_STOPPED, "kubotaAction": history.GEN_STOPPED,
+        "acPower1": 700, "acPower2": 700})
+    monkeypatch.setattr(agentmod.weather, "summary", lambda *x, **k: {})
+    tz = history.tzinfo(cfg)
+    for hour, v in ((13, 55.4), (14, 55.8), (15, 55.1)):
+        conn.execute(
+            "INSERT INTO samples (ts, battery_v, mep_action, kub_action) "
+            "VALUES (?,?,?,?)",
+            (int(datetime(2026, 9, 3, hour, tzinfo=tz).timestamp()), v,
+             history.GEN_STOPPED, history.GEN_STOPPED))
+    conn.commit()
+
+    f = a.gather(int(datetime(2026, 9, 4, 0, 13, tzinfo=tz).timestamp()))
+    assert f["peak_day"] == "2026-09-03"
+    assert f["peak_today"] == 55.8, "54.2 V in the dark is not a solar peak"
+    assert a.plan_record(f, "x", "y").splitlines()[1].startswith(
+        "peak Thu Sep 3: 55.8 V")
+
+
+def test_in_daylight_the_peak_is_todays_and_the_live_reading_counts(a, conn, cfg,
+                                                                   monkeypatch):
+    monkeypatch.setattr(agentmod.history, "fetch_config", lambda *x, **k: OWNERS)
+    monkeypatch.setattr(agentmod.history, "fetch_data", lambda *x, **k: {
+        "batteryVoltage": 56.1, "battSocBM": 92, "battMonitorOnline": True,
+        "mep803aAction": history.GEN_STOPPED, "kubotaAction": history.GEN_STOPPED,
+        "acPower1": 700, "acPower2": 700})
+    monkeypatch.setattr(agentmod.weather, "summary", lambda *x, **k: {})
+    tz = history.tzinfo(cfg)
+    f = a.gather(int(datetime(2026, 9, 4, 14, 0, tzinfo=tz).timestamp()))
+    assert f["peak_day"] == "2026-09-04"
+    assert f["peak_today"] == 56.1
+    assert a.plan_record(f, "x", "y").splitlines()[1].startswith("peak today:")
 
 
 def test_the_agent_has_no_heartbeat_method_left(a):

@@ -48,7 +48,11 @@ GEN_KEYS = {"mep": ("mep_start", "mep_stop", "mep803a", "mep803aAction",
             "kubota": ("kub_start", "kub_stop", "kubota", "kubotaAction",
                        "kubotaMode", "kubotaAgsOnline")}
 
-CLOUD_RE = re.compile(r"forecast tomorrow: (\d+)% cloud")
+# Both wordings: records written before the rename say "forecast tomorrow",
+# records written after say "next daylight (Fri Sep 4)". A replay reads
+# nights from either era.
+CLOUD_RE = re.compile(r"(?:forecast tomorrow|next daylight \([^)]*\)): "
+                      r"(\d+)% cloud")
 
 
 def parse_when(text, cfg):
@@ -115,7 +119,7 @@ class Replay:
     # --- what the night recorded -------------------------------------------
 
     def _recorded_clouds(self):
-        """Tomorrow's cloud cover as each tick's own plan record had it.
+        """The coming daylight's cloud cover, as each tick's own record had it.
 
         POLICY 3 is the only rule that reads it, and today's forecast has
         nothing to say about a night in the past.
@@ -199,7 +203,9 @@ class Replay:
             "remaining_solar_wh": self.model.remaining_solar_wh(now=ts),
             "projection": self.model.project_voltage(52.0, now=ts),
             "deficit": self.model.overnight_deficit(sunrise, now=ts),
-            "tomorrow_cloud": self.cloud_at(ts),
+            "next_daylight_cloud": self.cloud_at(ts),
+            "next_daylight_date": history.local_day(sunrise, self.cfg)
+                                  if sunrise else None,
             "thresholds": toolsmod.thresholds_from_config(live_cfg),
             "baseline": self.guard.baseline(),
             "run_window_h": run_window,

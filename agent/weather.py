@@ -68,6 +68,19 @@ def hourly(cfg, hours=48, now=None, data=None):
     return out
 
 
+def cloud_of(window):
+    """The cloud figure the rules read from one of `summary`'s day windows.
+
+    The daylight mean where the day has daylight hours in the forecast, the
+    round-the-clock mean where it does not. What a stop voltage is set for is
+    how much sun the day will make, and the cloud at 3 am is not part of that.
+    """
+    if not window:
+        return None
+    daylight = window.get("daylight_cloud_pct")
+    return daylight if daylight is not None else window.get("cloud_pct")
+
+
 def summary(cfg, hours=48, now=None):
     """Condensed forecast for the model and the plan record."""
     data = fetch(cfg)
@@ -76,8 +89,19 @@ def summary(cfg, hours=48, now=None):
     if not rows:
         return {"error": "no forecast rows"}
     today = history.local_day(now, cfg)
-    tomorrow = (datetime.fromtimestamp(now, history.tzinfo(cfg))
-                + timedelta(days=1)).strftime("%Y-%m-%d")
+    # The day the forecast is about is the one the sun next comes up on, not
+    # the calendar day after this instant. Between midnight and sunrise those
+    # are two different days: at 00:13 on 2026-09-04 the coming daylight was
+    # the 4th, and calendar tomorrow was the 5th. POLICY 3 read the 5th's 99%
+    # cloud and raised both stops to 57.0 for a storm a day and a night away,
+    # after the 6:59 pm plan the same night had correctly read the 4th at 38%
+    # and held. Before midnight it is tomorrow, after midnight it is today,
+    # in daylight it is tomorrow again - which is what the next sunrise says
+    # without any of the cases being written out.
+    nxt = sun.next_sunrise(cfg, now)
+    next_daylight = (history.local_day(nxt, cfg) if nxt else
+                     (datetime.fromtimestamp(now, history.tzinfo(cfg))
+                      + timedelta(days=1)).strftime("%Y-%m-%d"))
 
     def window(day):
         sel = [r for r in rows if history.local_day(r["ts"], cfg) == day]
@@ -94,14 +118,21 @@ def summary(cfg, hours=48, now=None):
             "min_temp_c": round(min(r["temp"] for r in sel), 1),
         }
 
-    out = {"hours": hours, "today": window(today), "tomorrow": window(tomorrow)}
+    out = {"hours": hours, "today": window(today), "today_date": today,
+           "next_daylight": window(next_daylight),
+           "next_daylight_date": next_daylight,
+           "next_daylight_label": history.day_label(next_daylight)}
+    # Alias, for one release. `tomorrow` was the calendar day after now, which
+    # between midnight and sunrise names the day after the one about to dawn.
+    # Read `next_daylight`; this key goes away. It is the same dict, so
+    # anything a caller adds to one is on the other.
+    out["tomorrow"] = out["next_daylight"]
     # Computed, not fetched: see sun.py.
     times = sun.times(cfg, today)
     if times:
         out["sunrise"] = history.clock(times[0], cfg)
         out["sunset"] = history.clock(times[1], cfg)
         out["sunrise_ts"], out["sunset_ts"] = times
-    nxt = sun.next_sunrise(cfg, now)
     if nxt:
         out["next_sunrise"] = history.clock(nxt, cfg)
         out["next_sunrise_ts"] = nxt

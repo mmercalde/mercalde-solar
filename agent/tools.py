@@ -415,7 +415,10 @@ SCHEMAS = [
     {"type": "function", "function": {
         "name": "get_weather",
         "description": "Cloud cover, solar radiation, temperature and sunrise/sunset "
-                       "for the next 48 hours, with the estimated solar yield.",
+                       "for the next 48 hours, with the estimated solar yield. "
+                       "next_daylight is the day the sun next comes up on, "
+                       "named by next_daylight_date; that is the day a stop "
+                       "voltage set tonight is charging for.",
         "parameters": {"type": "object", "properties": {}, "required": []}}},
     {"type": "function", "function": {
         "name": "get_ac_diag",
@@ -837,14 +840,22 @@ class Tools:
         }
 
     def get_weather(self):
+        """The forecast, with the coming daylight named by its date.
+
+        `next_daylight` is the day the sun next comes up on: tomorrow in the
+        evening, today between midnight and sunrise, tomorrow again once the
+        sun is up. `tomorrow` is the same dict under its old name, for one
+        release. The calendar day after now is not always the day the night
+        in progress is charging for.
+        """
         out = weather.summary(self.cfg)
-        for day in ("today", "tomorrow"):
-            w = out.get(day)
+        for key in ("today", "next_daylight"):
+            w = out.get(key)
             if not w:
                 continue
-            est = self.model.estimate_solar_wh(
-                w.get("daylight_cloud_pct") if w.get("daylight_cloud_pct") is not None
-                else w["cloud_pct"])
+            day = (out.get("next_daylight_date") if key == "next_daylight"
+                   else out.get("today_date"))
+            est = self.model.estimate_solar_wh(weather.cloud_of(w), day=day)
             w["estimated_solar_wh"] = est["wh"] if est else None
             w["clear_day_wh"] = est["clear_day_wh"] if est else None
         return out

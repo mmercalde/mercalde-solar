@@ -372,6 +372,28 @@ The return is driven by the state, not only by the ledger: any stop sitting
 below the owner's baseline with no live reason comes back, whether or not
 this bookkeeping recorded putting it there.
 
+### Which day the forecast is about
+
+The day a stop voltage is set for is the day the sun next comes up on, and
+the plan record names it: `next daylight (Fri Sep 4): 38% cloud`. Before
+midnight that is tomorrow, after midnight it is today, and once the sun is up
+it is tomorrow again — one rule, stated against the sun, with none of those
+cases written out anywhere.
+
+It used to be the calendar day after the instant of the tick, and the two
+part company at midnight. At 6:59 pm on 2026-09-03 POLICY 3 read the 4th at
+38% cloud and held. At 00:13, fourteen minutes into the same night, the
+calendar had turned and the rule read the 5th at 99% — a storm a day and a
+night away — and raised both stops to 57.0 for it.
+
+Everything anchored on the sun rather than on the calendar now: the coming
+daylight's cloud (`weather.py`), the solar estimate and the month whose
+clear-day fit prices it, what is left of today's sun (to sunset, not to
+midnight), and the pre-dawn case's sunrise, which was already the next one.
+`next_daylight_date` is in the facts and in every stored plan record, so a
+record read back a week later still says which day it acted on. The old
+`tomorrow` key survives as an alias on the same dict for one release.
+
 ## Which month was the worst
 
 `get_monthly_summary` answers that, and answers it in Python. Every calendar

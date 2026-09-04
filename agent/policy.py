@@ -38,6 +38,30 @@ EPS = 0.05
 OVERRULE_RE = re.compile(r"overrul\w*\s*:?\s*policy\s*(\d+)", re.IGNORECASE)
 
 
+def next_daylight(f):
+    """(cloud %, the phrase that names the day it belongs to).
+
+    The day a forecast for "tomorrow" is about depends on when you ask. At
+    6:59 pm on 2026-09-03 tomorrow was the 4th; at 12:13 am, fourteen minutes
+    later in the same night, the calendar said the 5th, and POLICY 3 raised
+    both stops to 57.0 on the 5th's 99% cloud for a storm that was a day and
+    a night away. The day the rules mean is the one the sun next comes up on,
+    and every line that quotes it says which day that is.
+    """
+    cloud = f.get("next_daylight_cloud")
+    if cloud is None:
+        # The alias, for one release: a fact dict built before the rename.
+        cloud = f.get("tomorrow_cloud")
+    day = f.get("next_daylight_date")
+    label = f.get("next_daylight_label") or (history.day_label(day) if day
+                                             else None)
+    return cloud, (f"next daylight ({label})" if label else "next daylight")
+
+
+def next_daylight_phrase(f):
+    return next_daylight(f)[1]
+
+
 def window_opens(cfg, f):
     """When today's top-up window opens, from `topup_earliest`.
 
@@ -154,7 +178,10 @@ def call_to_action(rules):
     out = []
     for r in rules:
         p = r["proposal"]
-        out.append(f"POLICY {r['rule']} {r['name']} FIRES" + (
+        # A stop raised for a forecast says which day's forecast, so the
+        # Telegram line the model writes can say it too.
+        day = f" for {r['day']}" if r.get("day") else ""
+        out.append(f"POLICY {r['rule']} {r['name']} FIRES{day}" + (
             f" → set MEP {p['mep_start']:.1f}/{p['mep_stop']:.1f}, "
             f"Kubota {p['kub_start']:.1f}/{p['kub_stop']:.1f}" if p else ""))
     return out
@@ -455,33 +482,35 @@ def solo_top_up(cfg, f, model):
 # --- POLICY 3: the two stop-voltage cases -----------------------------------
 
 def storm_stop(cfg, f):
-    """Heavy cloud tomorrow: carry more charge into it."""
+    """Heavy cloud on the coming daylight: carry more charge into it."""
     name = f"storm stop {cfg['stop_voltage_max']:.1f}"
-    cloud = f.get("tomorrow_cloud")
+    # The day the sun next comes up on, named, so the record says which day
+    # the stop was raised for and cannot be read as the wrong one.
+    cloud, day = next_daylight(f)
     limit = cfg["storm_cloud_pct"]
     target = cfg["stop_voltage_max"]
     th = f.get("thresholds") or {}
 
     held = _held_until_sunset(cfg, f)
     if held:
-        seen = f"tomorrow {cloud}% daylight cloud; " if cloud is not None else ""
-        return _rule(3, name, False, seen + held, held=True)
+        seen = f"{day} {cloud}% daylight cloud; " if cloud is not None else ""
+        return _rule(3, name, False, seen + held, held=True, day=day)
     if cloud is None:
-        return _rule(3, name, False, "tomorrow's cloud cover unknown")
+        return _rule(3, name, False, f"{day}: cloud cover unknown", day=day)
     if cloud < limit:
         return _rule(3, name, False,
-                     f"tomorrow {cloud}% daylight cloud < {limit}%")
-    detail = f"tomorrow {cloud}% daylight cloud ≥ {limit}%"
+                     f"{day} {cloud}% daylight cloud < {limit}%", day=day)
+    detail = f"{day} {cloud}% daylight cloud ≥ {limit}%"
     stops = (th.get("mep_stop"), th.get("kub_stop"))
     if all(s is not None and abs(s - target) < EPS for s in stops):
         return _rule(3, name, False,
                      f"{detail}, but both stops are already {target:.1f}",
-                     satisfied=True)
+                     satisfied=True, day=day)
     proposal = {"mep_start": cfg["default_start"], "mep_stop": target,
                 "kub_start": cfg["default_start"], "kub_stop": target}
     return _rule(3, name, True,
                  f"{detail} → stop {target:.1f} (live stops MEP "
-                 f"{stops[0]} / Kubota {stops[1]})", proposal)
+                 f"{stops[0]} / Kubota {stops[1]})", proposal, day=day)
 
 
 def predawn_stop(cfg, f, superseded=False):
@@ -490,7 +519,7 @@ def predawn_stop(cfg, f, superseded=False):
     limit = cfg["clear_cloud_pct"]
     window = cfg["predawn_hours"]
     target = cfg["stop_voltage_min"]
-    cloud = f.get("tomorrow_cloud")
+    cloud, day = next_daylight(f)
     proj = f.get("projection") or {}
     sunrise, reached = f.get("sunrise_ts"), proj.get("reached")
     th = f.get("thresholds") or {}
@@ -522,23 +551,25 @@ def predawn_stop(cfg, f, superseded=False):
               f"sunrise {_clock(sunrise, cfg)} ≤ {window:.1f} h")
     if cloud is None:
         return _rule(3, name, False,
-                     f"{detail}, but tomorrow's cloud cover is unknown")
+                     f"{detail}, but {day}'s cloud cover is unknown", day=day)
     if cloud > limit:
         return _rule(3, name, False,
-                     f"{detail}, but tomorrow {cloud}% daylight cloud > {limit}% "
-                     f"is not a clear sunrise")
-    detail += f"; tomorrow {cloud}% daylight cloud ≤ {limit}%"
+                     f"{detail}, but {day} {cloud}% daylight cloud > {limit}% "
+                     f"is not a clear sunrise", day=day)
+    detail += f"; {day} {cloud}% daylight cloud ≤ {limit}%"
     if superseded:
         return _rule(3, name, False, f"{detail}, but POLICY 4 fires and its "
-                     f"{cfg['solo_target']:.1f} target supersedes", held=True)
+                     f"{cfg['solo_target']:.1f} target supersedes", held=True,
+                     day=day)
     stops = (th.get("mep_stop"), th.get("kub_stop"))
     if all(s is not None and abs(s - target) < EPS for s in stops):
         return _rule(3, name, False,
                      f"{detail}, but both stops are already {target:.1f}",
-                     satisfied=True)
+                     satisfied=True, day=day)
     return _rule(3, name, True, f"{detail} → stop {target:.1f}",
                  {"mep_start": cfg["default_start"], "mep_stop": target,
-                  "kub_start": cfg["default_start"], "kub_stop": target})
+                  "kub_start": cfg["default_start"], "kub_stop": target},
+                 day=day)
 
 
 # --- the whole evaluation ---------------------------------------------------
