@@ -96,6 +96,28 @@ REG_PV_POWER = 0x0050
 REG_CHARGER_STATUS = 0x0049
 REG_GENERATOR_MODE = 0x004D
 REG_GENERATOR_ACTION = 0x0043   # AGS spec 2.3: 9=Running, 10=Stopped
+REG_GENERATOR_ON_REASON = 0x0044    # AGS spec: why it started
+REG_GENERATOR_OFF_REASON = 0x0045   # AGS spec: why it stopped
+# Exercise schedule, as the AGS itself holds it. The dashboard has never
+# owned these numbers; the agent used to carry a hardcoded 09:00 and on
+# 2026-09-03 filed a 6:49 PM Kubota exercise as an ordinary auto-start,
+# which pollutes charge-rate learning and fuel stats. Read them instead.
+REG_EXERCISE_DAYS = 0x006F      # period, days between exercises
+REG_EXERCISE_DURATION = 0x0070  # minutes
+REG_EXERCISE_START = 0x0071     # start time of day
+
+# AGS spec: Generator On Reason. This is the authoritative answer to "why is
+# it running" - inferring it from voltage gets it wrong, and did: the agent
+# said "voltage dropped below 52.0 V" at 59.4 V.
+GEN_ON_REASON = {
+    0: "not_on", 1: "dc_voltage_low", 2: "battery_soc_low",
+    3: "ac_current_high", 4: "contact_closed", 5: "manual_on",
+    6: "exercise", 7: "non_quiet_time",
+}
+# Off Reason, the codes that are documented here. The register's full table
+# is longer than this; anything not named comes through as "code_N" rather
+# than as a guess, because a wrong name reads exactly like a right one.
+GEN_OFF_REASON = {7: "manual_off", 10: "exercise_done", 11: "quiet_time"}
 
 # Conext Battery Monitor (slave 191, port 503) - shunt measurement.
 # Positive current = charging, verified against InsightLocal 2026-07-25.
@@ -178,6 +200,11 @@ system_data = {
     "mepChargeRateLive": 0, "kubotaChargeRateLive": 0,
     "chargePower1": 0, "chargePower2": 0, "chargePower3": 0,
     "mepAgsOnline": True, "kubotaAgsOnline": True,
+    # None, not "not_on": until the register has been read once, the reason
+    # is unknown, and unknown is not the same as "nothing started it".
+    "mepOnReason": None, "kubotaOnReason": None,
+    "mepOffReason": None, "kubotaOffReason": None,
+    "mepExercise": None, "kubotaExercise": None,
 }
 data_lock = threading.Lock()
 start_time = time.time()
@@ -726,6 +753,94 @@ def ac_diag_save(reading):
         except Exception as e:
             logger.warning(f"AC diag log write error: {e}")
 
+# --- AGS reasons and exercise schedule -------------------------------------
+#
+# Every read below is wrapped and every failure is silent past a debug line.
+# These are additions to a poll that already works: a gateway that drops one
+# of them must leave mep803aAction and the rest exactly as they were, so the
+# key is simply left out of new_data and the previous value survives the
+# dict update. They are also kept out of `errors` for the same reason the
+# battery monitor is - POLL_READS and the "gateway not responding" threshold
+# describe the original 20 reads, and a new read must not move an alert.
+
+def read_gen_reasons(slave_id):
+    """(on_reason, off_reason) as text, either or both None if unread."""
+    out = []
+    for reg, table in ((REG_GENERATOR_ON_REASON, GEN_ON_REASON),
+                       (REG_GENERATOR_OFF_REASON, GEN_OFF_REASON)):
+        try:
+            val = modbus.read_holding_register_16(
+                MODBUS_HOST, MODBUS_PORT, slave_id, reg)
+        except Exception as e:
+            logger.debug(f"AGS {slave_id} reason read 0x{reg:04X} failed: {e}")
+            val = None
+        out.append(None if val is None else table.get(val, f"code_{val}"))
+    return out[0], out[1]
+
+
+def _exercise_time(raw):
+    """The start time register as HH:MM, or None if it does not decode.
+
+    The 503 spec gives the address, not the encoding. Two are plausible and
+    they do not overlap: minutes past midnight (0-1439) and a packed hour and
+    minute (hour << 8 | minute). 6:49 PM is 1129 one way and 4913 the other,
+    so whichever the AGS uses, only one of them is a legal reading of it.
+    Anything else is left as None with the raw value beside it rather than
+    dressed up as a time.
+    """
+    if raw is None:
+        return None
+    if 0 <= raw <= 1439:
+        return f"{raw // 60:02d}:{raw % 60:02d}"
+    hh, mm = raw >> 8, raw & 0xFF
+    if 0 <= hh <= 23 and 0 <= mm <= 59:
+        return f"{hh:02d}:{mm:02d}"
+    return None
+
+
+def read_exercise_schedule(slave_id):
+    """{every_days, minutes, start, start_raw}, or None if nothing read."""
+    vals = {}
+    for key, reg in (("every_days", REG_EXERCISE_DAYS),
+                     ("minutes", REG_EXERCISE_DURATION),
+                     ("start_raw", REG_EXERCISE_START)):
+        try:
+            vals[key] = modbus.read_holding_register_16(
+                MODBUS_HOST, MODBUS_PORT, slave_id, reg)
+        except Exception as e:
+            logger.debug(f"AGS {slave_id} exercise read failed: {e}")
+            vals[key] = None
+    if all(v is None for v in vals.values()):
+        return None
+    vals["start"] = _exercise_time(vals["start_raw"])
+    return vals
+
+
+# When the exercise schedule was last read. Zero means never, so the first
+# poll after start reads it; hourly after that, since it only changes when
+# someone changes it in the AGS.
+_exercise_read_at = 0.0
+EXERCISE_READ_INTERVAL = 3600
+
+
+def refresh_exercise_schedule(new_data, now=None):
+    """Fill mepExercise / kubotaExercise, at most once an hour."""
+    global _exercise_read_at
+    now = now if now is not None else time.time()
+    if now - _exercise_read_at < EXERCISE_READ_INTERVAL:
+        return False
+    _exercise_read_at = now
+    for key, slave in (("mepExercise", AGS_MEP803A_ID),
+                       ("kubotaExercise", AGS_KUBOTA_ID)):
+        sched = read_exercise_schedule(slave)
+        if sched is not None:
+            new_data[key] = sched
+            logger.info(f"{key}: every {sched['every_days']} days, "
+                        f"{sched['minutes']} min, start "
+                        f"{sched['start'] or sched['start_raw']}")
+    return True
+
+
 # --- Polling Thread ---
 def poll_modbus():
     global system_data, start_time
@@ -817,6 +932,11 @@ def poll_modbus():
                 act = modbus.read_holding_register_16(
                     MODBUS_HOST, MODBUS_PORT, AGS_MEP803A_ID, REG_GENERATOR_ACTION)
                 new_data["mep803aAction"] = act if act is not None else 255
+                on, off = read_gen_reasons(AGS_MEP803A_ID)
+                if on is not None:
+                    new_data["mepOnReason"] = on
+                if off is not None:
+                    new_data["mepOffReason"] = off
 
             val = modbus.read_holding_register_16(MODBUS_HOST, MODBUS_PORT, AGS_KUBOTA_ID, REG_GENERATOR_MODE)
             new_data["kubotaMode"] = val if val is not None else 0
@@ -828,6 +948,11 @@ def poll_modbus():
                 act = modbus.read_holding_register_16(
                     MODBUS_HOST, MODBUS_PORT, AGS_KUBOTA_ID, REG_GENERATOR_ACTION)
                 new_data["kubotaAction"] = act if act is not None else 255
+                on, off = read_gen_reasons(AGS_KUBOTA_ID)
+                if on is not None:
+                    new_data["kubotaOnReason"] = on
+                if off is not None:
+                    new_data["kubotaOffReason"] = off
 
             mep_rate = modbus.read_holding_register_16(MODBUS_HOST, MODBUS_PORT, INVERTER_1_ID, REG_MAX_CHARGE_RATE)
             new_data["mepChargeRateLive"] = mep_rate if mep_rate is not None else 0
@@ -870,6 +995,11 @@ def poll_modbus():
             except Exception as bm_err:
                 logger.debug(f"Battery monitor read failed: {bm_err}")
                 new_data["battMonitorOnline"] = False
+
+            try:
+                refresh_exercise_schedule(new_data)
+            except Exception as ex_err:
+                logger.debug(f"Exercise schedule refresh failed: {ex_err}")
 
             elapsed = int(time.time() - start_time)
             # lastUpdate is really uptime; kept as-is for the ESP32 display and
@@ -1734,8 +1864,8 @@ function updateUI(data){
   chipFor('kub_chip',kubMode,kubAct);
   hudChip('hud_mep','MEP',mepMode,mepAct);
   hudChip('hud_kub','KUB',kubMode,kubAct);
-  document.getElementById('mep_action').textContent=genActionMap[mepAct]||'Unknown';
-  document.getElementById('kub_action').textContent=genActionMap[kubAct]||'Unknown';
+  document.getElementById('mep_action').textContent=actionText(mepAct,data.mepOnReason);
+  document.getElementById('kub_action').textContent=actionText(kubAct,data.kubotaOnReason);
 
   agsFor('mep_ags_status',data.mepAgsOnline);
   agsFor('kubota_ags_status',data.kubotaAgsOnline);
@@ -1786,6 +1916,20 @@ function chipFor(id,mode,action){
   else if(mode===2){el.className='chip ok';el.textContent='Auto \u00b7 stopped';}
   else if(mode===0){el.className='chip off';el.textContent='Off';}
   else{el.className='chip off';el.textContent=genModeMap[mode]||'Idle';}
+}
+/* "Running \u00b7 exercise". The AGS knows why it started; the card should
+   say so, because the alternative is everyone guessing from the voltage. */
+function reasonLabel(r){
+  if(!r||r==='not_on')return '';
+  return r.replace(/_/g,' ');
+}
+function actionText(action,reason){
+  const base=genActionMap[action]||'Unknown';
+  const why=reasonLabel(reason);
+  /* Only while it is turning: a reason left over from the last run says
+     nothing about a generator that is stopped. */
+  const turning=action===9||ACT_STARTING.indexOf(action)>=0;
+  return (turning&&why)?base+' \u00b7 '+why:base;
 }
 function agsFor(id,online){
   const el=document.getElementById(id);

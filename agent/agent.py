@@ -166,6 +166,11 @@ class Agent:
         self.guard.adopt_live(toolsmod.thresholds_from_config(live), now=now)
         today = history.local_day(now, self.cfg)
 
+        # Before anything derives a run: the exercise window is what the
+        # fallback classifier measures against, and the AGS's own schedule
+        # beats the manifest's guess at it.
+        history.apply_exercise_schedule(self.cfg, data)
+
         solar_w = sum(data.get(k) or 0 for k in
                       ("mppt80PVPower", "southArrayPVPower", "westArrayPVPower"))
         gen_running = (data.get("mep803aAction") == history.GEN_RUNNING
@@ -238,6 +243,15 @@ class Agent:
             "baseline": self.guard.baseline(),
             "run_window_h": run_window_h,
             "charge_rates": self.model.charge_rates(now=now),
+            # Why each generator says it is running, straight from the AGS,
+            # and when each is next due to exercise. Nothing decides on
+            # these; they are here so the plan record and the digest can say
+            # what is happening instead of inferring it.
+            "run_reason": {"mep": data.get("mepOnReason"),
+                           "kubota": data.get("kubotaOnReason")},
+            "exercise": {g: history.next_exercise(self.conn, g, self.cfg,
+                                                  now=now)
+                         for g in history.GENS},
         }
         # The state machine sees the tick before the rules do: POLICY 4 asks
         # what state each generator is in, and a generator that started three
@@ -349,6 +363,29 @@ class Agent:
         else:
             lines.append(f"forecast tomorrow: {facts['tomorrow_cloud']}% cloud, "
                          f"est. solar not learned yet")
+
+        # What is running and why, in the AGS's words. A generator turning is
+        # the loudest thing on the system and the record used to say only
+        # that it was turning; on 2026-09-03 that left "why is it running"
+        # to be answered from the voltage, which said 52.0 V about a 59.4 V
+        # evening exercise.
+        for gen, label in (("mep", "MEP"), ("kubota", "Kubota")):
+            reason = (facts.get("run_reason") or {}).get(gen)
+            act = facts["data"].get("mep803aAction" if gen == "mep"
+                                    else "kubotaAction")
+            if act == history.GEN_RUNNING:
+                why = (reason.replace("_", " ") if reason
+                       else "reason not reported by the AGS")
+                lines.append(f"{label} running: {why}")
+
+        due = [(g, e) for g, e in (facts.get("exercise") or {}).items() if e]
+        for gen, e in sorted(due):
+            if e.get("days_until_due") is None:
+                continue
+            when = ("overdue" if e["overdue"] else
+                    f"in {e['days_until_due']:.0f} d")
+            lines.append(f"{gen} exercise: every {e['every_days']} d at "
+                         f"{e['at']}, last {e['last']}, next {when}")
 
         # Every numeric rule, with its arithmetic shown. The model may not
         # claim "no change" past a rule that fires without overruling it.

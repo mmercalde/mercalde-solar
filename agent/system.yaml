@@ -64,6 +64,12 @@ generators:
   # known bias in one direction, and a tank-fill calibration absorbs it: fill,
   # run, fill again, and scale the curve by what the pump says against what
   # this reports.
+  # The exercise blocks below are fallbacks, not the schedule. The AGS holds
+  # the real period, duration and start time in registers 0x006F-0x0071, the
+  # dashboard reads them hourly into /data, and the agent takes them from
+  # there. These values stood for a year and were wrong: both generators were
+  # written down at 09:00, and on 2026-09-03 the Kubota exercised at 6:49 PM,
+  # which the 09:00 window filed as an ordinary auto-start.
   mep:
     label: MEP-803A
     ags_slave: 51

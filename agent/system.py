@@ -81,8 +81,16 @@ def config_overlay(manifest):
         # Everything health.py reads: the pack's measured facts and the
         # literature coefficients its projection runs on.
         "battery": battery,
+        # Per generator, and every value here a fallback. The AGS holds the
+        # real schedule and the dashboard reads it into /data; these are what
+        # stands until a live AGS has been seen. `start` and `minutes` are
+        # the older shared pair, kept for a config that predates the split.
         "exercise": {"mep_days": gens["mep"]["exercise"]["every_days"],
                      "kubota_days": gens["kubota"]["exercise"]["every_days"],
+                     "mep_start": gens["mep"]["exercise"]["at"],
+                     "mep_minutes": gens["mep"]["exercise"]["minutes"],
+                     "kubota_start": gens["kubota"]["exercise"]["at"],
+                     "kubota_minutes": gens["kubota"]["exercise"]["minutes"],
                      "start": gens["mep"]["exercise"]["at"],
                      "minutes": gens["mep"]["exercise"]["minutes"]},
     }
@@ -137,12 +145,17 @@ def check_hard_limits(floor, ceiling, manifest=None):
 
 def _gen_line(key, gen, max_run):
     charge = f"{gen['nameplate_kw']} kW nameplate, {gen['charge_rate_pct']}% charge rate"
+    # The exercise schedule is the AGS's, and this prompt is a cached prefix
+    # that must not move with live data, so the line says roughly when and
+    # points at the field that says exactly when. It used to assert 09:00 as
+    # fact for both engines and the Kubota exercises in the evening.
     line = (f"  {gen['label']} (AGS slave {gen['ags_slave']}): {charge}, feeding "
-            f"{', '.join(gen['feeds'])}. Exercises "
-            f"{gen['exercise']['minutes']} minutes at {gen['exercise']['at']} "
-            f"every {gen['exercise']['every_days']} days. Assumed charge "
-            f"{gen['assumed_charge_a']} A into the pack until it has runs of "
-            f"its own.")
+            f"{', '.join(gen['feeds'])}. Exercises about "
+            f"{gen['exercise']['minutes']} minutes every "
+            f"{gen['exercise']['every_days']} days on a schedule the AGS "
+            f"holds; get_status's run_reason says when a run is one. Assumed "
+            f"charge {gen['assumed_charge_a']} A into the pack until it has "
+            f"runs of its own.")
     magnum = gen.get("magnum")
     if magnum:
         line += (f" Its runs also drive a {magnum['model']} that is not on "

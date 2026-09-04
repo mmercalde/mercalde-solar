@@ -71,6 +71,9 @@ Memory note: two 8B models resident is ~20 GB of 22. If the agent's tests show s
 | `mppt80PVPower`, `southArrayPVPower`, `westArrayPVPower` | Solar W per controller; total = sum |
 | `mep803aAction`, `kubotaAction` | 9 = running, 10 = stopped |
 | `mep803aMode`, `kubotaMode` | 0 off, 1 on, 2 auto |
+| `mepOnReason`, `kubotaOnReason` | AGS register 0x0044 as text: `not_on`, `dc_voltage_low`, `battery_soc_low`, `ac_current_high`, `contact_closed`, `manual_on`, `exercise`, `non_quiet_time`. The only source for why a generator started. `null` if the read failed |
+| `mepOffReason`, `kubotaOffReason` | AGS register 0x0045 as text; `manual_off`, `exercise_done`, `quiet_time` are named, anything else comes through as `code_N` |
+| `mepExercise`, `kubotaExercise` | `{every_days, minutes, start, start_raw}` from AGS registers 0x006F–0x0071, re-read hourly. The exercise schedule, which the agent used to carry as a hardcoded 09:00 and get wrong |
 | `mepAgsOnline`, `kubotaAgsOnline` | AGS reachable |
 | `pollErrors` | Cumulative Modbus errors |
 | `autoGenEnabled` | Pi5 auto-gen logic active |
@@ -111,7 +114,9 @@ How generator behaviour is produced from this one lever:
 
 `agent/scrape_gateway.py`: logs into InsightLocal and replays the chart CSV export (Dashboard → Battery Summary → Battery 1 → date → CSV; the file has columns `Date, Volts(V), Current(A), Temperature(°C), State Of Charge(%)` at one-minute resolution, one day per request). Discover the underlying HTTP request by fetching the page and reading its JavaScript, or by using a headless browser; document what you find in `agent/docs/gateway_api.md`. Walk backwards one day at a time until the export is empty, downsample each day to `hourly` immediately, never store minute rows. Check the Selection dropdown for other devices (XW units, MPPTs); if per-device charts exist, scrape those too with the same pattern. Then run nightly for yesterday.
 
-Exercise runs: any run that starts between 09:00 and 09:05 local and lasts ≤ 35 min is tagged `exercise` and excluded from the load model, charge-rate estimates, and anomaly triggers. Kubota exercises every 3 days, MEP every 5.
+Exercise runs are tagged from the AGS's own `mepOnReason` / `kubotaOnReason`, which is authoritative: reason `exercise` is an exercise whatever the clock says. `kind` comes from that reason for every run — `manual_on` → `manual`, `dc_voltage_low` still splits into `agent` or `auto` by who last moved the threshold, and any other code stands as itself. The start-time heuristic (within 5 min of the scheduled time, ≤ duration + 5 min) is the fallback for runs whose reason never reached the sample, and it logs when it is used. The schedule it measures against comes from `mepExercise` / `kubotaExercise`, per generator; `system.yaml` holds only a fallback. Exercise runs are excluded from the load model, charge-rate estimates, fuel figures, and anomaly triggers.
+
+The heuristic alone was wrong: it had both generators at 09:00, and on 2026-09-03 the Kubota exercised at 6:49 PM and was filed as an ordinary auto-start.
 
 Load model (`agent/loadmodel.py`, pure Python, no LLM):
 - Hourly load profile by hour-of-day and weekday/weekend, seasonal (by month) from `hourly`
@@ -125,7 +130,7 @@ Load model (`agent/loadmodel.py`, pure Python, no LLM):
 Standard OpenAI tool schemas in `agent/tools.py`; each maps to a Python function.
 
 Read (always allowed):
-- `get_status()` — condensed `/data` + `/config`
+- `get_status()` — condensed `/data` + `/config`, plus per generator `run_reason` (the AGS's, never inferred) and `started_at` / `running_minutes` while it runs
 - `get_history(hours | window)` — min/max/avg V, solar Wh, load Wh, battery Wh out, gen minutes
 - `get_load_forecast(hours)` — expected Wh from the load model for the next N hours, and projected time to reach 52.0 V
 - `get_gen_runtime(days)` — per-gen totals and run list with charge rates
@@ -135,6 +140,8 @@ Read (always allowed):
 
 Write (through guard):
 - `set_gen_thresholds(mep_start, mep_stop, kub_start, kub_stop, reason)`
+
+A field that is not a measurement carries a note saying what it is instead. `load_w` is null while a generator is feeding the inverters, and reads zero for a few seconds during an AC transfer; both were once reported as "no load is being drawn". Where a tool cannot answer, it says so in the field rather than going quiet, because quiet is what the model fills in from the voltage.
 
 Every time-word the owner uses — "overnight", "this month", "December" — is a
 literal argument value the tool takes, never something the model has to

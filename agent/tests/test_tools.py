@@ -782,3 +782,137 @@ def test_the_window_reaches_the_model_through_call(conn, cfg, monkeypatch):
     assert schema["parameters"]["properties"]["window"]["enum"] == \
         list(sunmod.WINDOWS)
     assert "overnight" in schema["description"]
+
+
+# --- Why a generator is running ---------------------------------------------
+#
+# 2026-09-03, 6:49 PM: the Kubota was running an AGS exercise and the agent
+# said "voltage dropped below 52.0 V" at 59.4 V, then added that no load was
+# being drawn. Neither claim came from a field. Both now have one.
+
+AGS_DATA = {
+    "batteryVoltage": 59.4, "battPower": 2400, "battCurrent": 40.0,
+    "battMonitorOnline": True, "battAhRemaining": 1500,
+    "battMinToDischarge": 900,
+    "mppt80PVPower": 0, "southArrayPVPower": 0, "westArrayPVPower": 0,
+    "acPower1": 600, "acPower2": 500,
+    "mep803aAction": history.GEN_STOPPED, "kubotaAction": history.GEN_RUNNING,
+    "mep803aMode": 2, "kubotaMode": 2,
+    "mepAgsOnline": True, "kubotaAgsOnline": True,
+    "mepOnReason": "not_on", "kubotaOnReason": "exercise",
+    "autoGenEnabled": True, "pollErrors": 0, "lastUpdate": "01:02:03",
+}
+
+
+def a_live_poll(monkeypatch, **over):
+    data = dict(AGS_DATA, **over)
+    monkeypatch.setattr(tools.history, "fetch_data", lambda *a, **k: data)
+    monkeypatch.setattr(tools.history, "fetch_config",
+                        lambda *a, **k: LIVE_CONFIG["config"])
+    return data
+
+
+def test_status_carries_the_ags_reason(conn, cfg, monkeypatch):
+    a_live_poll(monkeypatch)
+    out = tools.Tools(conn, cfg).get_status()
+    assert out["kubota"]["run_reason"] == "exercise"
+    assert out["kubota"]["run_reason_note"] is None
+    assert out["mep"]["run_reason"] == "not_on"
+
+
+def test_status_times_a_running_generator(conn, cfg, monkeypatch):
+    a_live_poll(monkeypatch)
+    now = int(time.time())
+    for i in range(20):
+        conn.execute("INSERT INTO samples (ts, kub_action, kub_on_reason) "
+                     "VALUES (?,?,?)",
+                     (now - (19 - i) * 60, history.GEN_RUNNING, "exercise"))
+    conn.commit()
+    out = tools.Tools(conn, cfg).get_status()
+    assert out["kubota"]["running_minutes"] == 19.0
+    assert ":" in out["kubota"]["started_at"]
+    # The one that is not running is not given a start time.
+    assert "started_at" not in out["mep"]
+
+
+def test_a_missing_reason_says_it_is_missing(conn, cfg, monkeypatch):
+    """Silence would let the model reach for the voltage again."""
+    a_live_poll(monkeypatch, kubotaOnReason=None)
+    out = tools.Tools(conn, cfg).get_status()
+    assert out["kubota"]["run_reason"] is None
+    note = out["kubota"]["run_reason_note"]
+    assert "not recorded" in note and "Never infer" in note
+
+
+def test_the_sample_supplies_a_reason_this_poll_lost(conn, cfg, monkeypatch):
+    a_live_poll(monkeypatch, kubotaOnReason=None)
+    now = int(time.time())
+    for i in range(20):
+        conn.execute("INSERT INTO samples (ts, kub_action, kub_on_reason) "
+                     "VALUES (?,?,?)",
+                     (now - (19 - i) * 60, history.GEN_RUNNING, "exercise"))
+    conn.commit()
+    out = tools.Tools(conn, cfg).get_status()
+    assert out["kubota"]["run_reason"] == "exercise"
+    assert "the minute it started" in out["kubota"]["run_reason_note"]
+
+
+def test_load_while_a_generator_runs_is_not_zero_load(conn, cfg, monkeypatch):
+    """"no load is being drawn" was said about a null."""
+    a_live_poll(monkeypatch)
+    out = tools.Tools(conn, cfg).get_status()
+    assert out["load_w"] is None
+    assert "not zero load" in out["load_w_note"]
+    assert "cannot be read" in out["load_w_note"]
+
+
+def test_a_zero_reading_is_labelled_as_a_reading(conn, cfg, monkeypatch):
+    """The inverters read 0 W through an AC transfer."""
+    a_live_poll(monkeypatch, kubotaAction=history.GEN_STOPPED, acPower1=0, acPower2=0)
+    out = tools.Tools(conn, cfg).get_status()
+    assert out["load_w"] == 0
+    assert "AC transfer" in out["load_w_note"]
+
+
+def test_an_unreported_load_is_not_zero_either(conn, cfg, monkeypatch):
+    a_live_poll(monkeypatch, kubotaAction=history.GEN_STOPPED,
+         acPower1=None, acPower2=None)
+    out = tools.Tools(conn, cfg).get_status()
+    assert out["load_w"] is None
+    assert "not reported" in out["load_w_note"]
+
+
+def test_an_ordinary_load_gets_no_note(conn, cfg, monkeypatch):
+    a_live_poll(monkeypatch, kubotaAction=history.GEN_STOPPED)
+    out = tools.Tools(conn, cfg).get_status()
+    assert out["load_w"] == 1100
+    assert out["load_w_note"] is None
+
+
+def test_the_schema_points_the_model_at_run_reason(conn, cfg):
+    schema = [s for s in tools.SCHEMAS
+              if s["function"]["name"] == "get_status"][0]["function"]
+    assert "run_reason" in schema["description"]
+    assert "only source" in schema["description"]
+
+
+def test_the_ask_prompt_sends_why_is_it_running_to_run_reason():
+    import prompts
+    p = prompts.ask_prompt()
+    assert "why a generator is running" in p
+    assert "run_reason" in p
+    assert "the reason is not recorded" in p
+    assert "Never infer a" in p and "voltage or the thresholds" in p
+    # And the load claim that came with it.
+    assert "no load is being drawn" in p
+    assert "AC transfer" in p
+
+
+def test_the_run_reason_decides_nothing(conn, cfg):
+    """A reason is reported, never acted on. No threshold moves because a
+    run turned out to be an exercise. If a later commit wants that, this is
+    the test to delete on purpose."""
+    import guard
+    src = open(guard.__file__).read()
+    for name in ("run_reason", "on_reason", "REASON_KIND", "exercise"):
+        assert name not in src, f"guard.py should not know about {name}"

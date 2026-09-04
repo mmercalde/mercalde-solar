@@ -60,6 +60,11 @@ SAMPLE_FIELDS = [
     ("mepAgsOnline", "mep_ags_online"),
     ("kubotaAgsOnline", "kub_ags_online"),
     ("pollErrors", "poll_errors"),
+    # Why the AGS says each generator is running. Recorded because the
+    # alternative is inferring it, and on 2026-09-03 the inference said
+    # "voltage dropped below 52.0 V" about a 6:49 PM exercise at 59.4 V.
+    ("mepOnReason", "mep_on_reason"),
+    ("kubotaOnReason", "kub_on_reason"),
     ("autoGenEnabled", "auto_gen_enabled"),
     ("lastUpdate", "last_update"),
 ]
@@ -73,6 +78,7 @@ CREATE TABLE IF NOT EXISTS samples (
   mppt80_pv REAL, south_pv REAL, west_pv REAL,
   mep_action INTEGER, kub_action INTEGER, mep_mode INTEGER, kub_mode INTEGER,
   mep_ags_online INTEGER, kub_ags_online INTEGER,
+  mep_on_reason TEXT, kub_on_reason TEXT,
   poll_errors INTEGER, auto_gen_enabled INTEGER, last_update TEXT
 );
 
@@ -129,6 +135,12 @@ CREATE TABLE IF NOT EXISTS gen_runs (
   -- or the generator has no curve: a run that burned fuel must not read as
   -- nought.
   fuel_gal REAL,
+  -- The AGS's own Generator On Reason at the minute the run started, as
+  -- text: 'exercise', 'dc_voltage_low', 'manual_on'. `kind` is derived from
+  -- it, and keeping the raw reason means a classification can be audited
+  -- rather than taken on faith. NULL for runs derived before the register
+  -- was read, and for any minute the read failed.
+  on_reason TEXT,
   solo INTEGER, kind TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS gen_runs_key ON gen_runs (gen, start_ts);
@@ -167,7 +179,10 @@ CREATE INDEX IF NOT EXISTS actions_ts ON actions (ts);
 MIGRATIONS = [("gen_runs", "load_w", "REAL"),
               ("gen_runs", "gross_w", "REAL"),
               ("gen_runs", "fuel_gal", "REAL"),
-              ("gen_runs", "gross_attr_w", "REAL")]
+              ("gen_runs", "gross_attr_w", "REAL"),
+              ("gen_runs", "on_reason", "TEXT"),
+              ("samples", "mep_on_reason", "TEXT"),
+              ("samples", "kub_on_reason", "TEXT")]
 
 
 def migrate(conn):
@@ -322,25 +337,150 @@ def purge_samples(conn, now=None):
 
 # --- generator runs ---------------------------------------------------------
 
-GENS = {"mep": ("mep_action", "kub_action", "mep_mode"),
-        "kubota": ("kub_action", "mep_action", "kub_mode")}
+# gen -> (its action column, the other one's, its mode column, its AGS
+# on-reason column).
+GENS = {"mep": ("mep_action", "kub_action", "mep_mode", "mep_on_reason"),
+        "kubota": ("kub_action", "mep_action", "kub_mode", "kub_on_reason")}
 
 
-def _is_exercise(start_ts, duration_min, cfg):
-    """SPEC section 5: starts 09:00-09:05 local and lasts <= 35 min."""
+# The AGS's Generator On Reason, as pi5/app.py spells it in /data, mapped to
+# the `kind` a run gets. Two of them are not the run's own name: reason 5 is
+# the owner turning it on, which this has always called `manual`, and reason
+# 1 is the ordinary low-voltage start, which still has to be split into
+# `agent` and `auto` by looking at who moved the threshold. The rest stand as
+# themselves - a run started by a closed contact is not `auto` and pretending
+# otherwise is what put a 6:49 PM exercise into the charge-rate learning.
+REASON_KIND = {
+    "exercise": "exercise",
+    "manual_on": "manual",
+    "battery_soc_low": "battery_soc_low",
+    "ac_current_high": "ac_current_high",
+    "contact_closed": "contact_closed",
+    "non_quiet_time": "non_quiet_time",
+}
+# The reason that still needs the threshold check to become agent-or-auto.
+REASON_VOLTAGE = "dc_voltage_low"
+# Read but carrying no information about a run: the register says the
+# generator is not on, which cannot be why it started.
+REASON_NONE = ("not_on",)
+
+
+def exercise_window(gen, cfg):
+    """(start "HH:MM", minutes) for one generator's exercise.
+
+    Per generator, because they are not on the same schedule: the manifest
+    had both at 09:00 and the Kubota exercises in the evening. `mep_start`
+    and `kubota_start` are what /data supplies; `start` is the old shared
+    fallback and stays for a config that has never seen a live AGS.
+    """
     ex = cfg["exercise"]
-    hh, mm = (int(x) for x in ex["start"].split(":"))
+    start = ex.get(f"{gen}_start") or ex["start"]
+    minutes = ex.get(f"{gen}_minutes") or ex["minutes"]
+    return start, minutes
+
+
+# /data key holding each generator's live exercise schedule.
+EXERCISE_KEY = {"mep": "mepExercise", "kubota": "kubotaExercise"}
+
+
+def apply_exercise_schedule(cfg, data):
+    """Take the exercise schedule from /data, where the AGS itself holds it.
+
+    The manifest's 09:00 was a guess written down once and then trusted. The
+    AGS knows the real period, duration and start time and the dashboard now
+    reads them, so the manifest's values are the fallback for a config that
+    has never seen a live AGS. Returns what changed, for the log.
+    """
+    ex = cfg.setdefault("exercise", {})
+    changed = {}
+    for gen, key in EXERCISE_KEY.items():
+        live = (data or {}).get(key)
+        if not isinstance(live, dict):
+            continue
+        for field, cfg_key in (("start", f"{gen}_start"),
+                               ("minutes", f"{gen}_minutes"),
+                               ("every_days", f"{gen}_days")):
+            val = live.get(field)
+            if val in (None, ""):
+                continue
+            if ex.get(cfg_key) != val:
+                changed[cfg_key] = (ex.get(cfg_key), val)
+                ex[cfg_key] = val
+    if changed:
+        log.info("exercise schedule from the AGS: %s",
+                 ", ".join(f"{k} {old!r} -> {new!r}"
+                           for k, (old, new) in sorted(changed.items())))
+    return changed
+
+
+def next_exercise(conn, gen, cfg, now=None):
+    """When this generator is next due to exercise, from its own last one.
+
+    The period is the AGS's; the last exercise is whatever `gen_runs` has
+    classified as one. Returns None where neither is known - a due date
+    invented from a default period is worse than saying nothing.
+    """
+    # mep_days / kubota_days: the manifest's key and the one the live
+    # schedule writes are the same key, so the AGS simply overwrites it.
+    ex = cfg.get("exercise") or {}
+    days = ex.get(f"{gen}_days")
+    if not days:
+        return None
+    now = int(now or time.time())
+    row = conn.execute(
+        "SELECT MAX(start_ts) t FROM gen_runs WHERE gen=? AND kind='exercise'",
+        (gen,)).fetchone()
+    last = row["t"] if row else None
+    start, minutes = exercise_window(gen, cfg)
+    out = {"every_days": days, "at": start, "minutes": minutes,
+           "last": stamp(last, cfg) if last else None}
+    if last:
+        due = last + days * 86400
+        out["due"] = stamp(due, cfg)
+        out["days_until_due"] = round((due - now) / 86400.0, 1)
+        out["overdue"] = due < now
+    return out
+
+
+def _is_exercise(gen, start_ts, duration_min, cfg):
+    """SPEC section 5: starts within 5 min of the exercise time and is short.
+
+    This is the fallback only. The AGS says outright why it started, and the
+    heuristic is what is left when that reason did not reach the sample.
+    """
+    start, minutes = exercise_window(gen, cfg)
+    hh, mm = (int(x) for x in str(start).split(":"))
     t = local(start_ts, cfg)
     window_start = t.replace(hour=hh, minute=mm, second=0, microsecond=0)
     in_window = window_start <= t <= window_start + timedelta(minutes=5)
-    return in_window and duration_min <= ex["minutes"] + 5
+    return in_window and duration_min <= minutes + 5
 
 
-def _classify(conn, gen, start_ts, duration_min, mode_at_start, cfg):
-    if _is_exercise(start_ts, duration_min, cfg):
-        return "exercise"
-    if mode_at_start == MODE_ON:
-        return "manual"
+def _classify(conn, gen, start_ts, duration_min, mode_at_start, cfg,
+              on_reason=None):
+    """What kind of run this was, from the AGS's reason where there is one.
+
+    The reason is the AGS's own answer and beats every inference here. Before
+    it was recorded, a run was classified by when it started and how long it
+    lasted, which files any evening exercise as an ordinary auto-start and
+    lets it into the charge-rate and fuel figures it should be out of.
+    """
+    if on_reason and on_reason not in REASON_NONE:
+        kind = REASON_KIND.get(on_reason)
+        if kind:
+            return kind
+        if on_reason != REASON_VOLTAGE:
+            # A code the dashboard did not have a name for. It is still a
+            # fact about this run and is better kept than rounded to 'auto'.
+            return on_reason
+    else:
+        log.info("%s run at %s has no AGS on-reason; falling back to the "
+                 "%s exercise window and the threshold check",
+                 gen, stamp(start_ts, cfg), exercise_window(gen, cfg)[0])
+        if _is_exercise(gen, start_ts, duration_min, cfg):
+            return "exercise"
+        if mode_at_start == MODE_ON:
+            return "manual"
     # An agent run is one the agent caused by raising this gen's start threshold.
     key = "mep_start" if gen == "mep" else "kub_start"
     row = conn.execute(
@@ -365,7 +505,7 @@ def derive_gen_runs(conn, cfg, since=None):
     the last recorded stop so a re-run cannot double-count.
     """
     added = 0
-    for gen, (col, other_col, mode_col) in GENS.items():
+    for gen, (col, other_col, mode_col, reason_col) in GENS.items():
         start_from = since
         if start_from is None:
             row = conn.execute(
@@ -374,6 +514,7 @@ def derive_gen_runs(conn, cfg, since=None):
             start_from = (row["t"] or 0) + 1
         rows = conn.execute(
             f"SELECT ts, {col} AS act, {other_col} AS other, {mode_col} AS mode, "
+            f"{reason_col} AS on_reason, "
             "battery_v, batt_current, batt_power, ac_power1, ac_power2 "
             "FROM samples WHERE ts >= ? ORDER BY ts",
             (start_from,)).fetchall()
@@ -385,6 +526,10 @@ def derive_gen_runs(conn, cfg, since=None):
                 if open_run is None:
                     open_run = {"start_ts": r["ts"], "start_v": r["battery_v"],
                                 "mode": r["mode"], "solo": True,
+                                # The reason as it stood at the first running
+                                # minute. It is a start reason, so a later
+                                # minute cannot improve on it.
+                                "on_reason": r["on_reason"],
                                 "currents": [], "loads": [], "gross": [],
                                 "gross_paired": []}
                 if r["other"] == GEN_RUNNING:
@@ -429,7 +574,9 @@ def _close_run(conn, cfg, gen, run, stop_row):
     rate_a = sum(run["currents"]) / len(run["currents"]) if run["currents"] else None
     load_w = sum(run["loads"]) / len(run["loads"]) if run["loads"] else None
     gross_w = sum(run["gross"]) / len(run["gross"]) if run["gross"] else None
-    kind = _classify(conn, gen, run["start_ts"], duration_min, run["mode"], cfg)
+    on_reason = run.get("on_reason")
+    kind = _classify(conn, gen, run["start_ts"], duration_min, run["mode"], cfg,
+                     on_reason=on_reason)
     # Priced at close, from this engine's share of the gross. Imported here
     # rather than at the top because fuel.py is about what a run cost and
     # history.py is about what happened; the dependency runs one way only.
@@ -443,12 +590,42 @@ def _close_run(conn, cfg, gen, run, stop_row):
     cur = conn.execute(
         "INSERT OR IGNORE INTO gen_runs "
         "(gen, start_ts, stop_ts, duration_min, start_v, stop_v, rate_v_per_h, "
-        "rate_a, load_w, gross_w, gross_attr_w, fuel_gal, solo, kind) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "rate_a, load_w, gross_w, gross_attr_w, fuel_gal, on_reason, solo, kind) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (gen, run["start_ts"], stop_row["ts"], round(duration_min, 2), start_v, stop_v,
          rate_v_per_h, rate_a, load_w, gross_w, gross_attr_w, fuel_gal,
-         int(run["solo"]), kind))
+         on_reason, int(run["solo"]), kind))
     return cur.rowcount
+
+
+def current_run(conn, gen, now=None, max_hours=12):
+    """The run this generator is in the middle of, or None.
+
+    `gen_runs` only holds runs that have closed, so a generator that is
+    turning right now is not in it yet. Walk back through samples from the
+    latest one for as long as it says running, which gives the start, how
+    long it has been going, and the AGS's reason at the minute it started.
+    """
+    now = int(now or time.time())
+    col, _other, _mode, reason_col = GENS[gen]
+    rows = conn.execute(
+        f"SELECT ts, {col} AS act, {reason_col} AS on_reason FROM samples "
+        "WHERE ts <= ? AND ts >= ? ORDER BY ts DESC",
+        (now, now - max_hours * 3600)).fetchall()
+    if not rows or rows[0]["act"] != GEN_RUNNING:
+        return None
+    start = rows[0]
+    for r in rows:
+        if r["act"] != GEN_RUNNING:
+            break
+        start = r
+    return {"started_at": start["ts"],
+            "running_minutes": round((now - start["ts"]) / 60.0, 1),
+            "on_reason": start["on_reason"],
+            # True when the walk hit the end of the window still running:
+            # the run began before the samples this looked at, so the
+            # minutes are a floor rather than the figure.
+            "truncated": start["ts"] <= now - max_hours * 3600}
 
 
 def gen_running_hours(conn, start_ts, end_ts):

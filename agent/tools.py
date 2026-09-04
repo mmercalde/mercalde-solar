@@ -267,7 +267,11 @@ SCHEMAS = [
     {"type": "function", "function": {
         "name": "get_status",
         "description": "Current battery, solar, load and generator state, plus "
-                       "the live generator thresholds.",
+                       "the live generator thresholds. Each generator carries "
+                       "run_reason - the AGS's own reason it is running, e.g. "
+                       "\"exercise\", \"dc_voltage_low\", \"manual_on\" - and "
+                       "started_at and running_minutes while it runs. This is "
+                       "the only source for why a generator started.",
         "parameters": {"type": "object", "properties": {}, "required": []}}},
     {"type": "function", "function": {
         "name": "get_history",
@@ -479,6 +483,34 @@ class Tools:
 
     # --- read ---------------------------------------------------------------
 
+    @staticmethod
+    def _house_load(data, gen_running):
+        """(watts, note). The note is the point.
+
+        `load_w` has three ways of not being the house's draw and they all
+        used to look alike. On 2026-09-03 the agent reported "no load is
+        being drawn" while the Kubota was running and the field was None.
+        None is not zero, zero is not always the house, and neither is a
+        reading nobody should quote without the sentence beside it.
+        """
+        ac1, ac2 = data.get("acPower1"), data.get("acPower2")
+        if gen_running:
+            return None, ("not measurable right now: a generator is feeding "
+                          "the inverters, so their AC output is the "
+                          "generator's, not the house's. This is not zero "
+                          "load - say the house draw cannot be read while a "
+                          "generator is running.")
+        if ac1 is None and ac2 is None:
+            return None, ("not reported in this poll. Say it is not "
+                          "reported; do not read it as no load.")
+        total = (ac1 or 0) + (ac2 or 0)
+        if total == 0:
+            return 0, ("the inverters reported 0 W. They read zero for a few "
+                       "seconds during an AC transfer, so this is as likely "
+                       "to be the reading as the house. Do not state that "
+                       "nothing is being drawn on one poll of it.")
+        return total, None
+
     def get_status(self):
         data = history.fetch_data(self.cfg)
         live = history.fetch_config(self.cfg)
@@ -486,6 +518,38 @@ class Tools:
                     ("mppt80PVPower", "southArrayPVPower", "westArrayPVPower"))
         gen_running = (data.get("mep803aAction") == history.GEN_RUNNING
                        or data.get("kubotaAction") == history.GEN_RUNNING)
+        load_w, load_note = self._house_load(data, gen_running)
+        gen_status = {}
+        for gen, act_key, reason_key in (
+                ("mep", "mep803aAction", "mepOnReason"),
+                ("kubota", "kubotaAction", "kubotaOnReason")):
+            running = data.get(act_key) == history.GEN_RUNNING
+            # The AGS's answer, and the only answer. Where the register did
+            # not reach /data the field says so rather than going quiet: a
+            # missing reason is a fact, and it is not the same fact as a
+            # generator nobody started.
+            gen_status[gen] = {
+                "run_reason": data.get(reason_key),
+                "run_reason_note": (
+                    None if data.get(reason_key) else
+                    "not recorded: the AGS's Generator On Reason did not "
+                    "reach this poll. Say the reason is not recorded. Never "
+                    "infer one from voltage or from the thresholds.")}
+            if running:
+                run = history.current_run(self.conn, gen)
+                if run:
+                    gen_status[gen]["started_at"] = history.stamp(
+                        run["started_at"], self.cfg)
+                    gen_status[gen]["running_minutes"] = run["running_minutes"]
+                    if run["truncated"]:
+                        gen_status[gen]["running_minutes_note"] = (
+                            "at least: the run began before the samples "
+                            "this looked back through")
+                    if run["on_reason"] and not gen_status[gen]["run_reason"]:
+                        gen_status[gen]["run_reason"] = run["on_reason"]
+                        gen_status[gen]["run_reason_note"] = (
+                            "from the sample at the minute it started, not "
+                            "from this poll")
         return {
             "voltage": data.get("batteryVoltage"),
             "soc_pct_note": "not reported: the Battery Monitor's state of charge scale is unreliable and nothing may be quoted from it. What the pack holds is watt-hours between two voltages; how it is ageing is the battery_health tool.",
@@ -500,21 +564,23 @@ class Tools:
                 "south": data.get("southArrayPVPower"),
                 "west": data.get("westArrayPVPower")},
             # AC output is house load only when no generator is feeding the inverters.
-            "load_w": (None if gen_running else
-                       (data.get("acPower1") or 0) + (data.get("acPower2") or 0)),
+            "load_w": load_w,
+            "load_w_note": load_note,
             "generator_running": gen_running,
             "mep": {"running": data.get("mep803aAction") == history.GEN_RUNNING,
                     "mode": data.get("mep803aMode"),
                     "ags_online": data.get("mepAgsOnline"),
                     "start_v": live["mep803a"]["startVoltage"],
                     "stop_v": live["mep803a"]["stopVoltage"],
-                    "max_runtime_min": live["mep803a"]["maxRuntime"]},
+                    "max_runtime_min": live["mep803a"]["maxRuntime"],
+                    **gen_status["mep"]},
             "kubota": {"running": data.get("kubotaAction") == history.GEN_RUNNING,
                        "mode": data.get("kubotaMode"),
                        "ags_online": data.get("kubotaAgsOnline"),
                        "start_v": live["kubota"]["startVoltage"],
                        "stop_v": live["kubota"]["stopVoltage"],
-                       "max_runtime_min": live["kubota"]["maxRuntime"]},
+                       "max_runtime_min": live["kubota"]["maxRuntime"],
+                       **gen_status["kubota"]},
             "auto_gen_enabled": data.get("autoGenEnabled"),
             "poll_errors": data.get("pollErrors"),
             "last_update": data.get("lastUpdate"),

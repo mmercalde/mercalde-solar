@@ -581,6 +581,43 @@ ungrounded reply is retried once, and if the model still will not look,
 Python answers from `/data` instead. A made-up voltage never reaches the
 owner or Alexa.
 
+### Why a generator is running
+
+The AGS keeps a Generator On Reason in register 0x0044 and it had never been
+read. On 2026-09-03 the Kubota ran an AGS exercise at 6:49 PM, and asked why
+it was running the agent answered "voltage dropped below 52.0 V" — at 59.4 V,
+with no field anywhere carrying a reason. It was reasoning from the start
+threshold because that was the only generator-shaped number in front of it.
+
+The dashboard now reads 0x0044 and 0x0045 every poll and puts them in `/data`
+as text: `exercise`, `dc_voltage_low`, `manual_on` and the rest. Samples
+record the on-reason, `get_status` reports it as `run_reason` beside
+`started_at` and `running_minutes`, and the ask prompt sends "why is X
+running" to that field and nowhere else. When it is missing the tool says so
+and the answer is "the reason is not recorded", which is a worse answer than
+a cause and a much better one than a wrong cause.
+
+The same register fixes the classification. A run's `kind` used to be
+inferred from when it started: within five minutes of 09:00 and short enough
+made it an exercise. Both generators were written down at 09:00 and the
+Kubota exercises in the evening, so that 6:49 PM run was filed as `auto` and
+went into the charge-rate learning and the fuel figures. Now `kind` comes
+from the reason — `exercise` is an exercise whatever the clock says — and the
+clock heuristic is the fallback for runs whose reason never arrived, which
+logs a line when it fires. The exercise schedule it measures against is read
+from AGS registers 0x006F–0x0071 hourly into `mepExercise` /
+`kubotaExercise`; `system.yaml` keeps a value only as a fallback, and the
+plan record says when each generator is next due.
+
+### Fields that are not measurements
+
+`load_w` is null while a generator feeds the inverters, because their AC
+output is then the generator's and the house's draw cannot be read. It also
+reads zero for a few seconds during an AC transfer. Both were once reported
+as "no load is being drawn". Every one of those cases now carries a
+`load_w_note` saying which it is, and the prompt requires the note to be read
+out rather than the number.
+
 ## Running it by hand
 
 ```bash

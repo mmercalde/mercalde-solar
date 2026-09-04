@@ -162,11 +162,15 @@ class EvalTools(toolsmod.Tools):
             "load_w": (None if running
                        else (s["ac_power1"] or 0) + (s["ac_power2"] or 0)),
             "generator_running": running,
+            # run_reason as the sample recorded it, so a replayed "why is it
+            # running" is answered from the same field the live tool uses.
             "mep": {"running": s["mep_action"] == history.GEN_RUNNING,
                     "ags_online": bool(s["mep_ags_online"]),
+                    "run_reason": s["mep_on_reason"],
                     "start_v": th.get("mep_start"), "stop_v": th.get("mep_stop")},
             "kubota": {"running": s["kub_action"] == history.GEN_RUNNING,
                        "ags_online": bool(s["kub_ags_online"]),
+                       "run_reason": s["kub_on_reason"],
                        "start_v": th.get("kub_start"), "stop_v": th.get("kub_stop")},
             "auto_gen_enabled": bool(s["auto_gen_enabled"]),
             "poll_errors": s["poll_errors"],
