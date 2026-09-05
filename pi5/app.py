@@ -79,11 +79,14 @@ AGS_MEP803A_ID = 51
 AGS_KUBOTA_ID = 50
 
 # How many register reads each poll counts into `errors`: 18 across the
-# inverters, the battery monitor, the three MPPTs, plus one generator-mode
-# read per AGS. `errors` is a count of failed READS, not of dead devices -
-# a single slave contributes up to four of them - so the alert below says
-# reads. Only when every one of them fails is the gateway itself gone.
-POLL_READS = 20
+# inverters, the battery monitor, the three MPPTs, one generator-mode read per
+# AGS, and the ten of the XW+ 5548's status set. `errors` is a count of failed
+# READS, not of dead devices - a single slave contributes up to ten of them -
+# so the alert below says reads. Only when every one of them fails is the
+# gateway itself gone, which is why this has to grow with the read set: left
+# at 20 while 30 reads can fail, twenty failures out of thirty would have been
+# announced as a gateway that had stopped answering.
+POLL_READS = 30
 
 # Register addresses
 REG_AC_POWER = 0x009A
@@ -133,6 +136,60 @@ REG_MAX_CHARGE_RATE = 0x016F
 REG_OPERATING_MODE = 0x0166
 REG_FORCE_CHARGER_STATE = 0x0165
 REG_CHARGE_DC_POWER = 0x005E
+
+# XW+ 5548 (slave 11), from Modbus Map: Conext XW/XW+ Device
+# 503-0246-01-01 Rev A.3. This is the XW map, which is not the map the
+# constants above belong to: on an XW, 0x0046 is Warning Bitmap 0 and not the
+# Battery Monitor's voltage, and 0x0049 is Sell Enabled and not the MPPT's
+# Charger Status. Reusing REG_BATTERY_VOLTAGE or REG_CHARGER_STATUS against
+# slave 11 reads a real register with a plausible value and the wrong meaning,
+# so this unit gets its own names. Verified live on 2026-09-04 against slaves
+# 10 and 11: 0x0047 reads 1 on the inverting master and 0 on this unit, which
+# is charge-only, and 0x007A reads 1024=Invert against 1026=APS Only.
+REG_XW_DEVICE_STATE       = 0x0040  # uint16, see XW_DEVICE_STATE
+REG_XW_ACTIVE_FAULTS      = 0x004B  # uint16, 0=none, 1=active
+REG_XW_ACTIVE_WARNINGS    = 0x004C  # uint16, 0=none, 1=active
+REG_XW_BATTERY_VOLTAGE    = 0x0050  # uint32, V x0.001, the unit's own sense
+REG_XW_CHARGE_DC_CURRENT  = 0x005C  # uint32, A x0.001
+REG_XW_INVERTER_STATUS    = 0x007A  # uint16, see XW_INVERTER_STATUS
+REG_XW_CHARGER_STATUS     = 0x007B  # uint16, see XW_CHARGER_STATUS
+# The Kubota feeds this unit on AC2, which the XW map calls Generator, not on
+# AC1, which it calls Grid. Read on 2026-09-04: slave 11 has 688,846 Wh of
+# Generator Input Energy Lifetime (0x015C) against 0 Wh of Grid Input Energy
+# Lifetime (0x0114), and its AC2 Association (0x01D1) is 19=Generator 1. Every
+# watt-hour the XW+ has ever taken in came through these three registers.
+REG_XW_GEN_AC_VOLTAGE     = 0x00A2  # uint32, V x0.001
+REG_XW_GEN_AC_CURRENT     = 0x00A4  # uint32, A x0.001
+REG_XW_GEN_AC_POWER       = 0x00AC  # uint32, W
+
+# Enumerations from the same map. Anything the map does not name comes through
+# as "code_N" rather than as a guess, the way GEN_OFF_REASON does: a wrong
+# name reads exactly like a right one.
+XW_DEVICE_STATE = {
+    0: "hibernate", 1: "power_save", 2: "safe_mode", 3: "operating",
+    4: "diagnostic", 5: "remote_power_off", 255: "not_available",
+}
+XW_INVERTER_STATUS = {
+    1024: "invert", 1025: "ac_pass_through", 1026: "aps_only",
+    1027: "load_sense", 1028: "inverter_disabled", 1029: "load_sense_ready",
+    1030: "engaging_inverter", 1031: "invert_fault", 1032: "inverter_standby",
+    1033: "grid_tied", 1034: "grid_support", 1035: "gen_support",
+    1036: "sell_to_grid", 1037: "load_shaving",
+    1038: "grid_frequency_stabilization",
+}
+XW_CHARGER_STATUS = {
+    768: "not_charging", 769: "bulk", 770: "absorption", 771: "overcharge",
+    772: "equalize", 773: "float", 774: "no_float", 775: "constant_vi",
+    776: "charger_disabled", 777: "qualifying_ac", 778: "qualifying_aps",
+    779: "engaging_charger", 780: "charge_fault", 781: "charger_suspend",
+    782: "ac_good", 783: "aps_good", 784: "ac_fault", 785: "charge",
+    786: "absorption_exit_pending", 787: "ground_fault", 788: "ac_good_pending",
+}
+
+
+def xw_status_text(table, value):
+    return table.get(value, f"code_{value}")
+
 
 # V2.4: AC Diagnostic registers (503 spec)
 REG_AC_LOAD_L1_VOLTAGE  = 0x008E  # uint32, scale 0.001 V
@@ -759,9 +816,13 @@ def ac_diag_save(reading):
 # These are additions to a poll that already works: a gateway that drops one
 # of them must leave mep803aAction and the rest exactly as they were, so the
 # key is simply left out of new_data and the previous value survives the
-# dict update. They are also kept out of `errors` for the same reason the
-# battery monitor is - POLL_READS and the "gateway not responding" threshold
-# describe the original 20 reads, and a new read must not move an alert.
+# dict update. They are also kept out of `errors`, as the battery monitor is:
+# they are per-generator extras on top of a mode read that is already counted,
+# so counting them too would let one dead AGS raise `errors` by three.
+# The XW+ status set below takes the other choice - each of its reads is
+# counted, and POLL_READS was raised with it - because those ten reads are the
+# only ones anything asks of slave 11, and a slave that has gone quiet should
+# say so in the error count rather than in ten fields that quietly stop moving.
 
 def read_gen_reasons(slave_id):
     """(on_reason, off_reason) as text, either or both None if unread."""
@@ -839,6 +900,56 @@ def refresh_exercise_schedule(new_data, now=None):
                         f"{sched['minutes']} min, start "
                         f"{sched['start'] or sched['start_raw']}")
     return True
+
+
+# The XW+ 5548's own status set. The poll used to read two registers from
+# slave 11 - its charge rate cap and its DC charge power - and the dashboard
+# showed neither, so the third inverter was invisible: no way to see that the
+# Kubota was feeding it, what stage its charger was in, or that it had faulted.
+#
+# Each register is read on its own and a failure leaves its key unset, so the
+# previous poll's value survives `system_data.update(new_data)` and one dead
+# register blanks one field instead of the card. Every failure counts one read,
+# the same as the reads above it.
+XWPLUS_READS = (
+    ("xwPlusDeviceState", REG_XW_DEVICE_STATE, 16,
+     lambda v: xw_status_text(XW_DEVICE_STATE, v)),
+    ("xwPlusInverterStatus", REG_XW_INVERTER_STATUS, 16,
+     lambda v: xw_status_text(XW_INVERTER_STATUS, v)),
+    ("xwPlusChargerStatus", REG_XW_CHARGER_STATUS, 16,
+     lambda v: xw_status_text(XW_CHARGER_STATUS, v)),
+    ("xwPlusFaultActive", REG_XW_ACTIVE_FAULTS, 16, lambda v: v == 1),
+    ("xwPlusWarningActive", REG_XW_ACTIVE_WARNINGS, 16, lambda v: v == 1),
+    ("xwPlusBatteryVoltage", REG_XW_BATTERY_VOLTAGE, 32,
+     lambda v: round(v / 1000.0, 2)),
+    ("xwPlusChargeCurrent", REG_XW_CHARGE_DC_CURRENT, 32,
+     lambda v: round(v / 1000.0, 3)),
+    ("xwPlusAcInVoltage", REG_XW_GEN_AC_VOLTAGE, 32,
+     lambda v: round(v / 1000.0, 1)),
+    ("xwPlusAcInCurrent", REG_XW_GEN_AC_CURRENT, 32,
+     lambda v: round(v / 1000.0, 2)),
+    ("xwPlusAcInPower", REG_XW_GEN_AC_POWER, 32, lambda v: v),
+)
+# POLL_READS counts these ten. A row added here without raising POLL_READS
+# turns a partial failure into a "Gateway not responding" alert.
+
+
+def read_xwplus_status(new_data):
+    """Fill the xwPlus* fields from slave 11. Returns the number of failed reads."""
+    failed = 0
+    for key, reg, width, convert in XWPLUS_READS:
+        try:
+            reader = (modbus.read_holding_register_16 if width == 16
+                      else modbus.read_holding_register_32)
+            val = reader(MODBUS_HOST, MODBUS_PORT, INVERTER_3_ID, reg)
+        except Exception as e:
+            logger.debug(f"XW+ read 0x{reg:04X} failed: {e}")
+            val = None
+        if val is None:
+            failed += 1
+            continue
+        new_data[key] = convert(val)
+    return failed
 
 
 # --- Polling Thread ---
@@ -968,6 +1079,12 @@ def poll_modbus():
 
             val = modbus.read_holding_register_32(MODBUS_HOST, MODBUS_PORT, INVERTER_3_ID, REG_CHARGE_DC_POWER)
             new_data["chargePower3"] = val if val is not None else 0
+            # Same reading under the XW+ card's own name. No extra register:
+            # chargePower3 keeps its name and everything that reads it.
+            if val is not None:
+                new_data["xwPlusChargePower"] = val
+
+            errors += read_xwplus_status(new_data)
 
             # --- Conext Battery Monitor: true net battery power from the shunt.
             # Deliberately excluded from `errors`; if the monitor is absent the
@@ -1516,7 +1633,7 @@ input[type=range]::-moz-range-thumb{width:14px;height:14px;border-radius:50%;bac
 
 <details class='secacc' open>
 <summary class='sec'>Inverters <span class='caret'>&#10095;</span></summary>
-<div class='grid2'>
+<div class='grid3'>
   <div class='card rise' style='--accent:var(--ac);animation-delay:.18s'>
     <div class='lbl'>&#128268; XW Pro Master &middot; ID 10</div>
     <div class='val num'><span id='acPower1_value'>0</span><span class='u'>W</span></div>
@@ -1527,25 +1644,38 @@ input[type=range]::-moz-range-thumb{width:14px;height:14px;border-radius:50%;bac
     <div class='val num'><span id='acPower2_value'>0</span><span class='u'>W</span></div>
     <div class='sub'><span class='num' id='acCurrent2_value'>0</span> A &middot; charge <span class='num' id='chargePower2_value'>0</span> W</div>
   </div>
+  <!-- Charge-only: the Kubota feeds it and it never inverts to the house, so
+       the headline is what it is putting into the pack, not AC out. -->
+  <div class='card rise' style='--accent:var(--ac);animation-delay:.26s'>
+    <div class='lbl'>&#128268; XW+ 5548 &middot; ID 11 <span id='xwp_chip' class='chip off'>--</span></div>
+    <div class='val'>
+      <span id='xwp_charging'><span class='num' id='xwPlusChargePower_value'>0</span><span class='u'>W</span></span>
+      <span id='xwp_idle' style='display:none;font-size:1.5rem'>Idle</span>
+    </div>
+    <div class='sub'><span id='xwp_stage'>--</span> &middot; <span class='num' id='xwPlusChargeCurrent_value'>0</span> A dc &middot; <span class='num' id='xwPlusBatteryVoltage_value'>0</span> V</div>
+    <div class='sub'>Kubota in <span id='xwp_acin'>--</span></div>
+    <div class='sub'>rate cap <strong class='num' id='xwPlusRate_value' style='color:var(--solar)'>0</strong>% &middot; <span id='xwp_alarm'>--</span></div>
+    <div class='track'><div class='fill' id='xwpRate_bar' style='--c1:#4cc9f0;--c2:#7ee0ff'></div></div>
+  </div>
 </div>
 </details>
 
 <details class='secacc' open>
 <summary class='sec'>Solar Arrays <span class='caret'>&#10095;</span></summary>
 <div class='grid3'>
-  <div class='card rise' style='--accent:var(--solar);animation-delay:.26s'>
+  <div class='card rise' style='--accent:var(--solar);animation-delay:.3s'>
     <div class='lbl'>&#9728;&#65039; MPPT 80 &middot; Ground + terrace</div>
     <div class='val num'><span id='mppt80PVPower_value'>0</span><span class='u'>W</span></div>
     <div class='sub'><span id='mppt80ChargeStatus_value'>--</span> &middot; <span class='num' id='mppt80PVVoltage_value'>0</span> V</div>
     <div class='track'><div class='fill' id='mppt80_bar' style='--c1:#ff8a00;--c2:#ffd54a'></div></div>
   </div>
-  <div class='card rise' style='--accent:var(--solar);animation-delay:.3s'>
+  <div class='card rise' style='--accent:var(--solar);animation-delay:.34s'>
     <div class='lbl'>&#9728;&#65039; MPPT 150 &middot; Gen building</div>
     <div class='val num'><span id='southArrayPVPower_value'>0</span><span class='u'>W</span></div>
     <div class='sub'><span id='southArrayChargeStatus_value'>--</span> &middot; <span class='num' id='southArrayPVVoltage_value'>0</span> V</div>
     <div class='track'><div class='fill' id='south_bar' style='--c1:#ff8a00;--c2:#ffd54a'></div></div>
   </div>
-  <div class='card rise' style='--accent:var(--solar);animation-delay:.34s'>
+  <div class='card rise' style='--accent:var(--solar);animation-delay:.38s'>
     <div class='lbl'>&#9728;&#65039; MPPT 150 &middot; House (west)</div>
     <div class='val num'><span id='westArrayPVPower_value'>0</span><span class='u'>W</span></div>
     <div class='sub'><span id='westArrayChargeStatus_value'>--</span> &middot; <span class='num' id='westArrayPVVoltage_value'>0</span> V</div>
@@ -1557,7 +1687,7 @@ input[type=range]::-moz-range-thumb{width:14px;height:14px;border-radius:50%;bac
 <details class='secacc' open>
 <summary class='sec'>Generators <span class='caret'>&#10095;</span></summary>
 <div class='grid2'>
-  <div class='card gen-card rise' style='--accent:var(--gen);animation-delay:.38s'>
+  <div class='card gen-card rise' style='--accent:var(--gen);animation-delay:.42s'>
     <div class='lbl'>&#128295; MEP-803A <span id='mep_chip' class='chip off'>--</span></div>
     <div class='val' style='font-size:1.5rem'><span id='mep803aMode_value'>--</span></div>
     <div class='sub'><span id='mep_action'>--</span> &middot; rate <strong class='num' id='mepChargeRateLive_value' style='color:var(--solar)'>0</strong>% &middot; <span id='mep_ags_status'>AGS --</span></div>
@@ -1567,7 +1697,7 @@ input[type=range]::-moz-range-thumb{width:14px;height:14px;border-radius:50%;bac
       <button class='btn v' onclick='setGeneratorMode(51,document.getElementById("mep803a_select").value)'>Set</button>
     </div>
   </div>
-  <div class='card gen-card rise' style='--accent:var(--gen);animation-delay:.42s'>
+  <div class='card gen-card rise' style='--accent:var(--gen);animation-delay:.46s'>
     <div class='lbl'>&#128295; Kubota <span id='kub_chip' class='chip off'>--</span></div>
     <div class='val' style='font-size:1.5rem'><span id='kubotaMode_value'>--</span></div>
     <div class='sub'><span id='kub_action'>--</span> &middot; rate <strong class='num' id='kubotaChargeRateLive_value' style='color:var(--solar)'>0</strong>% &middot; <span id='kubota_ags_status'>AGS --</span></div>
@@ -1830,6 +1960,7 @@ function updateUI(data){
   setNum('acPower2_value',p2); setNum('acCurrent2_value',+data.acCurrent2||0,1);
   setNum('chargePower1_value',+data.chargePower1||0);
   setNum('chargePower2_value',+data.chargePower2||0);
+  xwPlusCard(data);
 
   const soc=+data.batterySOC||0;
   setNum('batterySOC_value',soc);
@@ -1930,6 +2061,74 @@ function actionText(action,reason){
      nothing about a generator that is stopped. */
   const turning=action===9||ACT_STARTING.indexOf(action)>=0;
   return (turning&&why)?base+' \u00b7 '+why:base;
+}
+/* XW+ 5548, ID 11. Charge-only, so it is read the other way round from the
+   two XW Pro cards: what matters is what it is putting into the pack and
+   whether the Kubota is feeding it, not what it is sending to the house. */
+function prettyStatus(v){
+  if(v===undefined||v===null||v==='')return '--';
+  return String(v).replace(/_/g,' ').replace(/^./,c=>c.toUpperCase());
+}
+function xwPlusCard(d){
+  const w=+d.xwPlusChargePower||0;
+  /* "Idle" is the Kubota being off, which is the normal state; a headline of
+     0 W reads like a fault. Charging is the charger's own answer, not a
+     threshold on the wattage: it is in a charge stage or it is not. */
+  const stage=d.xwPlusChargerStatus;
+  /* no_float is NOT in this list: it is where the charger rests once a cycle
+     has finished with float disabled, which is what the MPPT cards show all
+     night at 0 W. The same goes for qualifying_ac, which is this unit waiting
+     for the Kubota - its normal state, and the one it is in most of the time. */
+  const charging=w>15||['bulk','absorption','overcharge','equalize','float',
+    'constant_vi','charge','engaging_charger','absorption_exit_pending'].indexOf(stage)>=0;
+  const pw=document.getElementById('xwp_charging'), idle=document.getElementById('xwp_idle');
+  if(pw&&idle){
+    pw.style.display=charging?'':'none';idle.style.display=charging?'none':'';
+    /* A slave that answered nothing is not an idle slave. "Idle" is a
+       statement about the Kubota, and it needs a reading behind it. */
+    idle.textContent=(stage===undefined||stage===null)?'\u2014':'Idle';
+  }
+  setNum('xwPlusChargePower_value',w);
+  setNum('xwPlusChargeCurrent_value',+d.xwPlusChargeCurrent||0,1);
+  setNum('xwPlusBatteryVoltage_value',+d.xwPlusBatteryVoltage||0,2);
+
+  const st=document.getElementById('xwp_stage');
+  if(st)st.textContent=prettyStatus(stage);
+
+  /* The Kubota's feed into AC2. All three read zero when it is not turning,
+     which is a fact about the generator and not a missing reading. */
+  const av=+d.xwPlusAcInVoltage||0, aa=+d.xwPlusAcInCurrent||0, aw=+d.xwPlusAcInPower||0;
+  const ac=document.getElementById('xwp_acin');
+  if(ac){
+    if(d.xwPlusAcInVoltage===undefined)ac.textContent='not read';
+    else if(av<10&&aw<10)ac.textContent='not feeding';
+    else ac.textContent=av.toFixed(1)+' V \u00b7 '+aa.toFixed(1)+' A \u00b7 '+aw+' W';
+  }
+
+  const rate=+d.kubotaChargeRateLive||0;
+  setNum('xwPlusRate_value',rate);
+  setBar('xwpRate_bar',rate,charging);
+
+  /* Faults and warnings are the unit's own summary flags. Unread is not the
+     same as clear, so a field that never arrived says so. */
+  const al=document.getElementById('xwp_alarm');
+  if(al){
+    const f=d.xwPlusFaultActive, wn=d.xwPlusWarningActive;
+    if(f===undefined&&wn===undefined){al.textContent='faults not read';al.style.color='var(--dim2)';}
+    else if(f){al.textContent='FAULT ACTIVE';al.style.color='var(--bad)';}
+    else if(wn){al.textContent='warning active';al.style.color='var(--warn)';}
+    else{al.textContent='no faults';al.style.color='';}
+  }
+
+  const chip=document.getElementById('xwp_chip');
+  if(chip){
+    if(d.xwPlusFaultActive){chip.className='chip bad';chip.textContent='Fault';}
+    else if(charging){chip.className='chip run';chip.innerHTML="<span class='dot'></span>Charging";}
+    else if(d.xwPlusWarningActive){chip.className='chip warn';chip.textContent='Warning';}
+    else if(d.xwPlusDeviceState===undefined){chip.className='chip off';chip.textContent='--';}
+    else if(d.xwPlusDeviceState==='operating'){chip.className='chip ok';chip.textContent='Standby';}
+    else{chip.className='chip off';chip.textContent=prettyStatus(d.xwPlusDeviceState);}
+  }
 }
 function agsFor(id,online){
   const el=document.getElementById(id);
