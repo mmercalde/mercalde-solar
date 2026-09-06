@@ -1095,7 +1095,29 @@ class Agent:
                 plan_text = plan_text[:600] + " ..."
             lines.append(f"Plan recorded {history.stamp(snap['ts'], self.cfg)}: "
                          f"{plan_text}")
+        # The plan text is the agent's shorthand, and Qwen3-8B misread it on
+        # the first afternoon this block existed: every rule said "held" and
+        # the recommendation said "no change", so it announced no run and no
+        # shortfall tonight - while "projected 52.0 V at 10:13 pm" sat two
+        # lines up. The verdict is therefore also stated in words, derived
+        # from the same projection the plan printed.
         intended = snap.get("intended") or {}
+        proj = (snap.get("data") or {}).get("projection") or {}
+        start = intended.get("mep_start", self.cfg["default_start"])
+        if proj.get("reached"):
+            when = history.clock(proj["reached"], self.cfg)
+            lines.append(
+                f"In plain terms: the pack is projected to reach the "
+                f"{start:.1f} V start threshold at {when}, so a generator run "
+                f"IS expected tonight. A policy shown as 'held' is waiting "
+                f"for its window, not cancelled; 'recommend: no change' means "
+                f"the thresholds are already set right, not that no run is "
+                f"coming.")
+        elif proj.get("reason"):
+            lines.append(
+                f"In plain terms: the pack is not projected to reach the "
+                f"{start:.1f} V start threshold ({proj['reason']}), so no "
+                f"generator run is expected tonight.")
         if intended:
             lines.append(
                 "Thresholds in force: MEP start {mep_start:.1f} stop "
