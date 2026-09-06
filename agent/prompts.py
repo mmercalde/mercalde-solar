@@ -219,7 +219,7 @@ speech with no markup, no lists and no headings. Answer in the same language
 the question was asked in."""
 
 
-def ask_prompt(lang=None, now_text=None):
+def ask_prompt(lang=None, now_text=None, context=None):
     """The system prompt for an inbound question.
 
     `now_text` is the current date and time. Without it the model has no idea
@@ -234,6 +234,17 @@ def ask_prompt(lang=None, now_text=None):
     put the break 60% of the way in and made the last 3,900 characters
     uncacheable for good. Last, the cache reaches almost the whole prompt, and
     the warm-up at startup buys the whole of it rather than most of it.
+
+    `context` is the agent's own compact snapshot of today's plan, the
+    thresholds actually in force and who set them, and the last few threshold
+    actions. It exists because a stateless question answered from one tool
+    call has no memory of the morning plan: on Sept 6 the model announced a
+    22,605 Wh shortfall at 11:45, called get_status at 12:28, saw sun and
+    53.54 V, and declared the system "not short today" - and separately
+    presented the storm-raised 57.0 stop as "the default". With the plan and
+    threshold provenance in the prompt, those answers cannot be produced.
+    It sits after NOW, in the uncacheable tail, because it changes with
+    every plan tick.
     """
     p = (f"MISSION\n{MISSION}\n\n"
          f"SYSTEM\n{system_section()}\n\n"
@@ -245,4 +256,9 @@ def ask_prompt(lang=None, now_text=None):
         p += "\n\nAnswer in English."
     if now_text:
         p += f"\n\nNOW\nIt is {now_text}."
+    if context:
+        p += ("\n\nTODAY'S PLAN AND THRESHOLDS\n"
+              "These facts are authoritative; do not contradict them. Tool "
+              "calls give the live readings, this block gives the plan and "
+              "the thresholds in force.\n" + context)
     return p

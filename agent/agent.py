@@ -1050,13 +1050,14 @@ class Agent:
             tools = self.tools()
             try:
                 now_text = history.stamp(int(time.time()), self.cfg)
-                reply, _ = self.run_model(prompts.ask_prompt(lang, now_text),
-                                          text, tools,
+                context = self.plan_context()
+                system = prompts.ask_prompt(lang, now_text, context)
+                reply, _ = self.run_model(system, text, tools,
                                           max_rounds=MAX_TOOL_ROUNDS)
                 if not tools.calls:
                     log.warning("answer was ungrounded; retrying with a nudge")
                     reply, _ = self.run_model(
-                        prompts.ask_prompt(lang, now_text),
+                        system,
                         text + "\n\n(You have not called a tool yet. Call the "
                                "tool that answers this before replying.)",
                         tools)
@@ -1067,6 +1068,62 @@ class Agent:
                 log.error("model unavailable for question: %s", e)
                 return ask_server.FALLBACK.get(lang or "en")
         return (reply or "").strip() or ask_server.FALLBACK.get(lang or "en")
+
+    # Ceiling for the injected plan block, in characters. It rides in the
+    # uncacheable tail of every question, so it pays full prefill each time;
+    # at this size that is a fraction of a second, not the 70 s cold penalty.
+    PLAN_CONTEXT_MAX = 1500
+
+    def plan_context(self):
+        """Compact authoritative snapshot for the ask prompt.
+
+        Today's plan, the thresholds in force with their provenance, and the
+        last few threshold actions with reasons. Built from the same
+        latest_plan_json() the Pi5 watchdog reads, so the model is told the
+        same story the dashboard shows. Returns None if nothing useful can be
+        read - the question then runs exactly as before this existed.
+        """
+        try:
+            snap = self.latest_plan_json()
+        except Exception as e:                       # noqa: BLE001
+            log.warning("could not build plan context: %s", e)
+            return None
+        lines = []
+        if snap.get("ts") and snap.get("text"):
+            plan_text = " ".join(str(snap["text"]).split())
+            if len(plan_text) > 600:
+                plan_text = plan_text[:600] + " ..."
+            lines.append(f"Plan recorded {history.stamp(snap['ts'], self.cfg)}: "
+                         f"{plan_text}")
+        intended = snap.get("intended") or {}
+        if intended:
+            lines.append(
+                "Thresholds in force: MEP start {mep_start:.1f} stop "
+                "{mep_stop:.1f} V, Kubota start {kub_start:.1f} stop "
+                "{kub_stop:.1f} V.".format(**intended))
+        baseline = snap.get("baseline") or {}
+        if baseline:
+            who = ("set by the owner" if snap.get("owner_baseline")
+                   else "the config defaults")
+            lines.append(
+                "Baseline they return to ({}): MEP {:.1f}/{:.1f} V, Kubota "
+                "{:.1f}/{:.1f} V. Any difference from the baseline is a "
+                "change the agent made, for the reason logged below - it is "
+                "not a default.".format(
+                    who, baseline["mep_start"], baseline["mep_stop"],
+                    baseline["kub_start"], baseline["kub_stop"]))
+        actions = snap.get("actions") or []
+        if actions:
+            lines.append("Recent threshold actions:")
+            for a in actions:
+                lines.append(f"- {a['at']} {a['result']}: {a['reason']}")
+        if not lines:
+            return None
+        block = "\n".join(lines)
+        if len(block) > self.PLAN_CONTEXT_MAX:
+            block = block[:self.PLAN_CONTEXT_MAX] + " ..."
+        log.info("plan context: %d chars", len(block))
+        return block
 
     def status_sentence(self, lang=None):
         """Deterministic one-line status, used when the model will not look."""
