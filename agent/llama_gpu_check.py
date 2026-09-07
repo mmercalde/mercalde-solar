@@ -124,10 +124,13 @@ def main():
     text = (
         "llama-server is running on the CPU.\n\n"
         + "; ".join(why)
-        + ".\n\nPrefill is roughly 50x slower, agent ticks will time out and "
-        "retry, and the package runs hot. Check that the service user is in "
-        "the render and video groups and that the unit carries "
-        "SupplementaryGroups=render video."
+        + ".\n\nPrefill drops from ~38 to ~35 tok/s. That sounds survivable "
+        "and is not: it is enough to push the first tick past the agent's "
+        "timeout, and a cancelled tick never populates the prompt cache, so "
+        "every tick after it faces the full ~6400-token prefill and also "
+        "times out. The retries hold every core busy and the package sits at "
+        "84 C. Check that the service user is in the render and video groups "
+        "and that the unit carries SupplementaryGroups=render video."
     )
     print(text, file=sys.stderr)
 

@@ -188,10 +188,23 @@ prompt processing, n_tokens = 2048, t = 58.68 s / 34.90 tokens per second
 W srv          stop: cancel task, id_task = 0
 ```
 
-`-ngl 99` was silently ignored. At ~35 tok/s prefill an agent prompt of ~6 000
-tokens needs about three minutes of all-core compute; the agent timed out and
-asked again, so the server never reached idle. That is a self-sustaining
-650 % CPU load from boot, and it took the package to **84 °C**.
+`-ngl 99` was silently ignored.
+
+The speed difference alone does not explain the damage. Measured prefill is
+**34.9 tok/s on the CPU against 38.5 tok/s on the GPU** — the Vega iGPU in
+this part is barely faster, and an earlier claim in this file of "roughly 50x"
+was wrong. What matters is the **prompt cache**. A full agent prompt is
+~6 400 tokens. On the GPU the first tick finishes, the cache populates, and
+every tick after it evaluates only ~360 new tokens and completes in ~43 s. On
+the CPU the first tick ran past the agent's timeout and was cancelled — and a
+cancelled tick never populates the cache, so the next tick faced the whole
+prefill again and also timed out. The retries never stopped, which is what
+held every core busy and took the package to **84 °C**.
+
+The margin is thin: 38.5 against 34.9 tok/s. This failed because it was just
+slow enough to miss the first tick. If prompts keep growing, it can cross the
+same cliff again *with* the GPU. Tick time is the early warning; ~43 s now,
+against the 38–51 s recorded before.
 
 **Why the GPU was unreachable.** `/dev/dri/renderD128` is `root:render` and
 `michael` is in neither `render` nor `video`. Access came only from a
