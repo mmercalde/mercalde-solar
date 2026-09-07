@@ -5,6 +5,11 @@ After=network.target
 [Service]
 Type=simple
 User=michael
+# /dev/dri/renderD128 is root:render and card1 is root:video. Without these
+# the only access is the logind session ACL, which does not exist yet at boot:
+# llama.cpp then warns "no usable GPU found", ignores -ngl and serves from the
+# CPU at ~35 tok/s while reporting active. See docs/kamrui_stability.md.
+SupplementaryGroups=render video
 WorkingDirectory=/home/michael/llama.cpp
 ExecStart=/home/michael/llama.cpp/build/bin/llama-server -m /home/michael/models/Qwen3-8B-Q4_K_M.gguf -ngl 99 --host 0.0.0.0 --port 8080 -c 16384 --jinja
 Restart=on-failure

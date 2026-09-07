@@ -118,3 +118,131 @@ Add a line per event. An empty table after 2026-09-06 is the result we want.
 | 2026-08-29 | freeze 04:01:27 | 8B + agent, idle | none | manual power cycle |
 | 2026-08-30 | freeze 15:04:49 | 14B + agent, A/B warm-up | none at death; OOM at 12:45 same boot | manual power cycle |
 | 2026-08-30 | freeze 15:19:13 | 8B + agent, normal tick | none | manual power cycle; flags changed after |
+| 2026-09-06 | freeze 14:16:23 | ended the 7-day boot; owner reports a 14B loaded beside the 8B | not yet captured | manual power cycle |
+| 2026-09-06 | freeze 14:58:15 | owner reports normal stack only | not yet captured | survived 15 m from boot |
+| 2026-09-06 | freeze 15:20:12 | owner reports normal stack only | not yet captured | survived 15 m from boot |
+| 2026-09-06 | freeze 20:20:28 | not established | not yet captured | survived 14 m from boot |
+| 2026-09-06 | freeze 20:28:33 | not established | not yet captured | died inside the same minute it booted |
+| 2026-09-06 | freeze 20:38:07 | not established | not yet captured | survived 5 m; box still down at 20:52 |
+
+## 2026-09-06 — six freezes, and the shape of them
+
+The week the previous section asked for did not hold. The 2026-08-30 15:29:08
+boot ran **seven days** and ended at 14:16:23. Five more deaths followed the
+same day.
+
+| Boot | Ran from | Ended | Survived |
+|---|---|---|---|
+| −5 | Sun 2026-08-30 15:29:08 | Sun 2026-09-06 14:16:23 | 7 days |
+| −4 | 14:43:12 | 14:58:15 | **15 m** |
+| −3 | 15:05:03 | 15:20:12 | **15 m** |
+| −2 | 20:06:16 | 20:20:28 | **14 m** |
+| −1 | 20:28:33 | 20:28:33 | **under 1 m** |
+| 0 | 20:33:09 | 20:38:07 | **5 m** |
+
+Two things in that table were not visible on 2026-08-30.
+
+**It is accelerating.** August's survivals were 3 h 43 m, 2 h 19 m, 2 m.
+Today's are 15 m, 15 m, 14 m, <1 m, 5 m.
+
+**Survival tracks how long the box had been off, not what was running.** The
+three boots that followed a gap of twenty minutes or more each lasted about
+fifteen minutes. The two that followed a restart minutes after a death lasted
+under one minute and five minutes. A configuration fault does not care how
+warm the case is; that asymmetry is the single most discriminating fact in the
+record so far, and it points at a threshold being reached — sooner when the
+machine starts closer to it.
+
+Against that: the owner holds that the box was well until today's model work
+and that nothing was reverted after the reboot. That mechanism is real and is
+**not yet excluded** — the live `llama-server` unit on the KAMRUI has not been
+read since. It is the first thing to capture on the next boot. Note also that
+the committed `agent/llama-server.service` carries `--host 0.0.0.0`, which the
+section above records as having been *removed* after the third August freeze:
+the tracked config and the written record already disagree, so drift on this
+box is demonstrated rather than hypothetical.
+
+Weighing against a purely-today cause: the 2026-08-29 04:01 freeze was 8B-only
+and idle with nobody at the machine, a week before today's work.
+
+### Not site power, and not the generators
+
+Checked while the box was down, so it need not be checked again:
+
+- `pve-zeus` (.128) and `vm101` (.177) both held **1 d 6 h** uptime across
+  every one of today's freezes, with no reboots.
+- The Pi 5 held **78 days**. Generator control was never at risk.
+- Other LAN addresses reading dark are expected: `.127` is dark because Zeus
+  is booted into Proxmox at `.128`, and the migrated rigs' bare-metal
+  addresses are empty by design.
+
+### Found: llama-server was running on the CPU
+
+Resolved 2026-09-06 21:32. The cause was not the model, the RAM or the
+cooling. `llama-server` was doing **CPU inference**, and had been since every
+boot today.
+
+```
+warning: no usable GPU found, --gpu-layers option will be ignored
+prompt processing, n_tokens = 2048, t = 58.68 s / 34.90 tokens per second
+W srv          stop: cancel task, id_task = 0
+```
+
+`-ngl 99` was silently ignored. At ~35 tok/s prefill an agent prompt of ~6 000
+tokens needs about three minutes of all-core compute; the agent timed out and
+asked again, so the server never reached idle. That is a self-sustaining
+650 % CPU load from boot, and it took the package to **84 °C**.
+
+**Why the GPU was unreachable.** `/dev/dri/renderD128` is `root:render` and
+`michael` is in neither `render` nor `video`. Access came only from a
+`logind` session ACL (`user:michael:rw-`), granted when someone logs in at the
+console. The unit is `After=network.target`, so it starts *before* the
+graphical login exists — no ACL, no device, CPU fallback for the life of the
+process.
+
+**Why the week of stability.** `/etc/systemd/system/llama-server.service` is
+dated 2026-08-30 15:35:19, six minutes after the 15:29 boot: the flags were
+changed and the service restarted **by hand from the desktop session**, where
+the ACL already existed. It got the GPU, ran cool, and survived seven days.
+Every boot after today's first crash auto-started it at boot instead.
+
+**The fix.**
+
+```bash
+sudo usermod -aG render,video michael
+sudo systemctl restart llama-server
+```
+
+Measured immediately after:
+
+| | CPU fallback | GPU |
+|---|---|---|
+| GTT used | 89 MiB | **7 218 MiB** |
+| llama-server CPU | **657 %** | **8.8 %** |
+| Model load | ~35 s | **2.8 s** |
+| Tctl | **84 °C** peak | **50.1 °C** |
+| Load average | 7.94 | 0.10 |
+
+### Also changed today, and one of them should be reconsidered
+
+- **`amdgpu.gttsize=16384` removed** from `/etc/default/grub` (backup:
+  `/etc/default/grub.bak-*`). This was done while GTT use read as 89 MiB and
+  the parameter looked like an unreverted leftover. With the model actually on
+  the GPU it uses **7.2 GB of GTT**, so 16384 was a reasonable setting for
+  running a 14B. Default GTT is now 11 747 MiB, which is ample for the 8B.
+  **Put it back before running the 14B again.**
+- **Swap 2 GB → 10 GB** (`/swapfile8`, in fstab). Addresses the item flagged
+  above. Untouched so far under normal load.
+- **Flight recorder installed** — `kamrui-flightrec.service`, 1 Hz, fsynced to
+  `/var/log/kamrui-flight.log`, enabled at boot. Closes the temperature blind
+  spot permanently.
+
+### What is not yet proven
+
+The OOM at 14:11:31 is a real, separate event: `llama-server` killed holding
+9.86 GB, the 14B, five minutes before the 14:16:23 death. That one is memory.
+The other six deaths had no OOM and no trace, and are attributed to the CPU
+fallback on the strength of the 84 °C peak, the sustained 650 % load, and the
+cold-boot-versus-hot-restart survival asymmetry — not on a captured death.
+**The recorder will settle it: if the box now runs indefinitely at 50 °C, the
+attribution holds; if it freezes again, the log carries the last second.**
