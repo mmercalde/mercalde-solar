@@ -77,3 +77,14 @@ def test_the_secrets_stay_in_config_json(tmp_path):
     flat = json.dumps(raw).lower()
     for secret in ("token", "password", "chat_id", "secret", "apikey"):
         assert f'"{secret}"' not in flat, f"{secret} does not belong in the manifest"
+
+
+def test_the_predawn_band_defaults_to_twenty_minutes():
+    assert cfgmod.load(cfgmod.EXAMPLE_PATH)["predawn_hysteresis_min"] == 20
+
+
+@pytest.mark.parametrize("bad", [-5, "20", None, True])
+def test_a_nonsensical_predawn_band_falls_back_out_loud(tmp_path, caplog, bad):
+    cfg = cfgmod.load(write(tmp_path, predawn_hysteresis_min=bad))
+    assert cfg["predawn_hysteresis_min"] == 20
+    assert "predawn_hysteresis_min" in caplog.text

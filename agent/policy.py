@@ -534,6 +534,30 @@ def predawn_stop(cfg, f, superseded=False):
     if not sunrise:
         return _rule(3, name, False, "next sunrise unknown")
     lead = (sunrise - reached) / 3600.0
+    margin = cfg.get("predawn_hysteresis_min", 20) / 60.0
+    # Hysteresis, not a latch. On 2026-10-02 the projected crossing sat on
+    # the sunrise edge - 7:01, then just before 6:43, then 7:19 - and the
+    # stop was released at 9:51 pm, dropped at 10:51 and released again at
+    # 11:06. Turning on needs the crossing clearly inside the window, turning
+    # off needs it clearly outside, and in between the state stands. "On"
+    # is the agent's own: both live stops at the target, and both what this
+    # agent last wrote.
+    iv = f.get("intended") or {}
+    on = all(s is not None and abs(s - target) < EPS
+             for s in (th.get("mep_stop"), th.get("kub_stop"),
+                       iv.get("mep_stop"), iv.get("kub_stop")))
+    inside = margin <= lead <= window
+    outside = lead <= -margin or lead > window + margin
+    # A sunrise that is no longer clear is a reason of its own, and the band
+    # does not hold a stop against it.
+    clear = cloud is not None and cloud <= limit
+    if not inside and not outside and (clear or not on):
+        state = f"stops stay {target:.1f}" if on else "stops stay as they are"
+        return _rule(3, name, False,
+                     f"52 V projected {_clock(reached, cfg)}, lead "
+                     f"{round(lead * 60)} min to sunrise {_clock(sunrise, cfg)},"
+                     f" margin {round(margin * 60)} min: held by hysteresis, "
+                     f"{state}", satisfied=on, day=day)
     # The crossing has to be tonight's. `sunrise` is the coming one, so
     # anything at or past it belongs to a later night, and tonight's stop is
     # not set for a night that has not started.

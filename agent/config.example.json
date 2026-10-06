@@ -12,6 +12,7 @@
   "default_start": 52.0, "default_stop": 56.0,
   "solo_peak_threshold": 57.0,
   "storm_cloud_pct": 70, "clear_cloud_pct": 30, "predawn_hours": 2.0,
+  "predawn_hysteresis_min": 20,
   "solo_target": 57.0, "solo_target_floor": 55.0,
   "topup_earliest": "sunset",
   "topup_margin_pct": 15, "min_topup_wh": 6000,

@@ -64,7 +64,27 @@ def load(path=None):
     if missing:
         raise SystemExit("config.json is missing required keys: " + ", ".join(missing))
     clamp_to_hard_limits(cfg)
+    validate_hysteresis(cfg)
     os.makedirs(DATA_DIR, exist_ok=True)
+    return cfg
+
+
+PREDAWN_HYSTERESIS_MIN = 20
+
+
+def validate_hysteresis(cfg):
+    """The pre-dawn band must be a non-negative number of minutes.
+
+    A missing or nonsensical value falls back to the default out loud: no
+    band at all is how the stop flapped on 2026-10-02, and a negative one
+    would make it flap harder.
+    """
+    v = cfg.get("predawn_hysteresis_min", PREDAWN_HYSTERESIS_MIN)
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0:
+        log.warning("config predawn_hysteresis_min %r is not a non-negative "
+                    "number of minutes; using %s", v, PREDAWN_HYSTERESIS_MIN)
+        v = PREDAWN_HYSTERESIS_MIN
+    cfg["predawn_hysteresis_min"] = v
     return cfg
 
 

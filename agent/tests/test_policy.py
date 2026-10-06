@@ -425,6 +425,88 @@ def test_a_cloudy_sunrise_is_not_a_clear_one(cfg, night, model):
     assert not r["fires"] and "not a clear sunrise" in r["detail"]
 
 
+# 2026-10-02: sunrise 6:43, and the projected crossing on its edge.
+
+def oct2(cfg, night, crossing, on):
+    night = dict(night, sunrise_ts=ts_at(cfg, "2026-10-03", 6, 43),
+                 next_daylight_date="2026-10-03")
+    hour, minute = crossing
+    night["projection"] = {"reached": ts_at(cfg, "2026-10-03", hour, minute)}
+    stop = 54.5 if on else 56.0
+    night["thresholds"] = dict(night["thresholds"], mep_stop=stop,
+                               kub_stop=stop)
+    night["intended"] = dict(night["thresholds"])
+    return night
+
+
+OCT2 = [(7, 1), (6, 42), (7, 19)]
+
+
+def test_the_oct_2_sequence_does_not_drop_the_stop(cfg, night, model):
+    """Released at 9:51 pm, the crossing then wandered 7:01, 6:42, 7:19.
+    None of it is clearly inside the window, so the stop stays at 56.0."""
+    for crossing in OCT2:
+        r = policy.predawn_stop(cfg, oct2(cfg, night, crossing, on=False))
+        assert not r["fires"] and not r.get("satisfied"), crossing
+
+
+def test_a_dropped_stop_rides_out_the_edge_and_no_further(cfg, night, model):
+    """Hysteresis, not a latch: 7:01 and 6:42 hold the stop at 54.5, 7:19 -
+    36 minutes past sunrise, beyond the 20 minute margin - lets it go."""
+    for crossing in OCT2[:2]:
+        r = policy.predawn_stop(cfg, oct2(cfg, night, crossing, on=True))
+        assert not r["fires"] and r["satisfied"], crossing
+        assert "held by hysteresis" in r["detail"]
+        assert "margin 20 min" in r["detail"]
+    r = policy.predawn_stop(cfg, oct2(cfg, night, (7, 1), on=True))
+    assert "lead -18 min to sunrise 6:43 am" in r["detail"]
+    r = policy.predawn_stop(cfg, oct2(cfg, night, (7, 19), on=True))
+    assert not r["fires"] and not r.get("satisfied") and not r.get("held")
+
+
+def test_just_before_sunrise_says_it_is_held(cfg, night, model):
+    r = policy.predawn_stop(cfg, oct2(cfg, night, (6, 42), on=False))
+    assert r["detail"] == ("52 V projected 6:42 am, lead 1 min to sunrise "
+                           "6:43 am, margin 20 min: held by hysteresis, "
+                           "stops stay as they are")
+
+
+def test_a_clear_move_inside_the_window_drops_the_stop(cfg, night, model):
+    r = policy.predawn_stop(cfg, oct2(cfg, night, (5, 30), on=False))
+    assert r["fires"] and r["proposal"]["mep_stop"] == 54.5
+
+
+def test_a_clear_move_past_sunrise_releases_it(cfg, night, model):
+    r = policy.predawn_stop(cfg, oct2(cfg, night, (7, 30), on=True))
+    assert not r["fires"] and not r.get("satisfied") and not r.get("held")
+    assert "belongs to a later night" in r["detail"]
+
+
+def test_a_stop_the_agent_did_not_write_is_not_held(cfg, night, model):
+    """54.5 in force but not this agent's last write is not "on"."""
+    night = oct2(cfg, night, (7, 1), on=True)
+    night["intended"] = dict(night["intended"], mep_stop=56.0, kub_stop=56.0)
+    r = policy.predawn_stop(cfg, night)
+    assert not r.get("satisfied")
+
+
+def test_the_band_does_not_hold_against_a_cloudy_sunrise(cfg, night, model):
+    night = oct2(cfg, night, (7, 1), on=True)
+    night["next_daylight_cloud"] = 60
+    r = policy.predawn_stop(cfg, night)
+    assert not r["fires"] and not r.get("satisfied")
+
+
+def test_the_upper_edge_of_the_window_has_a_band_too(cfg, night, model):
+    """2.0 h window, 20 min margin: a crossing 2 h 10 min out holds 54.5."""
+    r = policy.predawn_stop(cfg, oct2(cfg, night, (4, 33), on=True))
+    assert r["satisfied"] and "held by hysteresis" in r["detail"]
+    r = policy.predawn_stop(cfg, oct2(cfg, night, (4, 33), on=False))
+    assert not r["fires"] and "held by hysteresis" in r["detail"]
+    r = policy.predawn_stop(cfg, oct2(cfg, night, (4, 13), on=True))
+    assert not r["fires"] and not r.get("satisfied")
+
+
 def test_policy_4_supersedes_the_pre_dawn_case(cfg, night, model):
     """Both want the stop moved; a top-up to 57.0 is not served by 54.5."""
     night["projection"] = {"reached": ts_at(cfg, "2026-08-28", 5, 0)}
