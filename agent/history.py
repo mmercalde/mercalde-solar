@@ -425,11 +425,17 @@ def apply_exercise_schedule(cfg, data):
 
 
 def next_exercise(conn, gen, cfg, now=None):
-    """When this generator is next due to exercise, from its own last one.
+    """When the AGS will next exercise this generator.
 
-    The period is the AGS's; the last exercise is whatever `gen_runs` has
-    classified as one. Returns None where neither is known - a due date
-    invented from a default period is worse than saying nothing.
+    The AGS restarts its exercise count whenever the generator runs, for any
+    reason, so the clock starts at the end of the last run of any kind - not
+    the last exercise. The record shows it: the Kubota exercised 09-19 and
+    10-02, each on the first evening slot more than 3 days after its last
+    charge run, and the MEP has not exercised since 09-05 because it has never
+    gone 5 days without one. The exercise then fires at its start time on the
+    first day that period has passed. Returns None where the period is
+    unknown - a due date invented from a default period is worse than saying
+    nothing.
     """
     # mep_days / kubota_days: the manifest's key and the one the live
     # schedule writes are the same key, so the AGS simply overwrites it.
@@ -438,15 +444,25 @@ def next_exercise(conn, gen, cfg, now=None):
     if not days:
         return None
     now = int(now or time.time())
-    row = conn.execute(
+    run = conn.execute(
+        "SELECT MAX(COALESCE(stop_ts, start_ts)) t FROM gen_runs WHERE gen=?",
+        (gen,)).fetchone()
+    last_run = run["t"] if run else None
+    exr = conn.execute(
         "SELECT MAX(start_ts) t FROM gen_runs WHERE gen=? AND kind='exercise'",
         (gen,)).fetchone()
-    last = row["t"] if row else None
+    last_ex = exr["t"] if exr else None
     start, minutes = exercise_window(gen, cfg)
     out = {"every_days": days, "at": start, "minutes": minutes,
-           "last": stamp(last, cfg) if last else None}
-    if last:
-        due = last + days * 86400
+           "last": stamp(last_run, cfg) if last_run else None,
+           "last_exercise": stamp(last_ex, cfg) if last_ex else None}
+    if last_run:
+        hh, mm = (int(x) for x in str(start).split(":"))
+        earliest = local(last_run + days * 86400, cfg)
+        slot = earliest.replace(hour=hh, minute=mm, second=0, microsecond=0)
+        if slot < earliest:
+            slot += timedelta(days=1)
+        due = int(slot.timestamp())
         out["due"] = stamp(due, cfg)
         out["days_until_due"] = round((due - now) / 86400.0, 1)
         out["overdue"] = due < now

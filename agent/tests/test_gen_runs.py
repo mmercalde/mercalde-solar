@@ -405,11 +405,31 @@ def test_when_the_next_exercise_is_due(conn, cfg):
     due = history.next_exercise(conn, "kubota", cfg,
                                 now=ts_at(cfg, "2026-09-04", "12:00"))
     assert due["every_days"] == 3 and due["at"] == "18:49"
-    assert due["days_until_due"] == 2.3
+    # Ended 19:19 on 09-03; 3 days on is 09-06 19:19, past that evening's
+    # 18:49 slot, so the AGS exercises on 09-07.
+    assert due["due"].startswith("2026-09-07")
+    assert due["days_until_due"] == 3.3
     assert due["overdue"] is False
     late = history.next_exercise(conn, "kubota", cfg,
                                  now=ts_at(cfg, "2026-09-08", "12:00"))
     assert late["overdue"] is True
+
+
+def test_any_run_restarts_the_exercise_count(conn, cfg):
+    """A charge run resets the AGS's count, as the Kubota did on 10-05."""
+    cfg = dict(cfg, exercise=dict(cfg["exercise"]))
+    history.apply_exercise_schedule(cfg, {
+        "kubotaExercise": {"every_days": 3, "minutes": 15, "start": "18:48"}})
+    feed(conn, cfg, ts_at(cfg, "2026-10-02", "18:48"), 15, gen="kubota",
+         on_reason="exercise")
+    feed(conn, cfg, ts_at(cfg, "2026-10-05", "05:50"), 74, gen="kubota",
+         on_reason="manual_on")
+    history.derive_gen_runs(conn, cfg)
+    due = history.next_exercise(conn, "kubota", cfg,
+                                now=ts_at(cfg, "2026-10-05", "18:51"))
+    assert due["overdue"] is False
+    assert due["due"].startswith("2026-10-08")
+    assert due["last_exercise"].startswith("2026-10-02")
 
 
 def test_no_exercise_on_record_gives_no_due_date(conn, cfg):

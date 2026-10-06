@@ -439,7 +439,8 @@ class Agent:
             when = ("overdue" if e["overdue"] else
                     f"in {e['days_until_due']:.0f} d")
             lines.append(f"{gen} exercise: every {e['every_days']} d at "
-                         f"{e['at']}, last {e['last']}, next {when}")
+                         f"{e['at']}, last run {e['last']}, next {e['due']} "
+                         f"({when})")
 
         # Every numeric rule, with its arithmetic shown. The model may not
         # claim "no change" past a rule that fires without overruling it.
