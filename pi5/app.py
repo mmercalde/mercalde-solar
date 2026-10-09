@@ -101,6 +101,12 @@ REG_GENERATOR_MODE = 0x004D
 REG_GENERATOR_ACTION = 0x0043   # AGS spec 2.3: 9=Running, 10=Stopped
 REG_GENERATOR_ON_REASON = 0x0044    # AGS spec: why it started
 REG_GENERATOR_OFF_REASON = 0x0045   # AGS spec: why it stopped
+# A failed start shows here and nowhere in Mode/Action: the AGS leaves Mode
+# at 1 and Action back at 10, which reads exactly like an engine that is on.
+REG_GENERATOR_STATE   = 0x0042   # AGS spec 2.2: 7=AGS Fault
+REG_AGS_ACTIVE_FAULTS = 0x0046   # AGS spec: 0=none, 1=has active faults
+REG_AGS_FAULT_BITMAP  = 0x0048   # AGS spec 2.6
+REG_AGS_WARN_BITMAP   = 0x0049   # AGS spec 2.7
 # Exercise schedule, as the AGS itself holds it. The dashboard has never
 # owned these numbers; the agent used to carry a hardcoded 09:00 and on
 # 2026-09-03 filed a 6:49 PM Kubota exercise as an ordinary auto-start,
@@ -115,12 +121,49 @@ REG_EXERCISE_START = 0x0071     # start time of day
 GEN_ON_REASON = {
     0: "not_on", 1: "dc_voltage_low", 2: "battery_soc_low",
     3: "ac_current_high", 4: "contact_closed", 5: "manual_on",
-    6: "exercise", 7: "non_quiet_time",
+    6: "exercise", 7: "non_quiet_time", 8: "ext_on_via_ags",
+    9: "ext_on_via_gen", 10: "unable_to_stop", 11: "ac_power_high",
+    12: "dc_current_high",
 }
-# Off Reason, the codes that are documented here. The register's full table
-# is longer than this; anything not named comes through as "code_N" rather
-# than as a guess, because a wrong name reads exactly like a right one.
-GEN_OFF_REASON = {7: "manual_off", 10: "exercise_done", 11: "quiet_time"}
+# Off Reason, AGS spec 2.5. Anything not named still comes through as
+# "code_N" rather than as a guess, because a wrong name reads exactly like a
+# right one.
+GEN_OFF_REASON = {
+    0: "not_off", 1: "dc_voltage_high", 2: "battery_soc_high",
+    3: "ac_current_low", 4: "contact_opened", 5: "reached_absorp",
+    6: "reached_float", 7: "manual_off", 8: "max_run_time",
+    9: "max_auto_cycle", 10: "exercise_done", 11: "quiet_time",
+    12: "ext_off_via_ags", 13: "safe_mode", 14: "ext_off_via_gen",
+    15: "ext_shutdown", 16: "auto_off", 17: "fault", 18: "unable_to_start",
+    19: "power_low", 20: "dc_current_low", 21: "ac_good",
+}
+GEN_STATE = {
+    0: "quiet_time", 1: "auto_on", 2: "auto_off", 3: "manual_on",
+    4: "manual_off", 5: "gen_shutdown", 6: "ext_shutdown", 7: "ags_fault",
+    8: "suspend", 9: "not_operating",
+}
+AGS_FAULT_BITS = {
+    0: "F69 node instance duplicated", 1: "F200 exceeded max start tries",
+    2: "F201 unable to stop gen", 3: "F203 gen stopped by ext sensor",
+    4: "F500 serial number failure", 5: "F501 memory failure",
+    6: "F505 internal failure",
+}
+AGS_WARN_BITS = {
+    0: "W200 stopped manually", 1: "W201 started manually",
+    2: "W202 unable to start generator", 3: "W203 manual off",
+    4: "W204 max genset cycle", 5: "W205 started by its switch",
+    6: "W206 mismatched triggers", 7: "W207 mismatched triggers",
+    8: "W208 auto triggers not enabled",
+}
+
+# A Mode=1 write that succeeds says only that the AGS took the command. If
+# Action has not reached 9 (Running) this long after it, the start failed.
+# 300 s is the agent's topup.py START_TIMEOUT_SECONDS. The AGS's own verdict
+# (State=7, Off Reason 18) is believed sooner, but not inside the grace: Off
+# Reason holds the LAST stop until the next one, so a previous failure still
+# reads unable_to_start on the first poll after a new request.
+GEN_START_TIMEOUT_S = 300
+GEN_START_FAULT_GRACE_S = 3 * POLL_INTERVAL
 
 # Conext Battery Monitor (slave 191, port 503) - shunt measurement.
 # Positive current = charging, verified against InsightLocal 2026-07-25.
@@ -262,6 +305,9 @@ system_data = {
     "mepOnReason": None, "kubotaOnReason": None,
     "mepOffReason": None, "kubotaOffReason": None,
     "mepExercise": None, "kubotaExercise": None,
+    "mepState": None, "kubotaState": None,
+    "mepFault": False, "kubotaFault": False,
+    "mepFaultText": "", "kubotaFaultText": "",
 }
 data_lock = threading.Lock()
 start_time = time.time()
@@ -271,9 +317,11 @@ auto_gen_state = {
     "mep803a_running": False, "mep803a_start_time": None,
     "mep803a_cooldown_until": 0, "mep803a_low_voltage_since": None,
     "mep803a_stopping": False, "mep803a_starting": False,
+    "mep803a_start_requested": None,
     "kubota_running": False, "kubota_start_time": None,
     "kubota_cooldown_until": 0, "kubota_low_voltage_since": None,
     "kubota_stopping": False, "kubota_starting": False,
+    "kubota_start_requested": None,
     "last_event": "", "events": []
 }
 auto_gen_lock = threading.Lock()
@@ -512,11 +560,12 @@ def start_generator(gen_type):
             ensure_mep_chargers_ready()
             success = modbus.write_single_register_16(MODBUS_HOST, MODBUS_PORT, AGS_MEP803A_ID, REG_GENERATOR_MODE, 1)
             if success:
+                # A request, not a start: check_auto_generator() calls it
+                # started when Action reaches 9, and failed if it never does.
                 with auto_gen_lock:
-                    auto_gen_state["mep803a_running"] = True
                     auto_gen_state["mep803a_start_time"] = time.time()
-                log_event("MEP-803A started")
-                send_telegram("🔧 <b>MEP-803A Generator STARTED</b>\nAuto-start triggered by low battery voltage.")
+                    auto_gen_state["mep803a_start_requested"] = time.time()
+                log_event("MEP-803A start requested (Mode=On written)")
             return success
         finally:
             with auto_gen_lock:
@@ -532,11 +581,12 @@ def start_generator(gen_type):
             ensure_kubota_chargers_ready()
             success = modbus.write_single_register_16(MODBUS_HOST, MODBUS_PORT, AGS_KUBOTA_ID, REG_GENERATOR_MODE, 1)
             if success:
+                # A request, not a start: check_auto_generator() calls it
+                # started when Action reaches 9, and failed if it never does.
                 with auto_gen_lock:
-                    auto_gen_state["kubota_running"] = True
                     auto_gen_state["kubota_start_time"] = time.time()
-                log_event("Kubota started")
-                send_telegram("🔧 <b>Kubota Generator STARTED</b>\nAuto-start triggered by low battery voltage.")
+                    auto_gen_state["kubota_start_requested"] = time.time()
+                log_event("Kubota start requested (Mode=On written)")
             return success
         finally:
             with auto_gen_lock:
@@ -635,6 +685,11 @@ def check_auto_generator():
         voltage = system_data.get("batteryVoltage", 0)
         mep_mode = system_data.get("mep803aMode", 0)
         kubota_mode = system_data.get("kubotaMode", 0)
+        mep_ags = {k: system_data.get(f"mep{k}") for k in ("State", "OffReason", "FaultText")}
+        mep_ags["Action"] = system_data.get("mep803aAction", 255)
+        kubota_ags = {k: system_data.get(f"kubota{k}") for k in ("State", "OffReason", "FaultText", "Action")}
+        if kubota_ags["Action"] is None:
+            kubota_ags["Action"] = 255
 
     if voltage <= 0:
         return
@@ -649,10 +704,19 @@ def check_auto_generator():
         else:
             alert_state["battery_low_alerted"] = False
 
+    # log_event() takes auto_gen_lock, so nothing that logs runs under it:
+    # events are queued here and sent once the lock is released.
+    pending = []
     with auto_gen_lock:
-        mep_is_running = (mep_mode == 1)
+        # Running is Action 9, not Mode 1: after a failed start the AGS
+        # leaves Mode at 1 with Action back at 10.
+        mep_is_running = (mep_ags["Action"] == 9)
+        mep_starting_up = _watch_start("mep803a", "MEP-803A", mep_ags, mep_is_running,
+                                       mep_cfg, current_time, pending)
 
-        if not mep_is_running and voltage <= mep_cfg["startVoltage"]:
+        if (not mep_is_running and not mep_starting_up
+                and auto_gen_state["mep803a_start_requested"] is None
+                and voltage <= mep_cfg["startVoltage"]):
             if current_time > auto_gen_state["mep803a_cooldown_until"]:
                 if auto_gen_state["mep803a_low_voltage_since"] is None:
                     auto_gen_state["mep803a_low_voltage_since"] = current_time
@@ -666,7 +730,9 @@ def check_auto_generator():
         else:
             auto_gen_state["mep803a_low_voltage_since"] = None
 
-        if mep_is_running:
+        # Stop only what was commanded on: an exercise runs at Action 9 in
+        # Mode 2 and is the AGS's to end, not the stop voltage's.
+        if mep_is_running and mep_mode == 1:
             auto_gen_state["mep803a_running"] = True
             should_stop = False
             reason = ""
@@ -685,9 +751,13 @@ def check_auto_generator():
                 else:
                     logger.info("AUTO: MEP-803A sequence in progress, skipping stop trigger")
 
-        kubota_is_running = (kubota_mode == 1)
+        kubota_is_running = (kubota_ags["Action"] == 9)
+        kubota_starting_up = _watch_start("kubota", "Kubota", kubota_ags, kubota_is_running,
+                                          kub_cfg, current_time, pending)
 
-        if not kubota_is_running and not mep_is_running and voltage <= kub_cfg["startVoltage"]:
+        if (not kubota_is_running and not kubota_starting_up
+                and auto_gen_state["kubota_start_requested"] is None
+                and not mep_is_running and voltage <= kub_cfg["startVoltage"]):
             if current_time > auto_gen_state["kubota_cooldown_until"]:
                 if auto_gen_state["kubota_low_voltage_since"] is None:
                     auto_gen_state["kubota_low_voltage_since"] = current_time
@@ -701,7 +771,7 @@ def check_auto_generator():
         else:
             auto_gen_state["kubota_low_voltage_since"] = None
 
-        if kubota_is_running:
+        if kubota_is_running and kubota_mode == 1:
             auto_gen_state["kubota_running"] = True
             should_stop = False
             reason = ""
@@ -719,6 +789,41 @@ def check_auto_generator():
                     threading.Thread(target=stop_generator, args=("kubota", True), daemon=True).start()
                 else:
                     logger.info("AUTO: Kubota sequence in progress, skipping stop trigger")
+
+    for event, telegram, stop_gen in pending:
+        log_event(event)
+        send_telegram(telegram)
+        if stop_gen:
+            threading.Thread(target=stop_generator, args=(stop_gen, False), daemon=True).start()
+
+def _watch_start(key, name, ags, is_running, cfg, current_time, pending):
+    """Follow a requested start to Running or to a failure. Caller holds
+    auto_gen_lock; events go on `pending`. Returns whether the AGS is in its
+    start sequence (preheat, delay, crank, starter cooling)."""
+    starting_up = ags["Action"] in (0, 1, 2, 3, 4, 11)
+    req = auto_gen_state[f"{key}_start_requested"]
+    if req and is_running:
+        auto_gen_state[f"{key}_start_requested"] = None
+        auto_gen_state[f"{key}_running"] = True
+        pending.append((f"{name} started",
+                        f"🔧 <b>{name} Generator STARTED</b>\nAuto-start triggered by low battery voltage.",
+                        None))
+    elif req and not starting_up:
+        waited = current_time - req
+        failed = waited > GEN_START_TIMEOUT_S or (
+            waited > GEN_START_FAULT_GRACE_S
+            and (ags["State"] == "ags_fault" or ags["OffReason"] == "unable_to_start"))
+        if failed:
+            auto_gen_state[f"{key}_start_requested"] = None
+            auto_gen_state[f"{key}_running"] = False
+            auto_gen_state[f"{key}_start_time"] = None
+            auto_gen_state[f"{key}_cooldown_until"] = current_time + cfg["cooldown"] * 60
+            why = ags["FaultText"] or ags["OffReason"] or f"no Running after {int(waited)}s"
+            pending.append((f"🚨 {name} FAILED TO START: {why}",
+                            f"🚨 <b>{name} FAILED TO START</b>\n{why}\nAGS left in current mode; check the engine, "
+                            "then clear the fault (0x004F=2) and set AUTO.",
+                            key))
+    return starting_up
 
 # --- V2.3: AGS offline detection ---
 def check_ags_status(mep_ok, kubota_ok):
@@ -837,6 +942,29 @@ def read_gen_reasons(slave_id):
             val = None
         out.append(None if val is None else table.get(val, f"code_{val}"))
     return out[0], out[1]
+
+def read_ags_health(slave_id):
+    """(state_text, has_fault, fault_text), each None if its read failed, so
+    a dropped read leaves the last value in place rather than clearing a
+    fault for a cycle. Fault text names the set fault and warning bits."""
+    def rd(reg):
+        try:
+            return modbus.read_holding_register_16(MODBUS_HOST, MODBUS_PORT, slave_id, reg)
+        except Exception as e:
+            logger.debug(f"AGS {slave_id} health read 0x{reg:04X} failed: {e}")
+            return None
+    st = rd(REG_GENERATOR_STATE)
+    fl = rd(REG_AGS_ACTIVE_FAULTS)
+    wb = rd(REG_AGS_WARN_BITMAP)
+    fb = rd(REG_AGS_FAULT_BITMAP) if fl else 0
+    state = None if st is None else GEN_STATE.get(st, f"code_{st}")
+    fault = None if fl is None else bool(fl)
+    text = None
+    if fl is not None and wb is not None and fb is not None:
+        names = [n for b, n in AGS_FAULT_BITS.items() if fb & (1 << b)]
+        names += [n for b, n in AGS_WARN_BITS.items() if wb & (1 << b)]
+        text = ", ".join(names)
+    return state, fault, text
 
 
 def _exercise_time(raw):
@@ -1048,6 +1176,13 @@ def poll_modbus():
                     new_data["mepOnReason"] = on
                 if off is not None:
                     new_data["mepOffReason"] = off
+                st, fault, ftext = read_ags_health(AGS_MEP803A_ID)
+                if st is not None:
+                    new_data["mepState"] = st
+                if fault is not None:
+                    new_data["mepFault"] = fault
+                if ftext is not None:
+                    new_data["mepFaultText"] = ftext
 
             val = modbus.read_holding_register_16(MODBUS_HOST, MODBUS_PORT, AGS_KUBOTA_ID, REG_GENERATOR_MODE)
             new_data["kubotaMode"] = val if val is not None else 0
@@ -1064,6 +1199,13 @@ def poll_modbus():
                     new_data["kubotaOnReason"] = on
                 if off is not None:
                     new_data["kubotaOffReason"] = off
+                st, fault, ftext = read_ags_health(AGS_KUBOTA_ID)
+                if st is not None:
+                    new_data["kubotaState"] = st
+                if fault is not None:
+                    new_data["kubotaFault"] = fault
+                if ftext is not None:
+                    new_data["kubotaFaultText"] = ftext
 
             mep_rate = modbus.read_holding_register_16(MODBUS_HOST, MODBUS_PORT, INVERTER_1_ID, REG_MAX_CHARGE_RATE)
             new_data["mepChargeRateLive"] = mep_rate if mep_rate is not None else 0
@@ -1336,6 +1478,8 @@ details.secacc>summary.sec:hover{color:var(--txt)}
 .chip.run .dot{background:var(--gen);animation:pulse 1.6s infinite}
 .chip.warn{background:rgba(255,176,32,.14);color:var(--warn);border:1px solid rgba(255,176,32,.32)}
 .chip.warn .dot{background:var(--warn);animation:pulse 1.6s infinite}
+.chip.err{background:rgba(255,93,93,.14);color:var(--bad);border:1px solid rgba(255,93,93,.32)}
+.chip.err .dot{background:var(--bad);animation:pulse 1.6s infinite}
 @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(192,132,252,.6)}70%{box-shadow:0 0 0 8px rgba(192,132,252,0)}100%{box-shadow:0 0 0 0 rgba(192,132,252,0)}}
 
 /* ---------- gen card ---------- */
@@ -1991,12 +2135,12 @@ function updateUI(data){
      AGS reports the generator actually turning */
   setBar('mepRate_bar',mepRate,mepAct===9);
   setBar('kubRate_bar',kubRate,kubAct===9);
-  chipFor('mep_chip',mepMode,mepAct);
-  chipFor('kub_chip',kubMode,kubAct);
+  chipFor('mep_chip',mepMode,mepAct,data.mepState,data.mepFault);
+  chipFor('kub_chip',kubMode,kubAct,data.kubotaState,data.kubotaFault);
   hudChip('hud_mep','MEP',mepMode,mepAct);
   hudChip('hud_kub','KUB',kubMode,kubAct);
-  document.getElementById('mep_action').textContent=actionText(mepAct,data.mepOnReason);
-  document.getElementById('kub_action').textContent=actionText(kubAct,data.kubotaOnReason);
+  document.getElementById('mep_action').textContent=actionText(mepAct,data.mepOnReason,data.mepFault,data.mepFaultText);
+  document.getElementById('kub_action').textContent=actionText(kubAct,data.kubotaOnReason,data.kubotaFault,data.kubotaFaultText);
 
   agsFor('mep_ags_status',data.mepAgsOnline);
   agsFor('kubota_ags_status',data.kubotaAgsOnline);
@@ -2037,15 +2181,19 @@ function hudChip(id,tag,mode,action){
   el.className='chip '+cls;
   el.textContent=txt;
 }
-function chipFor(id,mode,action){
+function chipFor(id,mode,action,state,fault){
   const el=document.getElementById(id);
-  if(action===9){el.className='chip run';el.innerHTML="<span class='dot'></span>Running";}
+  if(state==='ags_fault'||fault){el.className='chip err';el.innerHTML="<span class='dot'></span>AGS FAULT";}
+  else if(action===9){el.className='chip run';el.innerHTML="<span class='dot'></span>Running";}
   else if(ACT_STARTING.indexOf(action)>=0){
     el.className='chip run';el.innerHTML="<span class='dot'></span>"+genActionMap[action];}
   else if(ACT_STOPPING.indexOf(action)>=0){
     el.className='chip warn';el.innerHTML="<span class='dot'></span>"+genActionMap[action];}
   else if(mode===2){el.className='chip ok';el.textContent='Auto \u00b7 stopped';}
   else if(mode===0){el.className='chip off';el.textContent='Off';}
+  /* Mode On with nothing turning is how a failed start looks when the
+     state read is missing too; say so instead of just "ON". */
+  else if(mode===1){el.className='chip warn';el.textContent='On \u00b7 not running';}
   else{el.className='chip off';el.textContent=genModeMap[mode]||'Idle';}
 }
 /* "Running \u00b7 exercise". The AGS knows why it started; the card should
@@ -2054,13 +2202,14 @@ function reasonLabel(r){
   if(!r||r==='not_on')return '';
   return r.replace(/_/g,' ');
 }
-function actionText(action,reason){
+function actionText(action,reason,fault,faultText){
   const base=genActionMap[action]||'Unknown';
   const why=reasonLabel(reason);
   /* Only while it is turning: a reason left over from the last run says
      nothing about a generator that is stopped. */
   const turning=action===9||ACT_STARTING.indexOf(action)>=0;
-  return (turning&&why)?base+' \u00b7 '+why:base;
+  const txt=(turning&&why)?base+' \u00b7 '+why:base;
+  return (fault&&faultText)?txt+' \u00b7 '+faultText:txt;
 }
 /* XW+ 5548, ID 11. Charge-only, so it is read the other way round from the
    two XW Pro cards: what matters is what it is putting into the pack and
