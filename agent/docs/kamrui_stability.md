@@ -259,3 +259,30 @@ fallback on the strength of the 84 °C peak, the sustained 650 % load, and the
 cold-boot-versus-hot-restart survival asymmetry — not on a captured death.
 **The recorder will settle it: if the box now runs indefinitely at 50 °C, the
 attribution holds; if it freezes again, the log carries the last second.**
+
+## 2026-10-14 — CPU fallback again, this time a boot-order race
+
+KAMRUI rebooted 18:12 PDT for OS updates. `llama-gpu-check` fired: llama-server
+had started at 18:12:43, about a second after boot, logged `no usable GPU
+found`, and ran the 8B on the CPU (168–625 % CPU, 10.7 GB RSS). Groups and
+`SupplementaryGroups=` were correct; `vulkaninfo` as `michael` saw the GPU.
+`/dev/dri/renderD128` carried the same 18:12 timestamp as the service start —
+the unit launched before the amdgpu node existed. `After=network.target` does
+not wait for `/dev/dri`.
+
+`sudo systemctl restart llama-server` at 18:29 cleared it (the old process
+took ~90 s to stop, mid retry-storm): 3.6 % CPU, 150 MB RSS, `/health` ok,
+chat completion in 1.8 s.
+
+**The fix** (commit 95fc890, `agent/llama-server.service`): `After=` and
+`Wants=` on `dev-dri-renderD128.device`, plus an `ExecStartPre` that polls up
+to 30 s for the node. The poll is what actually guarantees it — udev does not
+necessarily tag the render node for systemd, in which case the device unit
+never appears and `After=` orders nothing. The live unit is a root-owned copy,
+so `install` it to `/etc/systemd/system/` and `daemon-reload`; `git pull`
+alone changes nothing. Installed on KAMRUI the same evening. Verify at next
+boot: `llama-gpu-check` should exit 0 and GTT should sit around 7.2 GB.
+
+Still open: `llama-gpu-check` only alarms. A race like this heals on restart,
+so a single capped auto-restart from the check would close the loop without
+anyone at the keyboard.
