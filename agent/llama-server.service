@@ -1,10 +1,12 @@
 [Unit]
 Description=llama.cpp server (Qwen3-8B, Vulkan)
-After=network.target
+After=network.target dev-dri-renderD128.device
+Wants=dev-dri-renderD128.device
 
 [Service]
 Type=simple
 User=michael
+ExecStartPre=/bin/sh -c 'for i in $(seq 1 30); do [ -e /dev/dri/renderD128 ] && exit 0; sleep 1; done; exit 1'
 # /dev/dri/renderD128 is root:render and card1 is root:video. Without these
 # the only access is the logind session ACL, which does not exist yet at boot:
 # llama.cpp then warns "no usable GPU found", ignores -ngl and serves from the
