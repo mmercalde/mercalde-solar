@@ -40,10 +40,10 @@ def test_it_uses_the_prompt_the_ask_path_uses(a, calls):
     a.warm_prompt_cache()
     system = calls[0]["messages"][0]
     assert system["role"] == "system"
-    # Everything above the NOW line - MISSION, SYSTEM, POLICY - is the bulk
-    # of it and is what gets cached.
-    prefix = prompts.ask_prompt().split("HOW TO ANSWER")[0].split("NOW\n")[0]
-    assert prefix and system["content"].startswith(prefix)
+    # The whole system message is static now - the time and plan ride in
+    # the user turn - so it must match a real question's byte for byte.
+    assert system["content"] == prompts.ask_prompt()
+    assert "NOW\n" not in system["content"]
     assert "MISSION" in system["content"] and "POLICY" in system["content"]
 
 
@@ -153,30 +153,30 @@ def test_startup_runs_it_once_and_does_not_wait_on_it(a, monkeypatch):
 
 # --- and the cache has to reach most of the prompt to be worth warming ---------
 
-def test_only_the_clock_line_changes_between_questions():
-    """The server caches by prefix, so whatever changes has to come last.
-    Between POLICY and HOW TO ANSWER the NOW line put the break 60% of the
-    way in and left the last 3,900 characters uncacheable for good."""
+def test_nothing_changes_in_the_system_prompt_between_questions():
+    """The server caches by prefix, and the chat template appends the tool
+    schemas to the system message. So the system message has to be the same
+    bytes every time, or the tools fall after the break and are re-prefilled
+    on every question (2,845 tokens, 75 s, measured 2026-10-16)."""
     first = prompts.ask_prompt("en", now_text="2026-09-02 7:00 pm")
-    later = prompts.ask_prompt("en", now_text="2026-09-02 8:00 pm")
-    shared = 0
-    for x, y in zip(first, later):
-        if x != y:
-            break
-        shared += 1
-    assert shared / len(first) > 0.98, f"only {shared} of {len(first)} shared"
-    # The break falls inside the clock line itself, which is as late
-    # as it can fall.
-    assert "NOW\nIt is 2026-09-02" in first[:shared]
+    later = prompts.ask_prompt("es", now_text="2026-09-02 8:00 pm", context="x")
+    assert first == later == prompts.ask_prompt()
+    assert "NOW\nIt is" not in first and "Answer in English." not in first
 
 
-def test_the_clock_line_is_still_there_and_still_says_the_date():
-    p = prompts.ask_prompt("en", now_text="2026-08-30 1:26 pm")
-    assert p.rstrip().endswith("NOW\nIt is 2026-08-30 1:26 pm.")
-    assert "Answer in English." in p
-    assert "NOW" not in prompts.ask_prompt("en")
+def test_the_clock_line_rides_in_the_user_turn():
+    u = prompts.ask_user("voltage?", "en", now_text="2026-08-30 1:26 pm")
+    assert u.startswith("NOW\nIt is 2026-08-30 1:26 pm.")
+    assert "Answer in English." in u
+    assert u.rstrip().endswith("QUESTION\nvoltage?")
+    assert "NOW" not in prompts.ask_user("voltage?", "en")
 
 
 def test_a_spanish_question_still_gets_its_instruction():
-    p = prompts.ask_prompt("es", now_text="2026-08-30 1:26 pm")
-    assert "Responde en espanol." in p and "It is 2026-08-30" in p
+    u = prompts.ask_user("voltaje?", "es", now_text="2026-08-30 1:26 pm")
+    assert "Responde en espanol." in u and "It is 2026-08-30" in u
+
+
+def test_the_plan_context_rides_in_the_user_turn_before_the_question():
+    u = prompts.ask_user("q", now_text="t", context="PLAN FACTS")
+    assert u.index("NOW") < u.index("PLAN FACTS") < u.index("QUESTION\nq")

@@ -279,10 +279,10 @@ def test_the_ask_prompt_says_what_day_it_is():
     """Without it the model invented a date three years out and the reading
     it wanted was never looked up."""
     import prompts
-    p = prompts.ask_prompt("en", now_text="2026-08-30 1:26 pm")
-    assert "It is 2026-08-30 1:26 pm." in p
-    assert "Never supply a date of" in p
-    assert "NOW" not in prompts.ask_prompt("en"), "omitted when not supplied"
+    u = prompts.ask_user("q", "en", now_text="2026-08-30 1:26 pm")
+    assert "It is 2026-08-30 1:26 pm." in u
+    assert "Never supply a date of" in prompts.ask_prompt()
+    assert "NOW" not in prompts.ask_user("q", "en"), "omitted when not supplied"
 
 
 @pytest.mark.parametrize("phrase", ["8-30 2:47 am", "08-30 02:47", "8/30 2:47 am"])

@@ -222,18 +222,36 @@ the question was asked in."""
 def ask_prompt(lang=None, now_text=None, context=None):
     """The system prompt for an inbound question.
 
+    Everything here is static, and that is the point. The chat template
+    folds the tool schemas (about 2,000 tokens) into the system message
+    *after* this text, so anything that varies in here - the time, today's
+    plan, the language - puts the cache break in front of the tools and
+    they are reprocessed on every question. Measured 2026-10-16: 2,845
+    tokens re-prefilled per question, 75 s at this GPU's 38 tok/s, with
+    only ~3,100 of the 5,900 cached. --cache-reuse did not recover it.
+
+    So NOW, the plan context and the language line ride in the user turn
+    instead (see ask_user). The system message, tools included, is then
+    byte-identical from one question to the next and from the warm-up, and
+    the whole of it caches.
+
+    `now_text`, `context` and `lang` are still accepted and ignored so old
+    callers keep working; new code passes them to ask_user.
+    """
+    return (f"MISSION\n{MISSION}\n\n"
+            f"SYSTEM\n{system_section()}\n\n"
+            f"POLICY\n{POLICY}\n\n"
+            f"HOW TO ANSWER\n{ASK_CONTRACT}")
+
+
+def ask_user(text, lang=None, now_text=None, context=None):
+    """The user turn for an inbound question: the variable facts, then the
+    question.
+
     `now_text` is the current date and time. Without it the model has no idea
     what day it is: asked for the voltage at 2:47 am it supplied a date of its
     own invention, three years out, and the reading it wanted was never
     looked up.
-
-    It goes last, and that is about latency rather than about wording. The
-    server caches the prompt by prefix, and this line is the only part that
-    changes between one question and the next - so anything after it has to be
-    reprocessed every single time. Sitting between POLICY and HOW TO ANSWER it
-    put the break 60% of the way in and made the last 3,900 characters
-    uncacheable for good. Last, the cache reaches almost the whole prompt, and
-    the warm-up at startup buys the whole of it rather than most of it.
 
     `context` is the agent's own compact snapshot of today's plan, the
     thresholds actually in force and who set them, and the last few threshold
@@ -243,22 +261,18 @@ def ask_prompt(lang=None, now_text=None, context=None):
     53.54 V, and declared the system "not short today" - and separately
     presented the storm-raised 57.0 stop as "the default". With the plan and
     threshold provenance in the prompt, those answers cannot be produced.
-    It sits after NOW, in the uncacheable tail, because it changes with
-    every plan tick.
     """
-    p = (f"MISSION\n{MISSION}\n\n"
-         f"SYSTEM\n{system_section()}\n\n"
-         f"POLICY\n{POLICY}\n\n"
-         f"HOW TO ANSWER\n{ASK_CONTRACT}")
-    if lang == "es":
-        p += "\n\nResponde en espanol."
-    elif lang == "en":
-        p += "\n\nAnswer in English."
+    parts = []
     if now_text:
-        p += f"\n\nNOW\nIt is {now_text}."
+        parts.append(f"NOW\nIt is {now_text}.")
     if context:
-        p += ("\n\nTODAY'S PLAN AND THRESHOLDS\n"
-              "These facts are authoritative; do not contradict them. Tool "
-              "calls give the live readings, this block gives the plan and "
-              "the thresholds in force.\n" + context)
-    return p
+        parts.append("TODAY'S PLAN AND THRESHOLDS\n"
+                     "These facts are authoritative; do not contradict them. "
+                     "Tool calls give the live readings, this block gives the "
+                     "plan and the thresholds in force.\n" + context)
+    if lang == "es":
+        parts.append("Responde en espanol.")
+    elif lang == "en":
+        parts.append("Answer in English.")
+    parts.append(f"QUESTION\n{text}")
+    return "\n\n".join(parts)

@@ -1052,14 +1052,15 @@ class Agent:
             try:
                 now_text = history.stamp(int(time.time()), self.cfg)
                 context = self.plan_context()
-                system = prompts.ask_prompt(lang, now_text, context)
-                reply, _ = self.run_model(system, text, tools,
+                system = prompts.ask_prompt()
+                user = prompts.ask_user(text, lang, now_text, context)
+                reply, _ = self.run_model(system, user, tools,
                                           max_rounds=MAX_TOOL_ROUNDS)
                 if not tools.calls:
                     log.warning("answer was ungrounded; retrying with a nudge")
                     reply, _ = self.run_model(
                         system,
-                        text + "\n\n(You have not called a tool yet. Call the "
+                        user + "\n\n(You have not called a tool yet. Call the "
                                "tool that answers this before replying.)",
                         tools)
                 if not tools.calls:
@@ -1490,10 +1491,10 @@ class Agent:
             started = time.monotonic()
             try:
                 self.llm.chat(
-                    [{"role": "system",
-                      "content": prompts.ask_prompt(
-                          now_text=history.stamp(int(time.time()), self.cfg))},
-                     {"role": "user", "content": WARMUP_QUESTION}],
+                    [{"role": "system", "content": prompts.ask_prompt()},
+                     {"role": "user", "content": prompts.ask_user(
+                         WARMUP_QUESTION,
+                         now_text=history.stamp(int(time.time()), self.cfg))}],
                     tools=toolsmod.SCHEMAS, temperature=0.0,
                     max_tokens=WARMUP_MAX_TOKENS)
             except LLMError as e:
