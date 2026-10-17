@@ -286,3 +286,29 @@ boot: `llama-gpu-check` should exit 0 and GTT should sit around 7.2 GB.
 Still open: `llama-gpu-check` only alarms. A race like this heals on restart,
 so a single capped auto-restart from the check would close the loop without
 anyone at the keyboard.
+
+## 2026-10-16 — question latency: tool schemas were outside the prompt cache
+
+Each Telegram/dashboard question took about 2 minutes. The llama-server logs
+showed turn 1 re-prefilling 2,845 of 5,932 tokens — 75 s at the GPU's
+38 tok/s.
+
+**The cause:** the Qwen chat template appends the tool schemas (~2,000
+tokens) to the system message, *after* our text. The NOW line, the plan
+context and the language line all sat in the system message, so the cache
+break fell in front of the tools and they were reprocessed on every question.
+
+`--cache-reuse 256` was tried first (commit 17f5794) and recovered nothing on
+the Vulkan build. The flag is left in place; it is harmless.
+
+**The fix** (commit 558bf1c): `ask_prompt()` is now fully static, and
+`ask_user()` carries NOW, the plan context and the language line at the top
+of the user turn. The system message, tools included, is byte-identical
+across questions and the warm-up, so the whole of it caches.
+
+**Result:** turn 1 prefills 627 tokens in 19 s, turn 2 about 440 in 13 s.
+Questions are answered in under a minute.
+
+Also observed: llama-server runs multiple slots (ids 2 and 3 seen) and picks
+one by prefix similarity, so the tick prompts and question prompts do not
+evict each other's cache.
