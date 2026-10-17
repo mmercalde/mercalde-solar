@@ -13,7 +13,7 @@ ExecStartPre=/bin/sh -c 'for i in $(seq 1 30); do [ -e /dev/dri/renderD128 ] && 
 # CPU at ~35 tok/s while reporting active. See docs/kamrui_stability.md.
 SupplementaryGroups=render video
 WorkingDirectory=/home/michael/llama.cpp
-ExecStart=/home/michael/llama.cpp/build/bin/llama-server -m /home/michael/models/Qwen3-8B-Q4_K_M.gguf -ngl 99 --host 0.0.0.0 --port 8080 -c 16384 --jinja
+ExecStart=/home/michael/llama.cpp/build/bin/llama-server -m /home/michael/models/Qwen3-8B-Q4_K_M.gguf -ngl 99 --host 0.0.0.0 --port 8080 -c 16384 --jinja --cache-reuse 256
 Restart=on-failure
 RestartSec=10
 
