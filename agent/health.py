@@ -480,7 +480,16 @@ def projection(conn, cfg, tp=None, fade=None, now=None):
                  "the combined years are a floor rather than a best guess. "
                  "The two components are given separately for that reason")
 
+    years_cycle_r = round(years_cycle, 1) if years_cycle else None
+    years_cal_r = round(years_cal, 1) if years_cal else None
+    headline = {"cycling": years_cycle_r,
+                "calendar": years_cal_r}.get(dominant)
+
     return {
+        "headline_years": headline,
+        "headline_note": "the dominant mechanism's figure; "
+                         "years_to_80pct_combined adds overlapping mechanisms "
+                         "and is a floor, not the expected life",
         "combined_fade_pct_per_year": (round(combined_pct_yr, 2)
                                        if combined_pct_yr else None),
         "years_to_80pct_combined": (round(years_combined, 1)
@@ -489,9 +498,8 @@ def projection(conn, cfg, tp=None, fade=None, now=None):
                                     if cycle_pct_yr else None),
         "calendar_fade_pct_per_year": (round(cal_pct_yr, 2)
                                        if cal_pct_yr else None),
-        "years_to_80pct_cycle": (round(years_cycle, 1)
-                                 if years_cycle else None),
-        "years_to_80pct_calendar": (round(years_cal, 1) if years_cal else None),
+        "years_to_80pct_cycle": years_cycle_r,
+        "years_to_80pct_calendar": years_cal_r,
         "dominant_mechanism": dominant,
         "resting_band_pct_of_measured_span": band,
         "end_of_life_capacity_pct": eol,

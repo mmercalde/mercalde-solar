@@ -338,6 +338,19 @@ def test_the_shorter_of_the_two_is_the_dominant_mechanism(cfg, conn):
     assert gentle["dominant_mechanism"] == "calendar"
 
 
+def test_the_headline_is_the_dominant_leg(cfg, conn):
+    """Not the combined figure, which is a floor: the leg that bites."""
+    fade = {"usable_for_projection": False, "confidence": "none"}
+    for tp in ({"cycles_per_year": 300.0, "mean_daily_dod_pct": 60.0,
+                "mean_resting_v": None},
+               {"cycles_per_year": 5.0, "mean_daily_dod_pct": 5.0,
+                "mean_resting_v": None}):
+        p = health.projection(conn, cfg, fade=fade, tp=tp)
+        leg = {"cycling": "years_to_80pct_cycle",
+               "calendar": "years_to_80pct_calendar"}[p["dominant_mechanism"]]
+        assert p["headline_years"] == p[leg]
+        assert list(p)[:2] == ["headline_years", "headline_note"]
+
 def test_a_believable_measured_trend_replaces_the_coefficient(conn, cfg):
     tp = {"cycles_per_year": 77.0, "mean_daily_dod_pct": 21.0,
           "mean_resting_v": None}
