@@ -177,8 +177,9 @@ battery:
     cycle_dod_exponent: 1.5
     # Calendar fade at the reference point: 25 C (77 F) at mid state of
     # charge, per year, on a square-root-of-time curve linearised to the
-    # first decade. 2%/yr is mid-range for NMC.
-    calendar_fade_pct_per_year_ref: 2.0
+    # first decade. 2%/yr^-1/2 is mid-range for NMC: 2% x sqrt(10) = 6.3%
+    # over ten years, which averages to 0.65%/yr.
+    calendar_fade_pct_per_year_ref: 0.65
     calendar_ref_temp_f: 77
     # Arrhenius activation energy in eV. 0.5 eV is the usual NMC value and
     # means roughly a doubling of calendar fade per 10 C.
@@ -187,9 +188,11 @@ battery:
     # fraction of the *measured* 52.0-59.5 V span the pack rests at, because
     # this pack has no state-of-charge scale worth using: see
     # soc_scale_unreliable. 50% is the reference; each point above or below
-    # moves calendar fade by this much of itself.
+    # moves calendar fade by this much of itself. Set to zero: the pack rests
+    # at 3.75 V/cell, which is the reference state of charge already, so
+    # there is nothing to adjust for.
     calendar_band_reference_pct: 50
-    calendar_band_sensitivity_per_pct: 0.012
+    calendar_band_sensitivity_per_pct: 0.0
     # What counts as worn out.
     end_of_life_capacity_pct: 80
   floor_v: 52.0                    # never start below this

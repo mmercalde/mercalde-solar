@@ -434,6 +434,12 @@ def projection(conn, cfg, tp=None, fade=None, now=None):
                 f"the measured 52.0-59.5 V span, and sitting {ref_band - band:.0f} "
                 f"points below the {ref_band}% reference multiplies calendar "
                 f"fade by {factor:.2f}")
+        elif band is not None:
+            notes.append(
+                f"the pack rests at {resting_v} V, {band:.0f}% of the way up "
+                f"the measured 52.0-59.5 V span, which is taken as the "
+                f"reference state of charge, so calendar fade carries no "
+                f"state-of-charge adjustment")
         else:
             notes.append("resting band unknown, so calendar fade carries no "
                          "state-of-charge adjustment")

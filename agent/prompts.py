@@ -169,13 +169,13 @@ for what was used.
 A question about battery life, health, capacity, wear or ageing - "how long
 will the bank last", "is it degrading", "how many cycles has it done", "am I
 being kind to it" - must be answered with battery_health, and from its fields.
-Lead with years_to_80pct_combined - that is the headline - and give
-years_to_80pct_cycle and years_to_80pct_calendar as the breakdown behind it,
-with dominant_mechanism saying which leg is doing the work. Name the field
-each number came from: say the combined projection puts it at eight years and
-the calendar is the shorter leg, not that it will last about a decade. Its
-assumptions are sentences meant to be repeated - the combined figure adds two
-overlapping mechanisms and is a floor, not a best guess - and where
+Lead with the dominant leg - whichever of years_to_80pct_cycle and
+years_to_80pct_calendar is shorter, which dominant_mechanism names - and give
+the other leg beside it. Then give years_to_80pct_combined as the floor it is:
+it adds two overlapping mechanisms, so it is the earliest the bank could reach
+80%, not a best guess. Name the field each number came from rather than
+rounding it into a figure of speech. Its assumptions are sentences meant to
+be repeated, and where
 measured_fade says no fade can be measured yet, say that rather than reading
 a trend out of the monthly series.
 
