@@ -1,0 +1,31 @@
+0.00.059.753 I srv    load_model: loading model '/home/michael/models/candidates/Qwen3.5-4B-Q4_K_M.gguf'
+0.03.135.810 W srv    load_model: cache_reuse is not supported by this context, it will be disabled
+0.03.296.865 I srv  llama_server: listening on http://127.0.0.1:8082
+1.14.124.755 I slot print_timing: id  3 | task 0 | prompt eval time =   45085.48 ms /  4915 tokens (    9.17 ms per token,   109.02 tokens per second)
+1.14.124.764 I slot print_timing: id  3 | task 0 |        eval time =   22889.88 ms /   240 tokens (   95.77 ms per token,    10.44 tokens per second)
+2.07.207.894 I slot print_timing: id  3 | task 246 | prompt eval time =    6817.88 ms /   659 tokens (   10.35 ms per token,    96.66 tokens per second)
+2.07.207.902 I slot print_timing: id  3 | task 246 |        eval time =    1216.96 ms /    14 tokens (   93.61 ms per token,    10.68 tokens per second)
+2.13.931.388 I slot print_timing: id  3 | task 263 | prompt eval time =    3255.68 ms /   288 tokens (   11.30 ms per token,    88.46 tokens per second)
+2.13.931.399 I slot print_timing: id  3 | task 263 |        eval time =    3444.99 ms /    37 tokens (   95.69 ms per token,    10.45 tokens per second)
+3.15.893.601 I slot print_timing: id  3 | task 302 | prompt eval time =    6748.96 ms /   658 tokens (   10.26 ms per token,    97.50 tokens per second)
+3.15.893.608 I slot print_timing: id  3 | task 302 |        eval time =   10149.11 ms /   108 tokens (   94.85 ms per token,    10.54 tokens per second)
+4.19.892.281 I slot print_timing: id  3 | task 413 | prompt eval time =    6737.87 ms /   658 tokens (   10.24 ms per token,    97.66 tokens per second)
+4.19.892.291 I slot print_timing: id  3 | task 413 |        eval time =   12203.17 ms /   130 tokens (   94.60 ms per token,    10.57 tokens per second)
+5.28.578.930 I slot print_timing: id  3 | task 546 | prompt eval time =    6746.16 ms /   659 tokens (   10.24 ms per token,    97.69 tokens per second)
+5.28.578.940 I slot print_timing: id  3 | task 546 |        eval time =   16877.07 ms /   179 tokens (   94.81 ms per token,    10.55 tokens per second)
+6.21.601.500 I slot print_timing: id  3 | task 728 | prompt eval time =    6742.91 ms /   659 tokens (   10.23 ms per token,    97.73 tokens per second)
+6.21.601.506 I slot print_timing: id  3 | task 728 |        eval time =    1215.99 ms /    14 tokens (   93.54 ms per token,    10.69 tokens per second)
+6.30.165.565 I slot print_timing: id  3 | task 745 | prompt eval time =    3217.67 ms /   287 tokens (   11.21 ms per token,    89.20 tokens per second)
+6.30.165.573 I slot print_timing: id  3 | task 745 |        eval time =    5328.28 ms /    57 tokens (   95.15 ms per token,    10.51 tokens per second)
+7.35.831.510 I slot print_timing: id  3 | task 804 | prompt eval time =    6715.60 ms /   659 tokens (   10.19 ms per token,    98.13 tokens per second)
+7.35.831.520 I slot print_timing: id  3 | task 804 |        eval time =   13899.87 ms /   148 tokens (   94.56 ms per token,    10.58 tokens per second)
+8.28.817.626 I slot print_timing: id  3 | task 955 | prompt eval time =    6718.79 ms /   658 tokens (   10.21 ms per token,    97.93 tokens per second)
+8.28.817.631 I slot print_timing: id  3 | task 955 |        eval time =    1216.09 ms /    14 tokens (   93.55 ms per token,    10.69 tokens per second)
+8.33.286.256 I slot print_timing: id  3 | task 972 | prompt eval time =    3207.26 ms /   286 tokens (   11.21 ms per token,    89.17 tokens per second)
+8.33.286.264 I slot print_timing: id  3 | task 972 |        eval time =    1243.90 ms /    14 tokens (   95.68 ms per token,    10.45 tokens per second)
+8.40.734.019 I slot print_timing: id  3 | task 988 | prompt eval time =    4500.65 ms /   398 tokens (   11.31 ms per token,    88.43 tokens per second)
+8.40.734.028 I slot print_timing: id  3 | task 988 |        eval time =    2483.67 ms /    27 tokens (   95.53 ms per token,    10.47 tokens per second)
+8.48.873.657 I slot print_timing: id  3 | task 1017 | prompt eval time =    6751.68 ms /   625 tokens (   10.80 ms per token,    92.57 tokens per second)
+8.48.873.666 I slot print_timing: id  3 | task 1017 |        eval time =    1352.42 ms /    15 tokens (   96.60 ms per token,    10.35 tokens per second)
+# load-only probe at -lv 4:
+0.01.252.193 I load_tensors: offloaded 33/33 layers to GPU
