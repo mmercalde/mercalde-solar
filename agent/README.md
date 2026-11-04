@@ -758,6 +758,32 @@ named minute, the plan record paraphrased instead of quoted. The ground truth
 is computed from the database each run rather than written down, so a case
 does not quietly stop testing anything when the pack moves.
 
+`--exam --candidate URL[=MODEL]` asks the same questions of a model the agent
+is not using. It runs the agent's own `answer()` in-process, in dry-run, and
+never touches the running agent:
+
+```bash
+agent/venv/bin/python agent/model_eval.py --exam --repeat 3 --pause 30 \
+    --candidate http://127.0.0.1:8082/v1/chat/completions=gemma4 \
+    --questions agent/docs/exam_questions_2026-11.txt --json
+```
+
+The first run freezes the database to `/tmp/abexam/history.sqlite`, and later
+runs reuse it so every model is graded on the same data; `--fresh-snapshot`
+replaces it. Live tools such as `get_status` still read the dashboard, so those
+answers reflect the moment they were asked. Past midnight it warns, because
+"last night" no longer means what it did when the snapshot was taken.
+
+Each candidate gets its own copy of the database and of the guard and top-up
+state, under `/tmp/abexam/<candidate>/`. Dry-run alone is not enough:
+`Guard.check` runs ahead of the dry-run test, appends to `data/audit.log`, and
+can save `guard_state.json`.
+
+Each answer records its wall time, tool calls, unsourced numbers, and whether
+the ungrounded retry or the fallback to `/data` fired. `tonight_plan` is answered
+by Python without reaching the model, so it is counted separately. `--questions`
+answers are not graded; they are printed for a person to judge.
+
 Both servers want their own weights in RAM. The KAMRUI has enough for an 8B
 and a 14B at Q4 at the same time, but not much else; stop the candidate when
 the comparison is done.

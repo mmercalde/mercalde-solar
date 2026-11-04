@@ -25,14 +25,20 @@ rather than for then; replays stay close to the present for that reason.
 
   ./model_eval.py -n 20
   ./model_eval.py -n 20 --candidate http://127.0.0.1:8082/v1/chat/completions=qwen3-14b
+  ./model_eval.py --exam --repeat 3 --candidate http://127.0.0.1:8082/v1/chat/completions=gemma4
 
 See the README for running a second llama-server to compare against.
 """
 
 import argparse
+import contextlib
+import copy
 import json
 import logging
+import os
 import re
+import shutil
+import sqlite3
 import sys
 import time
 
@@ -47,6 +53,7 @@ import policy as policymod
 import prompts
 import sun as sunmod
 import tools as toolsmod
+import weather
 
 log = logging.getLogger(__name__)
 
@@ -424,6 +431,314 @@ def exam_report(rows):
     return "\n".join(out)
 
 
+# --- the exam, put to a candidate in-process ----------------------------------
+#
+# POST /ask only reaches the model in config.json. These run the agent's own
+# answer() against another endpoint, on a frozen copy of the database.
+#
+# dry_run stops the write in Tools.set_gen_thresholds and the send in
+# Tools.send_telegram, and db_path keeps the action log off the live database.
+# Neither covers the files beside the database: Guard.check runs ahead of the
+# dry-run test, appends to data/audit.log, and can reach adopt_owner, which
+# saves guard_state.json and topup_state.json. Each candidate therefore gets a
+# copy of those files too, and config.DATA_DIR points at the copy while its
+# Agent is built and questioned. Each gets its own copy of the database as well:
+# an action one model provoked would otherwise reach the next model in its plan
+# context.
+
+SNAPSHOT_DIR = "/tmp/abexam"
+SANDBOX_FILES = ("guard_state.json", "topup_state.json", "weather_archive.json")
+
+# What answer() logs when it gives up on the model. It returns only the text.
+UNGROUNDED_LOG = "answer was ungrounded"
+STATUS_LOG = "model would not call a tool"
+MODEL_ERROR_LOG = "model unavailable for question"
+
+# "53,5 V" is 53.5 in Spanish. NUMBER_RE reads a comma as a thousands separator
+# and would report it as the invented figure 535.
+SPANISH_DECIMAL_RE = re.compile(r"(?<![\d,.])(\d{1,3}),(\d{1,2})(?![\d,])")
+
+
+def make_snapshot(snapshot_dir=SNAPSHOT_DIR, source=None, fresh=False):
+    """The session's frozen database. Taken once, so every model gets the same.
+
+    Through SQLite's backup API, because the agent has the source open in WAL
+    mode and a file copy of that can miss what is still in the log.
+    """
+    path = os.path.join(snapshot_dir, "history.sqlite")
+    if os.path.exists(path) and not fresh:
+        return path
+    os.makedirs(snapshot_dir, exist_ok=True)
+    tmp = path + ".tmp"
+    src = history.readonly_connection(source or config.DB_PATH)
+    dst = sqlite3.connect(tmp)
+    try:
+        src.backup(dst)
+    finally:
+        dst.close()
+        src.close()
+    os.replace(tmp, path)
+    return path
+
+
+def snapshot_warning(path, cfg, now=None):
+    """Words like "last night" stop meaning the same thing past midnight."""
+    now = int(now or time.time())
+    taken = int(os.path.getmtime(path))
+    if history.local_day(taken, cfg) == history.local_day(now, cfg):
+        return None
+    return (f"the snapshot was taken on {history.local_day(taken, cfg)} and it is "
+            f"now {history.local_day(now, cfg)}: questions about yesterday and "
+            "last night no longer cover what they did when it was taken")
+
+
+def candidate_slug(label):
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", label).strip("_")
+
+
+@contextlib.contextmanager
+def sandboxed(directory):
+    """Point everything rooted in DATA_DIR at `directory`, then put it back."""
+    saved = (config.DATA_DIR, config.DB_PATH, config.AUDIT_LOG, weather.ARCHIVE_CACHE)
+    config.DATA_DIR = directory
+    config.DB_PATH = os.path.join(directory, "history.sqlite")
+    config.AUDIT_LOG = os.path.join(directory, "audit.log")
+    weather.ARCHIVE_CACHE = os.path.join(directory, "weather_archive.json")
+    try:
+        yield
+    finally:
+        config.DATA_DIR, config.DB_PATH, config.AUDIT_LOG, weather.ARCHIVE_CACHE = saved
+
+
+def prepare_sandbox(candidate, snapshot, data_dir=None):
+    """A private copy of the database and the state files for one candidate."""
+    directory = os.path.join(os.path.dirname(snapshot), candidate_slug(candidate.label))
+    shutil.rmtree(directory, ignore_errors=True)
+    os.makedirs(directory)
+    shutil.copy(snapshot, os.path.join(directory, "history.sqlite"))
+    for name in SANDBOX_FILES:
+        live = os.path.join(data_dir or config.DATA_DIR, name)
+        if os.path.exists(live):
+            shutil.copy(live, os.path.join(directory, name))
+    return directory
+
+
+def build_exam_agent(candidate, cfg, directory):
+    """An Agent on the candidate's endpoint. Call inside sandboxed(directory)."""
+    import agent as agentmod    # the scheduler and the rest are only needed here
+
+    class ExamAgent(agentmod.Agent):
+        """Keeps the last Tools, since answer() returns only the text."""
+        last_tools = None
+
+        def tools(self, policy=None):
+            self.last_tools = super().tools(policy=policy)
+            return self.last_tools
+
+    return ExamAgent(dict(copy.deepcopy(cfg), llm_url=candidate.url, llm_model=candidate.name),
+                     dry_run=True, db_path=os.path.join(directory, "history.sqlite"))
+
+
+class LogCatcher(logging.Handler):
+    """What answer() logged while one question was being answered."""
+
+    def __init__(self):
+        super().__init__(logging.WARNING)
+        self.messages = []
+
+    def emit(self, record):
+        self.messages.append(record.getMessage())
+
+    def saw(self, text):
+        return any(text in m for m in self.messages)
+
+
+def numbers_as_written(reply, lang):
+    return SPANISH_DECIMAL_RE.sub(r"\1.\2", reply or "") if lang == "es" else (reply or "")
+
+
+def ask_candidate(exam_agent, question, lang, cfg):
+    """One question, and everything the report needs to know about the answer."""
+    import agent as agentmod
+    plan_question = agentmod.is_plan_question(question)
+    context = exam_agent.plan_context() if not plan_question else None
+    now_text = history.stamp(int(time.time()), cfg)
+    catcher = LogCatcher()
+    logger = logging.getLogger(agentmod.__name__)
+    logger.addHandler(catcher)
+    exam_agent.last_tools = None
+    started = time.time()
+    try:
+        reply = exam_agent.answer(question, lang)
+    finally:
+        wall = round(time.time() - started, 1)
+        logger.removeHandler(catcher)
+    tools = exam_agent.last_tools
+    calls = list(tools.calls) if tools else []
+    if plan_question:
+        answered_by = "python_plan"
+    elif catcher.saw(MODEL_ERROR_LOG):
+        answered_by = "model_error"
+    elif catcher.saw(STATUS_LOG):
+        answered_by = "python_status"
+    else:
+        answered_by = "model"
+    # Figures Python wrote, or a fixed apology, say nothing about the model.
+    unsourced = []
+    if answered_by == "model":
+        sources = [question, context or "", now_text]
+        sources += [json.dumps(r, default=str) for _, _, r in calls]
+        unsourced = unsourced_numbers(numbers_as_written(reply, lang), sources)
+    return {"question": question, "lang": lang or "en", "reply": reply,
+            "wall_s": wall, "answered_by": answered_by,
+            "tool_calls": [{"name": n, "args": a} for n, a, _ in calls],
+            "invalid_calls": invalid_calls(calls),
+            "unsourced": unsourced,
+            "ungrounded_retry": catcher.saw(UNGROUNDED_LOG),
+            "status_fallback": answered_by == "python_status"}
+
+
+def parse_questions(lines):
+    """[(question, lang)] from a plain list. `es:` marks Spanish; # is a comment."""
+    out = []
+    for line in lines:
+        text = line.strip()
+        if not text or text.startswith("#"):
+            continue
+        if text[:3].lower() == "es:":
+            out.append((text[3:].strip(), "es"))
+        else:
+            out.append((text, None))
+    return out
+
+
+def exam_candidate(candidate, cfg, snapshot, repeat=1, only=None, questions=(),
+                   pause=0, data_dir=None):
+    """Every graded case `repeat` times, then each extra question once."""
+    directory = prepare_sandbox(candidate, snapshot, data_dir)
+    truth_conn = history.readonly_connection(snapshot)
+    cases, extras = [], []
+    first = [True]
+
+    def wait():
+        if pause and not first[0]:
+            time.sleep(pause)
+        first[0] = False
+
+    try:
+        with sandboxed(directory):
+            exam_agent = build_exam_agent(candidate, cfg, directory)
+            for case in eval_cases.CASES:
+                if only and case["id"] not in only:
+                    continue
+                for attempt in range(1, repeat + 1):
+                    wait()
+                    row = ask_candidate(exam_agent, case["question"], None, cfg)
+                    truth = case["truth"](truth_conn, cfg, int(time.time()))
+                    passed, why = case["grade"](row["reply"], truth)
+                    cases.append(dict(row, id=case["id"], about=case["about"],
+                                      attempt=attempt, passed=bool(passed), why=why,
+                                      truth=truth))
+            for question, lang in questions:
+                wait()
+                extras.append(ask_candidate(exam_agent, question, lang, cfg))
+    finally:
+        truth_conn.close()
+    return {"label": candidate.label, "url": candidate.url, "model": candidate.name,
+            "snapshot": snapshot, "sandbox": directory, "cases": cases, "questions": extras}
+
+
+def exam_summary(result):
+    """The counts the report table is built from."""
+    rows = result["cases"] + result["questions"]
+    graded = [r for r in result["cases"] if r["answered_by"] != "python_plan"]
+    model = [r for r in rows if r["answered_by"] in ("model", "python_status")]
+    walls = [r["wall_s"] for r in model]
+    return {"graded": len(graded), "passed": sum(r["passed"] for r in graded),
+            "python_answered": sum(r["answered_by"] == "python_plan" for r in rows),
+            "ungrounded_retries": sum(r["ungrounded_retry"] for r in rows),
+            "status_fallbacks": sum(r["status_fallback"] for r in rows),
+            "model_errors": sum(r["answered_by"] == "model_error" for r in rows),
+            "unsourced": sum(len(r["unsourced"]) for r in rows),
+            "invalid_calls": sum(len(r["invalid_calls"]) for r in rows),
+            "write_attempts": sum(c["name"] == "set_gen_thresholds"
+                                  for r in rows for c in r["tool_calls"]),
+            "avg_wall_s": round(sum(walls) / len(walls), 1) if walls else None,
+            "max_wall_s": max(walls) if walls else None,
+            "avg_tool_calls": (round(sum(len(r["tool_calls"]) for r in model) / len(model), 2)
+                               if model else None)}
+
+
+def _answer_lines(row):
+    calls = ", ".join(c["name"] for c in row["tool_calls"]) or "none"
+    flags = [f for f, on in (("UNGROUNDED RETRY", row["ungrounded_retry"]),
+                             ("ANSWERED FROM /data", row["status_fallback"]),
+                             ("MODEL ERROR", row["answered_by"] == "model_error"),
+                             ("PYTHON, NOT THE MODEL", row["answered_by"] == "python_plan")) if on]
+    out = [f"  {row['wall_s']} s  tools: {calls}  unsourced: {row['unsourced'] or 'none'}"
+           + (f"  [{', '.join(flags)}]" if flags else "")]
+    out += [f"  A: {line}" for line in (row["reply"] or "(no reply)").splitlines() or [""]]
+    return out
+
+
+def exam_candidate_report(results):
+    out = []
+    for result in results:
+        s = exam_summary(result)
+        out += [f"\n=== {result['label']}", f"snapshot {result['snapshot']}"]
+        seen = {}
+        for r in result["cases"]:
+            seen.setdefault(r["id"], []).append(r)
+        for cid, rows in seen.items():
+            python = all(r["answered_by"] == "python_plan" for r in rows)
+            count = f"{sum(r['passed'] for r in rows)}/{len(rows)}"
+            out.append(f"\n{cid}: {count}" + ("  (answered by Python, says nothing "
+                                              "about the model)" if python else ""))
+            out.append(f"  Q: {rows[0]['question']}")
+            for r in rows:
+                out.append(f"  {'PASS' if r['passed'] else 'FAIL'} #{r['attempt']}: {r['why']}")
+                out += _answer_lines(r)
+        for r in result["questions"]:
+            out.append(f"\n[{r['lang']}] {r['question']}")
+            out += _answer_lines(r)
+        out += [
+            f"\ngraded by model: {s['passed']}/{s['graded']}, "
+            f"answered by Python: {s['python_answered']}",
+            f"ungrounded retries {s['ungrounded_retries']}, /data fallbacks "
+            f"{s['status_fallbacks']}, model errors {s['model_errors']}, unsourced "
+            f"{s['unsourced']}, invalid calls {s['invalid_calls']}, threshold "
+            f"proposals {s['write_attempts']} (dry run, nothing written)",
+            f"wall avg {s['avg_wall_s']} s, max {s['max_wall_s']} s, "
+            f"tool calls per answer {s['avg_tool_calls']}"]
+    return "\n".join(out)
+
+
+def run_candidate_exam(args, cfg):
+    """--exam --candidate: nothing here touches the running agent or its files."""
+    questions = []
+    if args.questions:
+        with open(args.questions, encoding="utf-8") as f:
+            questions = parse_questions(f)
+    snapshot = make_snapshot(fresh=args.fresh_snapshot)
+    print(f"snapshot {snapshot}, taken "
+          f"{history.stamp(int(os.path.getmtime(snapshot)), cfg)}", file=sys.stderr)
+    warning = snapshot_warning(snapshot, cfg)
+    if warning:
+        print(f"WARNING: {warning}", file=sys.stderr)
+    results = []
+    for spec in args.candidate:
+        url, name = parse_candidate(spec)
+        results.append(exam_candidate(
+            Candidate(url, name or cfg["llm_model"]), cfg, snapshot, repeat=args.repeat,
+            only=args.case or None, questions=questions, pause=args.pause))
+    if args.json:
+        print(json.dumps([dict(r, summary=exam_summary(r)) for r in results],
+                         indent=1, default=str, ensure_ascii=False))
+    else:
+        print(exam_candidate_report(results))
+    return 0
+
+
 def parse_candidate(spec):
     """`url=name`, or just a url to reuse the configured model name."""
     url, _, name = spec.partition("=")
@@ -451,12 +766,31 @@ def main():
                                       "configured bind address and port)")
     ap.add_argument("--case", action="append", default=[],
                     help="run only these exam cases; repeatable")
+    ap.add_argument("--repeat", type=int, default=1, metavar="N",
+                    help="with --exam --candidate: ask each case N times")
+    ap.add_argument("--questions", metavar="FILE",
+                    help="with --exam --candidate: extra ungraded questions, one "
+                         "per line, `es:` for Spanish, asked once each")
+    ap.add_argument("--pause", type=float, default=0, metavar="SECONDS",
+                    help="with --exam --candidate: wait between questions")
+    ap.add_argument("--fresh-snapshot", action="store_true",
+                    help=f"with --exam --candidate: replace {SNAPSHOT_DIR}/history.sqlite "
+                         "instead of reusing it")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
+    exam_only = {"--repeat": args.repeat != 1, "--questions": args.questions,
+                 "--pause": args.pause, "--fresh-snapshot": args.fresh_snapshot}
+    if not (args.exam and args.candidate) and any(exam_only.values()):
+        ap.error("only with --exam --candidate: "
+                 + ", ".join(k for k, v in exam_only.items() if v))
+    if args.repeat < 1:
+        ap.error("--repeat must be at least 1")
 
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.WARNING,
                         format="%(levelname)s %(name)s %(message)s")
     cfg = config.load()
+    if args.exam and args.candidate:
+        return run_candidate_exam(args, cfg)
     conn = history.connect()
 
     if args.exam:

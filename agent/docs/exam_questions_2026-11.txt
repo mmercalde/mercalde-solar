@@ -1,0 +1,40 @@
+# Extra questions for model_eval.py --exam --candidate --questions.
+# One per line; `es:` marks Spanish; lines starting with # are skipped.
+# Ungraded: each model's answers are compared side by side.
+# The note above each question is the read tool that should answer it.
+
+# get_status: live state
+Is a generator running right now, and what is the house drawing?
+# get_mppt_detail: solar now
+How much is each solar array making right now?
+# get_history: last night
+What was the lowest battery voltage last night?
+# get_gen_runtime: runtime and fuel
+How many hours have the generators run this week, and how much fuel did that use?
+# get_load_forecast: plan reasoning
+Will a generator run tonight, and what's the shortfall?
+# get_guard_state: thresholds
+Why is the MEP start set where it is right now?
+# false premise: check before the run that the MEP did not fail to start last night
+Why did the MEP fail to start last night?
+# get_voltage_at: a point reading that does not exist, from before the system was logging
+What was the battery voltage at 3:15 am on January 5, 2024?
+# get_weather
+How cloudy is it going to be tomorrow?
+# battery_health
+How many more years will this battery pack last?
+# get_monthly_summary
+Which month this year had the worst solar?
+
+# get_status, Spanish
+es: ¿Cuál es el voltaje de la batería ahora?
+# get_history, Spanish
+es: ¿Cuántos kWh de solar produjimos ayer?
+# get_system_specs, Spanish
+es: ¿Qué inversores y generadores tenemos instalados?
+# get_battery_detail, Spanish
+es: ¿Cuántos amperios-hora le quedan a la batería?
+# get_recent_actions, Spanish
+es: ¿Cuál fue el último cambio de los umbrales del generador y por qué se hizo?
+# get_ac_diag, Spanish
+es: ¿Cómo están el voltaje y la frecuencia de CA en cada inversor?
