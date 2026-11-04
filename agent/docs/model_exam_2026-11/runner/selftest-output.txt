@@ -1,0 +1,109 @@
+# selftest.sh output, 2026-11-03 20:28:22 PST, on SER8. systemctl, sudo, curl, ss, journalctl, the model server and the exam are stubs.
+--- happy path: both models run, in order, live back, rule gone
+  ok   finished
+  ok   two exams
+  ok   gemma first
+  ok   incumbent second
+  ok   30 s pause flag and repeat 3 passed
+  ok   gemma sampling flags
+  ok   incumbent has no sampling flags
+  ok   both on 127.0.0.1:8082
+  ok   stopped twice, started twice
+  ok   live restored
+  ok   rule removed
+  ok   status says done
+  ok   guard stopped
+--- generator on at the start: no stop at all, rule still removed
+  ok   never stopped live
+  ok   no exam
+  ok   live up
+  ok   rule removed
+--- generator state unreadable at the start: same
+  ok   never stopped live
+  ok   rule removed
+--- generator starts during Gemma: it finishes, live back, no incumbent
+  ok   one exam only
+  ok   live restored
+  ok   reason recorded
+  ok   rule removed
+--- SIGTERM mid-exam: candidate killed, live back, rule gone
+  ok   candidate was up, live was down
+  ok   live restored
+  ok   rule removed
+  ok   reason recorded
+--- SIGINT mid-exam, launched the way arm.sh does: same
+  ok   the launcher kept the pid arm.sh hands the dead-man
+  ok   it reacted within 10 s, not at the end of the exam
+  ok   live restored
+  ok   rule removed
+  ok   reason recorded
+--- SIGHUP mid-exam, launched the way arm.sh does: same
+  ok   live restored
+  ok   rule removed
+  ok   reason recorded
+--- exam crashes: live back, incumbent not run
+  ok   one exam only
+  ok   live restored
+  ok   rule removed
+--- snapshot fails: no stop made
+  ok   never stopped live
+  ok   rule removed
+--- no real tick after Gemma: no incumbent
+  ok   one exam only
+  ok   live restored
+--- inside the 20:30-23:00 window: no stop made
+  ok   never stopped live
+  ok   no exam
+  ok   rule removed
+--- armed after its dates have passed: no stop made
+  ok   never stopped live
+  ok   says why
+--- too late to start: no stop made
+  ok   never stopped live
+  ok   rule removed
+--- Gemma thermally killed: live back at once, the incumbent still runs
+  ok   killed for temperature
+  ok   live back while the exam is still recording
+  ok   both models ran
+  ok   incumbent ran after it
+  ok   the kill is kept against Gemma
+  ok   live restored
+  ok   rule removed
+--- Gemma thermally killed and its exam then crashes: the incumbent still runs
+  ok   both models ran
+  ok   live restored
+--- incumbent thermally killed: Gemma's results stand, live back, rule gone
+  ok   killed for temperature
+  ok   both models were attempted
+  ok   Gemma has its result file
+  ok   live restored
+  ok   rule removed
+--- Tctl over for under 10 s: not killed
+  ok   no kill
+--- swap past 2 GB: candidate killed
+  ok   killed for swap
+  ok   not a thermal kill, so the incumbent does not run
+  ok   reason recorded
+  ok   live restored
+--- kill -9 the runner mid-exam: the dead-man restores live and removes the rule
+  ok   live is down after the kill
+./selftest.sh: line 298: 1320575 Killed                  "$HERE/run.sh" > /dev/null 2>&1
+  ok   live restored
+  ok   8082 cleared
+  ok   rule removed
+  ok   guard told to stop
+  ok   status says done
+--- dead-man stands down when the runner finished cleanly
+  ok   stood down
+--- live will not start: runner leaves the rule, dead-man tries once more, then removes it
+  ok   runner left the rule for the dead-man
+  ok   dead-man tried to start it
+  ok   dead-man removed the rule anyway
+  ok   status admits live is down
+--- live unhealthy at the deadline with the runner alive and stuck: dead-man stops it
+  ok   live restored
+  ok   stop flag set
+  ok   rule removed
+
+passed=82 failed=0
+exit=0
