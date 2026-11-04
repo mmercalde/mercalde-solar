@@ -51,23 +51,42 @@ def test_the_on_reason_table_is_the_spec_table(app_ns):
     assert app_ns["GEN_ON_REASON"] == {
         0: "not_on", 1: "dc_voltage_low", 2: "battery_soc_low",
         3: "ac_current_high", 4: "contact_closed", 5: "manual_on",
-        6: "exercise", 7: "non_quiet_time"}
+        6: "exercise", 7: "non_quiet_time", 8: "ext_on_via_ags",
+        9: "ext_on_via_gen", 10: "unable_to_stop", 11: "ac_power_high",
+        12: "dc_current_high"}
 
 
-def test_the_off_reason_table_claims_only_what_is_documented(app_ns):
-    """Three codes are known. The rest come through as code_N, not as guesses."""
-    off = app_ns["GEN_OFF_REASON"]
-    assert off == {7: "manual_off", 10: "exercise_done", 11: "quiet_time"}
-    assert 6 not in off
+def test_the_off_reason_table_is_the_spec_table(app_ns):
+    """AGS spec 2.5. A code not in here still comes through as code_N."""
+    assert app_ns["GEN_OFF_REASON"] == {
+        0: "not_off", 1: "dc_voltage_high", 2: "battery_soc_high",
+        3: "ac_current_low", 4: "contact_opened", 5: "reached_absorp",
+        6: "reached_float", 7: "manual_off", 8: "max_run_time",
+        9: "max_auto_cycle", 10: "exercise_done", 11: "quiet_time",
+        12: "ext_off_via_ags", 13: "safe_mode", 14: "ext_off_via_gen",
+        15: "ext_shutdown", 16: "auto_off", 17: "fault", 18: "unable_to_start",
+        19: "power_low", 20: "dc_current_low", 21: "ac_good"}
 
 
-def test_every_reason_the_dashboard_can_send_is_one_the_agent_knows(app_ns):
+# On-reasons the dashboard names and history.py has no entry for, deliberately:
+# _classify keeps the name as the run's kind rather than rounding it to 'auto'.
+KEPT_BY_NAME = {"ext_on_via_ags", "ext_on_via_gen", "unable_to_stop",
+                "ac_power_high", "dc_current_high"}
+
+
+def test_every_reason_the_dashboard_can_send_is_accounted_for(app_ns):
     """The two files spell these strings independently; they must agree."""
     named = set(app_ns["GEN_ON_REASON"].values())
     handled = (set(history.REASON_KIND) | {history.REASON_VOLTAGE}
                | set(history.REASON_NONE))
-    assert named - handled == set(), f"unhandled on-reason: {named - handled}"
+    assert named - handled == KEPT_BY_NAME
     assert handled - named == set(), f"agent invents a reason: {handled - named}"
+
+
+@pytest.mark.parametrize("reason", sorted(KEPT_BY_NAME))
+def test_a_reason_without_an_entry_is_kept_rather_than_rounded(conn, cfg, reason):
+    assert history._classify(conn, "kubota", 1000, 60, None, cfg,
+                             on_reason=reason) == reason
 
 
 @pytest.mark.parametrize("raw,want", [

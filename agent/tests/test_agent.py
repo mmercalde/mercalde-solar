@@ -603,6 +603,13 @@ def test_the_tick_prompt_says_so_when_nothing_fires(a, cfg):
     assert "FIRES" not in prompt
 
 
+def test_the_audit_log_under_test_is_not_the_real_one(tmp_path):
+    """On the KAMRUI the real one is what the owner reads."""
+    assert agentmod.config.AUDIT_LOG.startswith(str(tmp_path))
+    assert agentmod.config.DB_PATH.startswith(str(tmp_path))
+    assert agentmod.config.DATA_DIR.startswith(str(tmp_path))
+
+
 def test_a_firing_rule_answered_with_no_change_is_audited_as_a_miss(a, cfg, conn):
     f = prompt_facts(cfg)
     missed = policy.misses(f["policy"], "recommend: no change - looks fine", None)

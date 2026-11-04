@@ -11,6 +11,22 @@ sys.path.insert(0, AGENT_DIR)
 import agent as agentmod  # noqa: E402
 import config  # noqa: E402
 import history  # noqa: E402
+import weather  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def no_live_files(monkeypatch, tmp_path):
+    """Nothing in the suite reaches agent/data, on any test, however it is built.
+
+    These are read at the moment of use, so a test that forgot to redirect them
+    wrote to the real thing: on the KAMRUI, a fake policy_miss in the audit log
+    the owner reads. Fixtures that need their own paths set them afterwards.
+    """
+    data = tmp_path / "no_live_files"
+    monkeypatch.setattr(config, "DATA_DIR", str(data))
+    monkeypatch.setattr(config, "DB_PATH", str(data / "history.sqlite"))
+    monkeypatch.setattr(config, "AUDIT_LOG", str(data / "audit.log"))
+    monkeypatch.setattr(weather, "ARCHIVE_CACHE", str(data / "weather_archive.json"))
 
 
 @pytest.fixture

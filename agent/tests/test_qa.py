@@ -54,13 +54,16 @@ def test_a_time_it_cannot_read_is_refused_not_guessed(cfg):
     assert when is None and "could not read" in why
 
 
-def test_the_reading_at_a_moment_comes_from_the_nearest_sample(conn, cfg, night):
+def test_the_reading_at_a_moment_comes_from_the_nearest_sample(conn, cfg, night,
+                                                               monkeypatch):
+    monkeypatch.setattr(toolsmod.time, "time", lambda: ts_at(cfg, "2026-08-30", 13, 0))
     t = toolsmod.Tools(conn, cfg)
     out = t.get_voltage_at("2:47 am")
     assert out["voltage"] == 53.66
     assert out["sample_at"] == "2026-08-30 2:47 am"
     assert out["seconds_from_asked"] == 0
-    assert out["soc_pct"] == 86 and out["load_w"] == 1400
+    assert out["load_w"] == 1400
+    assert "soc_pct" not in out and out["soc_pct_note"].startswith("not reported")
     assert out["generator_running"] is False
 
 
@@ -270,7 +273,8 @@ def test_a_phrase_with_no_clock_time_is_still_refused(cfg):
         assert when is None and why
 
 
-def test_the_owners_phrasing_reaches_the_reading(conn, cfg, night):
+def test_the_owners_phrasing_reaches_the_reading(conn, cfg, night, monkeypatch):
+    monkeypatch.setattr(toolsmod.time, "time", lambda: ts_at(cfg, "2026-08-30", 13, 0))
     t = toolsmod.Tools(conn, cfg)
     assert t.get_voltage_at("2:47 am last night")["voltage"] == 53.66
 
