@@ -12,7 +12,7 @@ Trimmed candidate logs are in `model_candidates_2026-10/`.
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
 | Gemma 4 E4B, 20 ticks | 10499 `6d0549831` | 43/43 layers; "no usable GPU" 0; CPU 19.5% avg, 55% max | 98.3 / 89.4 | 625 | 10.7 s / 8.7 s | 11.8 | 7.68 GB | 100 | 0 | 0 | 0 | 0 |
 | Qwen3.5-4B, **7 of 20 ticks** | 10499 `6d0549831` | 33/33 layers; "no usable GPU" 0; CPU 18.8% avg, 47% max | 109.0 / 95.3 | about 930 (541 per request) | 25.6 s / 18.6 s | 10.7 | 5.89 GB | 100 | 0 | 0 | 0 | 0 |
-| Qwen3-8B (incumbent), 20 ticks | 10499 `6d0549831` | 37/37 layers; "no usable GPU" 0; CPU 0–2% | 50.4 / 39.0 | 627 | 21.7 s / 17.8 s | 7.4 | 9.35 GB | 100 | 0 | 0 | 0 | 0 |
+| Qwen3-8B (incumbent), 20 ticks | 10499 `6d0549831` | 37/37 layers; "no usable GPU" 0; CPU mostly 0–2%, 50% max | 50.4 / 39.0 | 627 | 21.7 s / 17.8 s | 7.4 | 9.35 GB | 100 | 0 | 0 | 0 | 0 |
 
 The same 7 ticks, for a fair look at the partial run:
 
@@ -27,15 +27,16 @@ How to read the table:
 - **Ticks.** All runs used the same pinned ticks, 2026-11-03 1:28 pm to 6:13 pm.
   Qwen3.5-4B's 7 are the first 7 of those 20.
 - **Tokens per tick.** The first tick is excluded as cold. Qwen3.5-4B's figure
-  counts all warm prompt tokens over its 7 warm ticks, including the requests
-  of the tick lost to the kill, so it runs high.
+  divides all warm prompt tokens by 7: its 6 completed warm ticks plus the tick
+  lost to the kill. Those include tool-call rounds, so it runs high.
 - **Peak GTT.** Raw readings. With llama-server stopped, GTT reads 1.73 GB, so
   the models account for about 5.95, 4.16 and 7.62 GB respectively.
 - **Prompt size.** The cold prompts were 4,513–4,915 tokens, not the ~6,400 the
   brief assumed.
 - **CPU%.** 100% is one core. Candidates are sampled over a cold prefill and the
-  incumbent over a warm one, so the figures are not like for like. All are far
-  below the 657% recorded for the CPU fallback on 2026-09-06.
+  incumbent over a warm one, so the averages are not like for like. All three
+  peak around half a core, far below the 657% recorded for the CPU fallback on
+  2026-09-06.
 - **Offload counts.** "offloaded" does not appear at the default log level, so
   the counts come from a load-only pass of each model at `-lv 4`.
 
