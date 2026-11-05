@@ -7,6 +7,7 @@ directory, and the tests check it is byte-for-byte what it was before.
 import json
 import os
 import sys
+import time
 
 import pytest
 
@@ -254,6 +255,12 @@ def test_a_grounded_answer(asked):
     assert [c["name"] for c in row["tool_calls"]] == ["get_status"]
     assert not row["ungrounded_retry"] and not row["status_fallback"]
     assert row["wall_s"] >= 0
+
+
+def test_each_answer_records_when_it_was_asked(asked):
+    before = int(time.time())
+    row = asked(call("get_status"), says("The pack is at 54.25 V."))
+    assert before <= row["asked_at"] <= row["ended_at"] <= time.time()
 
 
 def test_an_invented_number_is_reported(asked):

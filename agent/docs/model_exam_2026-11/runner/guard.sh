@@ -5,10 +5,12 @@ FLIGHT=${ABX_FLIGHT:-/var/log/kamrui-flight.log}
 SWAP_LIMIT_KB=1953125
 TCTL_LIMIT=85000
 HOT_SECONDS=10
-SWAP_TOTAL=$(awk '/SwapTotal/{print $2}' /proc/meminfo)
-CUT=${ABX_CUT:-$(date -d "2026-11-04 03:25" +%s)}   # leaves the dead-man a clean look at 03:30
+MEMINFO=${ABX_MEMINFO:-/proc/meminfo}
+CUT=${ABX_CUT:-$(date -d "2026-11-05 03:25" +%s)}   # leaves the dead-man a clean look at 03:30
 hot_since=0; last_line=""; last_change=$(date +%s); tick=0
 
+# Read directly, as run.sh does. The flight log is only for Tctl and GTT.
+swap_kb() { awk '/SwapTotal/{t=$2}/SwapFree/{f=$2}END{print t-f}' "$MEMINFO"; }
 cand_alive() { [ -e "$D/cand.pid" ] && kill -0 "$(cat "$D/cand.pid")" 2>/dev/null; }
 
 kill_cand() {
@@ -28,9 +30,8 @@ while [ -e "$D/guard.run" ]; do
   line=$(tail -1 "$FLIGHT")
   [ "$line" != "$last_line" ] && { last_line="$line"; last_change=$now; }
   [[ $line =~ tctl=([0-9]+) ]] && tctl=${BASH_REMATCH[1]} || tctl=0
-  [[ $line =~ swapfree=([0-9]+) ]] && swapfree=${BASH_REMATCH[1]} || swapfree=$SWAP_TOTAL
   [[ $line =~ gtt=([0-9]+) ]] && gtt=${BASH_REMATCH[1]} || gtt=0
-  swap=$((SWAP_TOTAL-swapfree))
+  swap=$(swap_kb)
   echo "$(date +%T) phase=$(cat "$D/phase" 2>/dev/null) cand=$(cand_alive && echo 1 || echo 0) tctl=$tctl swap_kb=$swap gtt=$gtt" >> "$D/guard.log"
 
   if cand_alive; then

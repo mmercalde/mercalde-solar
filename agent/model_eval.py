@@ -571,7 +571,8 @@ def ask_candidate(exam_agent, question, lang, cfg):
     try:
         reply = exam_agent.answer(question, lang)
     finally:
-        wall = round(time.time() - started, 1)
+        ended = time.time()
+        wall = round(ended - started, 1)
         logger.removeHandler(catcher)
     tools = exam_agent.last_tools
     calls = list(tools.calls) if tools else []
@@ -589,7 +590,9 @@ def ask_candidate(exam_agent, question, lang, cfg):
         sources = [question, context or "", now_text]
         sources += [json.dumps(r, default=str) for _, _, r in calls]
         unsourced = unsourced_numbers(numbers_as_written(reply, lang), sources)
+    # The clock times let a report tell what was asked after a limit kill.
     return {"question": question, "lang": lang or "en", "reply": reply,
+            "asked_at": int(started), "ended_at": int(ended),
             "wall_s": wall, "answered_by": answered_by,
             "tool_calls": [{"name": n, "args": a} for n, a, _ in calls],
             "invalid_calls": invalid_calls(calls),

@@ -4,7 +4,7 @@
 # Then the sudoers rule goes, whatever happened.
 D=${ABX_DIR:-/tmp/abexam}
 RULE=/etc/sudoers.d/llama-abtest
-AT=${ABX_DEADMAN:-$(date -d "2026-11-04 03:30" +%s)}
+AT=${ABX_DEADMAN:-$(date -d "2026-11-05 03:30" +%s)}
 RUNNER_PID=$1
 say() { echo "$(date '+%F %T') dead-man: $*" >> "$D/events.log"; }
 live_ok() { [ "$(curl -s -m 3 http://127.0.0.1:8080/health)" = '{"status":"ok"}' ]; }
