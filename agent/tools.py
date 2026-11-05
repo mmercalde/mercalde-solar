@@ -312,8 +312,9 @@ SCHEMAS = [
         "name": "get_gen_runtime",
         "description": "Generator runs over the last N days with observed charge "
                        "rates in amps into the pack, per generator totals, and "
-                       "solo vs paired rates. Also `fuel`: hours and estimated "
-                       "gallons per generator for today and month to date, "
+                       "solo vs paired rates. `fuel_window`: hours and modelled "
+                       "gallons per generator and in total for those N days. "
+                       "`fuel`: the same for today and month to date. All "
                        "already summed. Quote those figures; never add up the "
                        "run rows yourself.",
         "parameters": {"type": "object", "properties": {
@@ -765,6 +766,37 @@ class Tools:
                        "modelled.")
         return out
 
+    def fuel_window(self, runs, days):
+        """Hours and gallons for the days asked about, per generator and in all.
+
+        `fuel` is today and month to date. Asked about this week on 2026-11-04,
+        both models quoted the month's gallons as the week's, because no week's
+        figure existed to quote.
+        """
+        def tally(rows):
+            priced = [r["fuel_gal"] for r in rows if r["fuel_gal"] is not None]
+            return {"runs": len(rows),
+                    "hours": round(sum(r["duration_min"] or 0 for r in rows) / 60.0, 1),
+                    # None only when runs happened and none could be priced.
+                    "fuel_gal": (round(sum(priced), 2) if priced or not rows else None),
+                    "unpriced_runs": len(rows) - len(priced)}
+
+        def clause(label, row):
+            gal = row["fuel_gal"]
+            return (f"{label} {row['hours']:.1f} h / "
+                    + (f"{gal:.2f} gal" if gal is not None else "no fuel figure"))
+
+        out = {g: tally([r for r in runs if r["gen"] == g]) for g in history.GENS}
+        out["total"] = tally(runs)
+        short = out["total"]["unpriced_runs"]
+        out["summary"] = (
+            f"Last {days} day{'s' if days != 1 else ''}: "
+            + ", ".join(clause(g, out[g]) for g in sorted(history.GENS))
+            + f"; {clause('total', out['total'])}. Gallons are modelled, not metered"
+            + (f"; {short} run{'s' if short != 1 else ''} had no fuel figure."
+               if short else "."))
+        return out
+
     def _fuel_summary(self, per_gen, t, tz, prev_end):
         """One sentence a person can read, built here rather than by the model.
 
@@ -823,6 +855,7 @@ class Tools:
             "today": today, "yesterday": yesterday,
             "totals": {g: {"minutes": round(t["minutes"], 1), "runs": t["runs"]}
                        for g, t in totals.items()},
+            "fuel_window": self.fuel_window(runs, days),
             "fuel": self.fuel_totals(now=now),
             "generators_with_no_runs": sorted(set(history.GENS) - set(totals)),
             "charge_rates": self.model.charge_rates(),

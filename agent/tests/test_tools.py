@@ -1082,3 +1082,60 @@ def test_no_figure_stays_no_figure():
     assert tools._kwh(None) is None and tools._kwh(0) == 0.0
     assert tools._kwh(33377) == 33.4
 
+
+# --- Fuel for the days asked about --------------------------------------------
+#
+# 2026-11-04, "this week": both models gave the month's gallons as the week's.
+
+def _run(conn, gen, start_ts, minutes, gal, kind="auto"):
+    conn.execute(
+        "INSERT INTO gen_runs (gen, start_ts, stop_ts, duration_min, gross_w, "
+        "fuel_gal, solo, kind) VALUES (?,?,?,?,4000,?,1,?)",
+        (gen, start_ts, start_ts + int(minutes * 60), minutes, gal, kind))
+    conn.commit()
+
+
+def test_fuel_is_given_for_the_days_asked_about(conn, cfg):
+    now = int(time.time())
+    _run(conn, "mep", now - 2 * 86400, 120, 1.5)
+    _run(conn, "kubota", now - 3 * 86400, 90, 0.75)
+    _run(conn, "mep", now - 40 * 86400, 60, 9.0)
+    out = tools.Tools(conn, cfg).get_gen_runtime(7)["fuel_window"]
+    assert out["mep"] == {"runs": 1, "hours": 2.0, "fuel_gal": 1.5, "unpriced_runs": 0}
+    assert out["kubota"] == {"runs": 1, "hours": 1.5, "fuel_gal": 0.75, "unpriced_runs": 0}
+    assert out["total"] == {"runs": 2, "hours": 3.5, "fuel_gal": 2.25, "unpriced_runs": 0}
+    assert "Last 7 days" in out["summary"] and "modelled" in out["summary"]
+    assert "total 3.5 h / 2.25 gal" in out["summary"]
+
+
+def test_the_month_to_date_fields_stay(conn, cfg):
+    now = int(time.time())
+    _run(conn, "mep", now - 3600, 60, 1.0)
+    fuel = tools.Tools(conn, cfg).get_gen_runtime(7)["fuel"]
+    assert "fuel_mtd_gal" in fuel["mep"] and "summary" in fuel
+
+
+def test_an_exercise_run_is_not_in_the_fuel_window(conn, cfg):
+    _run(conn, "kubota", int(time.time()) - 3600, 30, 0.2, kind="exercise")
+    out = tools.Tools(conn, cfg).get_gen_runtime(7)["fuel_window"]
+    assert out["total"]["runs"] == 0 and out["kubota"]["fuel_gal"] == 0
+
+
+def test_days_with_no_runs_burned_nothing(conn, cfg):
+    out = tools.Tools(conn, cfg).fuel_window([], 1)
+    assert out["total"] == {"runs": 0, "hours": 0.0, "fuel_gal": 0, "unpriced_runs": 0}
+    assert "Last 1 day:" in out["summary"]
+
+
+def test_a_run_with_no_fuel_figure_is_owned_up_to(conn, cfg):
+    now = int(time.time())
+    _run(conn, "mep", now - 3600, 60, 1.0)
+    _run(conn, "mep", now - 7200, 60, None)
+    _run(conn, "kubota", now - 9000, 30, None)
+    out = tools.Tools(conn, cfg).get_gen_runtime(7)["fuel_window"]
+    assert out["mep"]["fuel_gal"] == 1.0 and out["mep"]["unpriced_runs"] == 1
+    assert out["kubota"]["fuel_gal"] is None
+    assert out["total"]["unpriced_runs"] == 2
+    assert "2 runs had no fuel figure" in out["summary"]
+    assert "kubota 0.5 h / no fuel figure" in out["summary"]
+
