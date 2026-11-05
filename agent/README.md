@@ -401,7 +401,9 @@ month of the record gets a row — solar, load and net kWh, generator hours and
 gallons per generator, the voltage extremes, the best and worst solar day,
 and how many days of data stand behind it — and then a `superlatives` block
 that has already done the ranking: `worst_solar_month`, `best_solar_month`,
-`highest_load_month`, `most_fuel_month`, each a month and a value.
+`highest_load_month`, `lowest_load_month` and `most_fuel_month`, each a month and
+a value. Each comes twice: `_all_time` over the whole record, and `_this_year`
+over this calendar year's complete months.
 
 The block is the point. Handed seventeen rows and asked which month was
 worst, the model will rank them itself, and ranking rows is exactly the

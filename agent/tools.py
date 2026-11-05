@@ -326,7 +326,11 @@ SCHEMAS = [
                        "and worst solar day, and how many days of data the "
                        "month has. Plus `superlatives`: worst_solar_month, "
                        "best_solar_month, highest_load_month, "
-                       "most_fuel_month, each already worked out. Call this "
+                       "lowest_load_month and most_fuel_month, each already "
+                       "worked out twice: with _all_time for the whole record "
+                       "and _this_year for this calendar year's complete "
+                       "months. If the question says this year, read "
+                       "_this_year. Call this "
                        "for any question about which month was best, worst, "
                        "highest or used the most fuel, and read the answer "
                        "out of the superlative field. Do not rank the months "
@@ -355,8 +359,7 @@ SCHEMAS = [
                                       "This cannot reach a named month: "
                                       "months=1 is the latest month, not the "
                                       "one asked about. The superlatives "
-                                      "always rank the whole record whatever "
-                                      "this is."},
+                                      "do not depend on this."},
             "detail": {"type": "boolean",
                        "description": "Default false. True adds each month's "
                                       "best and worst solar day, "

@@ -323,7 +323,7 @@ def monthly_summary(conn, cfg, months=COMPACT_MONTHS, detail=False,
                                 if worst else None),
         })
 
-    superlatives = _superlatives(months)
+    superlatives = _superlatives(months, history.local(now, cfg).strftime("%Y-%m"))
     asked_for = None
     not_on_record = None
 
@@ -343,8 +343,14 @@ def monthly_summary(conn, cfg, months=COMPACT_MONTHS, detail=False,
                   else months[-months_wanted:])
 
     if not detail:
+        # A month asked for by name is answered from its row, so this year's
+        # ranking and the basis of each would only be more to read.
+        shown = (superlatives if not asked_for else
+                 {k: ({f: x for f, x in v.items() if f != "basis"}
+                      if isinstance(v, dict) else v)
+                  for k, v in superlatives.items() if "this_year" not in k})
         return {
-            "superlatives": superlatives,
+            "superlatives": shown,
             "asked_for_month": asked_for,
             "not_on_record": not_on_record,
             "months_shown": len(window), "months_on_record": len(months),
@@ -352,7 +358,7 @@ def monthly_summary(conn, cfg, months=COMPACT_MONTHS, detail=False,
             "columns": COMPACT_COLUMNS,
             "months": [_compact(m) for m in window],
             "basis": (
-                f"Superlatives rank the whole record, not the table "
+                f"Superlatives rank the record or this year, not the table "
                 f"({MIN_DAYS_FOR_MONTH_RANKING}+ days to rank). Rows follow "
                 f"`columns`. shortfall_kwh is load_kwh less solar_kwh "
                 f"floored at zero; gen_kwh is what covered it, from recorded "
@@ -443,11 +449,15 @@ def _fuel_basis(has_runs, metered_kwh):
     return " and ".join(parts) if parts else "no generator activity"
 
 
-def _superlatives(months):
+def _superlatives(months, this_month):
     """The months that stand out, and why the short ones cannot.
 
     Each is {month, value} plus the basis, because a bare month name invites
     the question this answers.
+
+    `*_all_time` ranks the whole record and `*_this_year` the complete months
+    of this calendar year. Asked for this year's worst on 2026-11-04, both
+    models answered December 2025 out of a field that only said "worst".
     """
     ranked = [m for m in months
               if m["days_with_data"] >= MIN_DAYS_FOR_MONTH_RANKING]
@@ -468,17 +478,42 @@ def _superlatives(months):
                 "basis": basis}
 
     out.update({
-        "worst_solar_month": pick("solar_kwh", min, "kWh"),
-        "best_solar_month": pick("solar_kwh", max, "kWh"),
-        "highest_load_month": pick("load_kwh", max, "kWh"),
-        "lowest_load_month": pick("load_kwh", min, "kWh"),
-        "most_fuel_month": pick("fuel_gal_total", max, "US gallons",
-                                basis=f"{ranked_note}; complete fuel series, "
-                                      f"recorded runs plus metered energy, "
-                                      f"not the runs alone"),
+        "worst_solar_month_all_time": pick("solar_kwh", min, "kWh"),
+        "best_solar_month_all_time": pick("solar_kwh", max, "kWh"),
+        "highest_load_month_all_time": pick("load_kwh", max, "kWh"),
+        "lowest_load_month_all_time": pick("load_kwh", min, "kWh"),
+        "most_fuel_month_all_time": pick("fuel_gal_total", max, "US gallons",
+                                         basis=f"{ranked_note}; complete fuel "
+                                               f"series, recorded runs plus "
+                                               f"metered energy, not the runs "
+                                               f"alone"),
     })
-    if out["most_fuel_month"]["value"] == 0:
-        out["most_fuel_month"] = {
+    if out["most_fuel_month_all_time"]["value"] == 0:
+        out["most_fuel_month_all_time"] = {
             "month": None, "value": 0.0, "units": "US gallons",
             "basis": "no generator activity in any month long enough to rank"}
+
+    # The month still running is never complete, however many days it has.
+    year = this_month[:4]
+    complete = [m for m in ranked
+                if m["month"].startswith(year + "-") and m["month"] < this_month]
+    out["months_ranked_this_year"] = len(complete)
+
+    def this_year(key, chooser):
+        if not complete:
+            return None
+        m = chooser(complete, key=lambda r: r[key])
+        return {"month": m["month"], "value": m[key]}
+
+    out.update({
+        "worst_solar_month_this_year": this_year("solar_kwh", min),
+        "best_solar_month_this_year": this_year("solar_kwh", max),
+        "highest_load_month_this_year": this_year("load_kwh", max),
+        "lowest_load_month_this_year": this_year("load_kwh", min),
+        "most_fuel_month_this_year": this_year("fuel_gal_total", max),
+    })
+    if (out["most_fuel_month_this_year"] or {}).get("value") == 0:
+        out["most_fuel_month_this_year"] = {"month": None, "value": 0.0}
+    if not complete:
+        out["this_year_note"] = f"{year} has no complete month to rank yet"
     return out

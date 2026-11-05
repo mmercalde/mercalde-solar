@@ -166,20 +166,20 @@ def a_year(conn, cfg):
 
 def test_the_superlatives_name_a_month_and_a_value(a_year, cfg):
     s = monthly.monthly_summary(a_year, cfg, months=999)["superlatives"]
-    assert s["worst_solar_month"]["month"] == "2025-12"
-    assert s["worst_solar_month"]["value"] == pytest.approx(527.0)
-    assert s["best_solar_month"]["month"] == "2026-04"
-    assert s["best_solar_month"]["value"] == pytest.approx(1140.0)
-    assert s["highest_load_month"]["month"] == "2026-01"
-    assert s["lowest_load_month"]["month"] == "2026-07"
-    assert s["most_fuel_month"]["month"] == "2026-07"
-    assert s["most_fuel_month"]["value"] == pytest.approx(4.95)
+    assert s["worst_solar_month_all_time"]["month"] == "2025-12"
+    assert s["worst_solar_month_all_time"]["value"] == pytest.approx(527.0)
+    assert s["best_solar_month_all_time"]["month"] == "2026-04"
+    assert s["best_solar_month_all_time"]["value"] == pytest.approx(1140.0)
+    assert s["highest_load_month_all_time"]["month"] == "2026-01"
+    assert s["lowest_load_month_all_time"]["month"] == "2026-07"
+    assert s["most_fuel_month_all_time"]["month"] == "2026-07"
+    assert s["most_fuel_month_all_time"]["value"] == pytest.approx(4.95)
 
 
 def test_every_superlative_carries_its_units(a_year, cfg):
     s = monthly.monthly_summary(a_year, cfg, months=999)["superlatives"]
-    for key in ("worst_solar_month", "best_solar_month", "highest_load_month",
-                "most_fuel_month"):
+    for key in ("worst_solar_month_all_time", "best_solar_month_all_time", "highest_load_month_all_time",
+                "most_fuel_month_all_time"):
         assert s[key]["units"], key
 
 
@@ -190,11 +190,11 @@ def test_a_month_too_short_to_rank_cannot_win(conn, cfg):
     a_month(conn, cfg, "2026-08", days=31, solar_kwh=30.0)
     a_month(conn, cfg, "2026-09", days=2, solar_kwh=37.0)
     s = monthly.monthly_summary(conn, cfg, months=999)["superlatives"]
-    assert s["worst_solar_month"]["month"] == "2026-08"
+    assert s["worst_solar_month_all_time"]["month"] == "2026-08"
     assert s["months_ranked"] == 2
     assert s["months_excluded"] == ["2026-09 (2 days)"]
     # Each superlative carries how many months it ranked over.
-    assert ">=20 days each" in s["worst_solar_month"]["basis"]
+    assert ">=20 days each" in s["worst_solar_month_all_time"]["basis"]
 
 
 def test_the_short_month_is_still_in_the_series(conn, cfg):
@@ -210,16 +210,16 @@ def test_the_short_month_is_still_in_the_series(conn, cfg):
 def test_with_no_generator_month_the_fuel_superlative_says_so(conn, cfg):
     a_month(conn, cfg, "2026-04", days=30)
     s = monthly.monthly_summary(conn, cfg, months=999)["superlatives"]
-    assert s["most_fuel_month"]["month"] is None
-    assert s["most_fuel_month"]["value"] == 0.0
-    assert "no generator activity" in s["most_fuel_month"]["basis"]
+    assert s["most_fuel_month_all_time"]["month"] is None
+    assert s["most_fuel_month_all_time"]["value"] == 0.0
+    assert "no generator activity" in s["most_fuel_month_all_time"]["basis"]
 
 
 def test_with_no_month_long_enough_nothing_is_ranked(conn, cfg):
     a_month(conn, cfg, "2026-09", days=2)
     s = monthly.monthly_summary(conn, cfg, months=999)["superlatives"]
     assert s["months_ranked"] == 0
-    assert "worst_solar_month" not in s
+    assert "worst_solar_month_all_time" not in s
     assert "20 days" in s["note"]
 
 
@@ -234,7 +234,7 @@ def test_an_empty_history_says_so(conn, cfg):
 def test_the_tool_returns_the_summary(a_year, cfg):
     import tools as toolsmod
     out = toolsmod.Tools(a_year, cfg).get_monthly_summary()
-    assert out["superlatives"]["best_solar_month"]["month"] == "2026-04"
+    assert out["superlatives"]["best_solar_month_all_time"]["month"] == "2026-04"
     assert len(out["months"]) == 4
 
 
@@ -253,7 +253,7 @@ def test_the_ask_prompt_sends_a_which_month_question_to_the_tool():
     import prompts
     p = prompts.ask_prompt()
     assert "get_monthly_summary" in p
-    assert "worst_solar_month" in p and "most_fuel_month" in p
+    assert "worst_solar_month" in p and "most_fuel_month" in p and "_all_time" in p
     assert "Never rank months yourself" in p
 
 
@@ -385,9 +385,9 @@ def test_most_fuel_ranks_on_the_complete_series_not_the_runs(conn, cfg):
             gen_hour(conn, cfg, f"2025-12-{d:02d}", h, 15.0)
     add_run(conn, "kubota", ts_at(cfg, "2026-08-29", 2), 90, 0.48)
     s = monthly.monthly_summary(conn, cfg, months=999)["superlatives"]
-    assert s["most_fuel_month"]["month"] == "2025-12"
-    assert s["most_fuel_month"]["value"] > 50
-    assert "not the runs alone" in s["most_fuel_month"]["basis"]
+    assert s["most_fuel_month_all_time"]["month"] == "2025-12"
+    assert s["most_fuel_month_all_time"]["value"] > 50
+    assert "not the runs alone" in s["most_fuel_month_all_time"]["basis"]
 
 
 # --- what it costs to read -----------------------------------------------------
@@ -426,11 +426,11 @@ def test_the_default_still_answers_the_question_it_is_for(seventeen_months, cfg)
     import tools as toolsmod
     out = toolsmod.Tools(seventeen_months, cfg).get_monthly_summary()
     s = out["superlatives"]
-    assert s["worst_solar_month"]["month"] == "2025-05"   # the first, dimmest
-    assert s["best_solar_month"]["month"] == "2026-09"
+    assert s["worst_solar_month_all_time"]["month"] == "2025-05"   # the first, dimmest
+    assert s["best_solar_month_all_time"]["month"] == "2026-09"
     assert s["months_ranked"] == 17, "ranked over all of them, not the table"
-    for key in ("worst_solar_month", "best_solar_month", "highest_load_month",
-                "lowest_load_month", "most_fuel_month"):
+    for key in ("worst_solar_month_all_time", "best_solar_month_all_time", "highest_load_month_all_time",
+                "lowest_load_month_all_time", "most_fuel_month_all_time"):
         assert set(s[key]) >= {"month", "value", "basis"}, key
 
 
@@ -725,3 +725,91 @@ def test_the_ask_prompt_sends_a_named_month_to_month(seventeen_months, cfg):
     assert "Never use months=1 to reach a named month" in p
     assert '"which month" questions only' in p
     assert "never for a month the owner has already named" in p
+
+
+# --- This year, as distinct from the whole record -----------------------------
+#
+# 2026-11-04, asked "which month this year had the worst solar": both models
+# said December 2025, out of a field that only said "worst".
+
+@pytest.fixture
+def across_two_years(conn, cfg):
+    a_month(conn, cfg, "2025-12", days=31, solar_kwh=17.0, load_kwh=35.0)
+    a_month(conn, cfg, "2026-01", days=31, solar_kwh=20.0, load_kwh=36.0)
+    a_month(conn, cfg, "2026-04", days=30, solar_kwh=38.0, load_kwh=30.0)
+    a_month(conn, cfg, "2026-11", days=25, solar_kwh=5.0, load_kwh=40.0)
+    add_run(conn, "mep", ts_at(cfg, "2025-12-10", 2), 300, 9.0)
+    add_run(conn, "mep", ts_at(cfg, "2026-01-10", 2), 120, 2.0)
+    return conn
+
+
+def in_november(conn, cfg, day="2026-11-25"):
+    return monthly.monthly_summary(conn, cfg, now=ts_at(cfg, day))["superlatives"]
+
+
+def test_this_year_is_not_the_whole_record(across_two_years, cfg):
+    s = in_november(across_two_years, cfg)
+    assert s["worst_solar_month_all_time"]["month"] == "2026-11"
+    assert s["worst_solar_month_this_year"]["month"] == "2026-01"
+    assert s["worst_solar_month_this_year"]["value"] == pytest.approx(620.0)
+    assert s["best_solar_month_this_year"]["month"] == "2026-04"
+    assert s["highest_load_month_this_year"]["month"] == "2026-01"
+    assert s["lowest_load_month_this_year"]["month"] == "2026-04"
+    assert s["most_fuel_month_all_time"]["month"] == "2025-12"
+    assert s["most_fuel_month_this_year"]["month"] == "2026-01"
+
+
+def test_a_month_still_running_is_never_complete(across_two_years, cfg):
+    s = in_november(across_two_years, cfg)
+    assert s["months_ranked_this_year"] == 2
+    assert all(s[f"{k}_this_year"]["month"] != "2026-11"
+               for k in ("worst_solar_month", "highest_load_month"))
+
+
+def test_last_year_cannot_win_this_years(across_two_years, cfg):
+    s = in_november(across_two_years, cfg)
+    assert not any(s[k]["month"].startswith("2025")
+                   for k in s if k.endswith("month_this_year"))
+
+
+def test_a_short_month_this_year_cannot_win(conn, cfg):
+    a_month(conn, cfg, "2026-02", days=28, solar_kwh=30.0)
+    a_month(conn, cfg, "2026-03", days=5, solar_kwh=1.0)
+    s = in_november(conn, cfg)
+    assert s["worst_solar_month_this_year"]["month"] == "2026-02"
+
+
+def test_january_has_no_complete_month_and_says_so(across_two_years, cfg):
+    s = in_november(across_two_years, cfg, day="2026-01-20")
+    assert s["worst_solar_month_this_year"] is None
+    assert s["months_ranked_this_year"] == 0
+    assert "no complete month" in s["this_year_note"]
+    assert s["worst_solar_month_all_time"]["month"]
+
+
+def test_a_year_with_no_fuel_names_no_month(conn, cfg):
+    a_month(conn, cfg, "2026-04", days=30, solar_kwh=38.0)
+    s = in_november(conn, cfg)
+    assert s["most_fuel_month_this_year"]["month"] is None
+
+
+def test_a_month_named_outright_leaves_this_years_ranking_out(across_two_years, cfg):
+    out = monthly.monthly_summary(across_two_years, cfg, month="2026-01",
+                                  now=ts_at(cfg, "2026-11-25"))
+    assert not any("this_year" in k for k in out["superlatives"])
+    assert out["superlatives"]["worst_solar_month_all_time"]["month"]
+
+
+def test_the_old_names_are_gone(across_two_years, cfg):
+    s = in_november(across_two_years, cfg)
+    assert "worst_solar_month" not in s and "best_solar_month" not in s
+
+
+def test_the_prompt_and_schema_say_this_year(cfg):
+    import prompts
+    import tools
+    assert "_this_year" in prompts.ask_prompt()
+    schema = [x for x in tools.SCHEMAS
+              if x["function"]["name"] == "get_monthly_summary"][0]
+    assert "_this_year" in schema["function"]["description"]
+

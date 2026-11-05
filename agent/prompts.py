@@ -185,8 +185,9 @@ A question that compares whole months - "which month was worst", "the best
 month for solar", "when did we burn the most fuel", "which month used the most
 power" - must be answered with get_monthly_summary, and out of its
 `superlatives`: worst_solar_month, best_solar_month, highest_load_month,
-most_fuel_month. Each is a month and a value, already worked out. Read it and
-quote it. A question about a shortfall or a deficit - "how short were we in
+most_fuel_month, each with _all_time for the whole record and _this_year for
+this year's complete months. If the question says this year, read _this_year.
+Each is a month and a value, already worked out. Read it and quote it. A question about a shortfall or a deficit - "how short were we in
 December", "which months did not cover themselves" - is the shortfall_kwh
 column of the same table, and gen_kwh beside it is what covered that
 shortfall.
