@@ -358,3 +358,231 @@ def test_the_runtime_grader_is_not_confused_by_run_times_either():
         "The Kubota ran 126 minutes over 3 runs, starting at 11:35 pm; "
         "the MEP did not run.", truth)
     assert ok, why
+
+
+# --- the replies the 2026-11-04 exam marked wrongly -----------------------------
+
+NO_STARTS = {"today": "2026-11-04", "yesterday": "2026-11-03",
+             "starts_today": 0, "starts_yesterday": 0, "started_above_default": []}
+
+
+@pytest.mark.parametrize("reply", [
+    "The history for yesterday, midnight to midnight, shows no generator minutes "
+    "for either generator.",
+    "The history for yesterday, midnight to midnight, shows zero generator minutes "
+    "for both the MEP and Kubota generators.",
+    "The history for yesterday, midnight to midnight, shows no generator minutes "
+    "for either generator. I cannot determine why the Kubota started twice yesterday "
+    "morning as the tool results do not show any generator runs for that period.",
+    "The Kubota did not start twice yesterday morning. The run_reason for the Kubota "
+    "is \"not_on,\" indicating it was not running.",
+])
+def test_saying_it_did_not_start_passes_when_it_did_not(reply):
+    ok, why = eval_cases.grade_gen_starts(reply, NO_STARTS)
+    assert ok, why
+
+
+def test_inventing_the_starts_still_fails():
+    ok, why = eval_cases.grade_gen_starts(
+        "The Kubota started twice yesterday morning due to \"dc_voltage_low\" as per "
+        "get_status. The generator ran to charge the pack when the voltage dropped "
+        "below the start threshold.", NO_STARTS)
+    assert not ok and "no start is on record" in why
+
+
+def test_silence_on_the_point_fails_when_nothing_started():
+    ok, why = eval_cases.grade_gen_starts("The pack is at 54 V.", NO_STARTS)
+    assert not ok and "does not say so" in why
+
+
+def test_the_old_start_logic_still_runs_when_there_were_starts():
+    truth = dict(NO_STARTS, starts_today=2)
+    assert eval_cases.grade_gen_starts("It did not start twice yesterday; "
+                                       "both starts were today.", truth)[0]
+    assert not eval_cases.grade_gen_starts("The Kubota did not start.", truth)[0]
+
+
+IDLE = {"mep": {"runs": 0, "minutes": 0}, "kubota": {"runs": 0, "minutes": 0}}
+
+
+@pytest.mark.parametrize("reply", [
+    "Based on the data, neither generator ran in the last 24 hours.",
+    "The generators did not run in the last 24 hours.",
+    "No generator ran in the last 24 hours.",
+    "The MEP and the Kubota did not run.",
+])
+def test_both_idle_may_be_said_of_both(reply):
+    ok, why = eval_cases.grade_runtime(reply, IDLE)
+    assert ok, why
+
+
+def test_a_generator_saying_neither_with_a_figure_still_fails():
+    ok, why = eval_cases.grade_runtime("Neither generator ran more than 40 minutes.", IDLE)
+    assert not ok and "not in gen_runs" in why
+
+
+def test_one_idle_generator_still_has_to_be_named():
+    truth = dict(IDLE, kubota={"runs": 3, "minutes": 126.0})
+    assert not eval_cases.grade_runtime("The generators ran. The Kubota ran 126 minutes.", truth)[0]
+
+
+# --- the cases added for the 2026-11-04 failures --------------------------------
+
+def _sample(conn, ts, volts):
+    history.record_sample(conn, {
+        "batteryVoltage": volts, "battSocBM": 86, "battPower": -1400,
+        "battCurrent": -26.0, "battMonitorOnline": True,
+        "mep803aAction": history.GEN_STOPPED, "kubotaAction": history.GEN_STOPPED,
+        "acPower1": 700, "acPower2": 700}, ts=ts)
+
+
+def test_last_nights_low_comes_from_the_finished_night(conn, cfg):
+    """The evening is the trap: tonight's 56.57 must not be last night's low."""
+    _sample(conn, ts_at(cfg, "2026-11-04", 5, 47), 54.11)
+    _sample(conn, ts_at(cfg, "2026-11-04", 3, 0), 54.6)
+    _sample(conn, ts_at(cfg, "2026-11-04", 18, 30), 56.57)
+    truth = eval_cases.truth_last_night_low(conn, cfg, ts_at(cfg, "2026-11-04", 18, 45))
+    assert truth["low_v"] == 54.11
+    assert eval_cases.grade_last_night_low("It was 54.11 V.", truth)[0]
+    ok, why = eval_cases.grade_last_night_low("The lowest was 56.57 V.", truth)
+    assert not ok and "54.11" in why
+    assert not eval_cases.grade_last_night_low("It was low.", truth)[0]
+
+
+def test_a_night_with_no_samples_wants_a_refusal(conn, cfg):
+    truth = eval_cases.truth_last_night_low(conn, cfg, ts_at(cfg, "2026-11-04", 18, 45))
+    assert truth["low_v"] is None
+    assert eval_cases.grade_last_night_low("I don't have that reading.", truth)[0]
+    assert not eval_cases.grade_last_night_low("It was 54 V.", truth)[0]
+
+
+SPARE = {"shortfall_wh": 0, "needed_wh": 17101, "available_wh": 26164}
+SHORT = {"shortfall_wh": 6508, "needed_wh": 15000, "available_wh": 8492}
+
+
+def test_the_shortfall_truth_is_what_the_top_up_decides_on(conn, cfg, monkeypatch):
+    monkeypatch.setattr(eval_cases.loadmodel.LoadModel, "overnight_deficit",
+                        lambda self, until, now=None: {"deficit_wh": -9063, "needed_wh": 17101,
+                                                       "available_wh": 26164})
+    truth = eval_cases.truth_shortfall(conn, cfg, ts_at(cfg, "2026-11-04", 18, 45))
+    assert truth == SPARE
+
+
+def test_the_answer_of_the_first_exam_fails_the_shortfall_case():
+    ok, why = eval_cases.grade_shortfall(
+        "No generator run is expected tonight because the pack is not projected to "
+        "reach the 52.0 V start threshold within 24 hours, and the projected shortfall "
+        "is 26,164 Wh based on the learned Wh-vs-V curve.", SPARE)
+    assert not ok and "available" in why
+
+
+def test_no_shortfall_said_plainly_passes():
+    assert eval_cases.grade_shortfall(
+        "No run tonight, and no shortfall: the pack holds 26.2 kWh and about 17.1 kWh "
+        "is expected out of it by sunrise.", SPARE)[0]
+
+
+def test_a_real_shortfall_must_be_the_right_size():
+    assert eval_cases.grade_shortfall("The shortfall is 6.5 kWh.", SHORT)[0]
+    assert eval_cases.grade_shortfall("The shortfall is 6,508 Wh.", SHORT)[0]
+    assert not eval_cases.grade_shortfall("The shortfall is 15 kWh.", SHORT)[0]
+    assert not eval_cases.grade_shortfall("There is no shortfall.", SHORT)[0]
+
+
+def test_an_unknowable_shortfall_wants_it_said():
+    truth = {"shortfall_wh": None, "reason": "load profile not learned"}
+    assert eval_cases.grade_shortfall("I don't have that figure.", truth)[0]
+    assert not eval_cases.grade_shortfall("The shortfall is 3 kWh.", truth)[0]
+
+
+def _month(conn, month, days, kwh):
+    for d in range(1, days + 1):
+        conn.execute("INSERT INTO daily (day, solar_wh, load_wh) VALUES (?,?,0)",
+                     (f"{month}-{d:02d}", kwh * 1000.0))
+    conn.commit()
+
+
+def test_the_worst_month_this_year_leaves_out_last_year_and_this_month(conn, cfg):
+    _month(conn, "2025-12", 31, 17.0)
+    _month(conn, "2026-01", 31, 20.0)
+    _month(conn, "2026-04", 30, 38.0)
+    _month(conn, "2026-03", 5, 1.0)
+    _month(conn, "2026-11", 25, 5.0)
+    truth = eval_cases.truth_worst_month_this_year(conn, cfg, ts_at(cfg, "2026-11-25", 18))
+    assert truth == {"month": "2026-01", "kwh": 620.0}
+    assert eval_cases.grade_worst_month_this_year("January, with 620 kWh.", truth)[0]
+    assert eval_cases.grade_worst_month_this_year("Fue enero de 2026.", truth)[0]
+    assert eval_cases.grade_worst_month_this_year("That was 2026-01.", truth)[0]
+    ok, _ = eval_cases.grade_worst_month_this_year(
+        "The worst solar month this year was December 2025 with 541.7 kWh.", truth)
+    assert not ok
+    assert not eval_cases.grade_worst_month_this_year("January 2025.", truth)[0]
+
+
+def test_a_year_with_no_complete_month_wants_it_said(conn, cfg):
+    truth = eval_cases.truth_worst_month_this_year(conn, cfg, ts_at(cfg, "2026-01-20", 18))
+    assert truth["month"] is None
+    assert eval_cases.grade_worst_month_this_year("I don't have a complete month yet.", truth)[0]
+
+
+SOLAR = {"wh": 33377, "kwh": 33.4}
+
+
+@pytest.mark.parametrize("reply", [
+    "We made 33.4 kWh yesterday.", "Produjimos 33,4 kWh de solar ayer.",
+    "It was 33,377 Wh.", "33377 Wh.", "Fueron 33.377 Wh de solar ayer.", "About 33.4."])
+def test_yesterdays_solar_in_either_unit_passes(reply):
+    ok, why = eval_cases.grade_solar_yesterday(reply, SOLAR)
+    assert ok, why
+
+
+@pytest.mark.parametrize("reply", [
+    "Según el registro, ayer entre medianoche y medianoche se produjeron 33377 kWh de solar.",
+    "Produjimos 33,377 kWh de solar ayer."])
+def test_the_answers_of_the_first_exam_fail_the_units_case(reply):
+    ok, why = eval_cases.grade_solar_yesterday_es(reply, SOLAR)
+    assert not ok and "kilowatt-hours" in why
+
+
+def test_the_spanish_case_wants_spanish():
+    ok, why = eval_cases.grade_solar_yesterday_es("We made 33.4 kWh yesterday.", SOLAR)
+    assert not ok and "Spanish" in why
+    assert eval_cases.grade_solar_yesterday_es("Produjimos 33,4 kWh de solar ayer.", SOLAR)[0]
+
+
+def test_yesterdays_solar_truth_comes_from_the_hourly_counter(conn, cfg):
+    base = ts_at(cfg, "2026-11-03", 12)
+    conn.execute("INSERT INTO hourly (hour_ts, device, wh_in, wh_out, source) VALUES (?, 'solar', 33377, 0, 'test')",
+                 (base,))
+    conn.execute("INSERT INTO hourly (hour_ts, device, wh_in, wh_out, source) VALUES (?, 'solar', 9000, 0, 'test')",
+                 (ts_at(cfg, "2026-11-04", 12),))
+    conn.commit()
+    assert eval_cases.truth_solar_yesterday(conn, cfg, ts_at(cfg, "2026-11-04", 18)) == SOLAR
+
+
+def test_the_spanish_case_reaches_the_agent_in_spanish(monkeypatch):
+    import model_eval
+    seen = {}
+
+    class Reply:
+        text = "x"
+
+        def raise_for_status(self):
+            pass
+
+    def post(url, json, timeout):
+        seen.update(json)
+        return Reply()
+    monkeypatch.setattr(model_eval.requests, "post", post)
+    model_eval.ask("http://x/ask", "¿Qué?", lang="es")
+    assert seen == {"text": "¿Qué?", "lang": "es"}
+    seen.clear()
+    model_eval.ask("http://x/ask", "What?")
+    assert seen == {"text": "What?"}
+
+
+def test_no_new_case_is_a_plan_question():
+    for case in eval_cases.CASES:
+        if case["id"] != "tonight_plan":
+            assert not agentmod.is_plan_question(case["question"]), case["id"]
+

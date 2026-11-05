@@ -436,3 +436,11 @@ def test_json_output_end_to_end(cfg, live, tmp_path, monkeypatch, script, capsys
     assert out[0]["summary"]["python_answered"] == 1
     assert out[0]["questions"][0]["lang"] == "es"
     assert out[0]["questions"][0]["reply"] == "54,25 voltios."
+
+
+def test_a_case_marked_spanish_is_asked_in_spanish(cfg, snapshot, script):
+    replies, _ = script
+    replies += [call("get_history", window="yesterday"), says("Produjimos 33,4 kWh ayer.")]
+    result = model_eval.exam_candidate(candidate(), cfg, snapshot, only=["solar_yesterday_kwh_es"])
+    assert result["cases"][0]["lang"] == "es"
+

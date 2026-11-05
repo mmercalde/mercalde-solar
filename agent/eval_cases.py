@@ -13,6 +13,9 @@ agent the first time the pack moves.
 import re
 
 import history
+import loadmodel
+import monthly
+import sun as sunmod
 import tools as toolsmod
 
 DEFAULT_START = 52.0            # only used to say what a raised start is not
@@ -82,6 +85,17 @@ def grade_gen_starts(reply, truth):
     was above the default start both times.
     """
     low = (reply or "").lower()
+    # Nothing started on either day, so the right answer is that it did not.
+    # The exam of 2026-11-04 failed every such reply for want of a threshold,
+    # and the one that invented two starts failed for the same reason.
+    if truth["starts_yesterday"] == 0 and truth["starts_today"] == 0:
+        if re.search(r"(?:^|[.!?]\s+)(?:the\s+)?kubota\s+started\b", low):
+            return False, "says the Kubota started; no start is on record"
+        if re.search(r"\b(?:did not|didn'?t|has not|hasn'?t|never|no|not)\b"
+                     r".{0,30}\b(?:start|starts|started|run|runs|ran)\b|"
+                     r"\b(?:no|zero)\s+generator\s+minutes\b", low):
+            return True, "says it did not start, and no start is on record"
+        return False, "no start is on record and the answer does not say so"
     names_threshold = bool(re.search(r"5[23]\.\d", reply or "")) and \
         re.search(r"\b(start|threshold)\b", low) is not None
     corrects_day = (truth["starts_yesterday"] != 2
@@ -118,6 +132,13 @@ def grade_runtime(reply, truth):
     if wrong:
         return False, f"quoted figures not in gen_runs: {wrong}"
     idle = [g for g, v in truth.items() if v["runs"] == 0]
+    # "Neither generator ran" names both without using either name, and failed
+    # for it on 2026-11-04.
+    if len(idle) == len(truth) and re.search(
+            r"\bneither\b|\bno generators?\b|\bnone of the generators\b|"
+            r"\b(?:the|both) generators?\b[^.]*\b(?:no|not|zero|did ?n[o']t)\b",
+            (reply or "").lower()):
+        return True, "no generator ran, and the answer says so of both"
     for gen in idle:
         if gen not in (reply or "").lower():
             return False, f"{gen} ran not at all and is not mentioned"
@@ -178,6 +199,156 @@ def grade_voltage_at(reply, truth):
     return False, "no voltage given and no refusal either"
 
 
+
+def truth_last_night_low(conn, cfg, now):
+    start, end, _ = sunmod.window_span(cfg, "last_night", now)
+    row = conn.execute(
+        "SELECT MIN(battery_v) low FROM samples WHERE ts >= ? AND ts <= ?",
+        (start, end)).fetchone()
+    return {"from": history.stamp(start, cfg), "to": history.stamp(end, cfg),
+            "low_v": row["low"]}
+
+
+def grade_last_night_low(reply, truth):
+    """The finished night's low. In the evening, tonight's so far is the trap."""
+    volts = [n for n in _numbers(reply) if 40.0 <= n <= 65.0]
+    if truth["low_v"] is None:
+        return _declined(reply) and not volts, "no samples for that night"
+    if any(abs(v - truth["low_v"]) <= 0.05 for v in volts):
+        return True, f"{truth['low_v']} V is the low from {truth['from']} to {truth['to']}"
+    if volts:
+        return False, (f"stated {volts[0]} V; the low from {truth['from']} to "
+                       f"{truth['to']} was {truth['low_v']} V")
+    return False, "no voltage given"
+
+
+def truth_shortfall(conn, cfg, now):
+    """The same deficit the top-up rule decides on, worked out from the database."""
+    until = sunmod.next_sunrise(cfg, now=now)
+    d = loadmodel.LoadModel(conn, cfg).overnight_deficit(until, now=now)
+    if d.get("deficit_wh") is None:
+        return {"shortfall_wh": None, "reason": d.get("reason")}
+    return {"shortfall_wh": max(0, round(d["needed_wh"] - d["available_wh"])),
+            "needed_wh": d["needed_wh"], "available_wh": d["available_wh"]}
+
+
+NO_SHORTFALL_RE = re.compile(
+    r"\bno\s+(?:\w+\s+){0,2}(?:shortfall|deficit)\b|"
+    r"\bwithout\s+(?:a\s+|any\s+)?(?:shortfall|deficit)\b|"
+    r"\b(?:is not|isn'?t|not)\s+(?:a\s+|any\s+)?(?:shortfall|deficit)\b|"
+    r"\b(?:shortfall|deficit)\b[^.]{0,30}\b(?:none|zero|0)\b", re.IGNORECASE)
+
+
+def grade_shortfall(reply, truth):
+    """Available energy read out as a shortfall is the failure this exists for."""
+    wanted = truth["shortfall_wh"]
+    if wanted is None:
+        return _declined(reply), f"cannot be known: {truth.get('reason')}"
+    stated = [(wh, unit) for wh, unit in _energies(reply) if unit]
+    as_wh = [v * 1000.0 if unit == "kwh" else v for v, unit in stated]
+    if wanted == 0:
+        if NO_SHORTFALL_RE.search(reply or ""):
+            return True, f"no shortfall: {truth['needed_wh']} Wh needed of {truth['available_wh']}"
+        if any(abs(v - truth["available_wh"]) <= 0.05 * truth["available_wh"] for v in as_wh):
+            return False, "gives the energy available as if it were a shortfall"
+        return False, "there is no shortfall and the answer does not say so"
+    if any(abs(v - wanted) <= max(500, 0.1 * wanted) for v in as_wh):
+        return True, f"matches the {wanted} Wh shortfall"
+    return False, f"the shortfall is {wanted} Wh and no stated figure matches it"
+
+
+def truth_worst_month_this_year(conn, cfg, now):
+    """This year's complete months, from the daily rollup and not from monthly."""
+    here = history.local(now, cfg)
+    this_month = here.strftime("%Y-%m")
+    rows = conn.execute(
+        "SELECT substr(day, 1, 7) month, SUM(solar_wh) wh, COUNT(*) days FROM daily "
+        "WHERE day >= ? AND substr(day, 1, 7) < ? GROUP BY month",
+        (f"{here.year}-01-01", this_month)).fetchall()
+    full = [r for r in rows if r["days"] >= monthly.MIN_DAYS_FOR_MONTH_RANKING]
+    worst = min(full, key=lambda r: r["wh"]) if full else None
+    return {"month": worst["month"] if worst else None,
+            "kwh": round(worst["wh"] / 1000.0, 1) if worst else None}
+
+
+MONTH_NAMES = {
+    1: ("January", "enero"), 2: ("February", "febrero"), 3: ("March", "marzo"),
+    4: ("April", "abril"), 5: ("May", "mayo"), 6: ("June", "junio"),
+    7: ("July", "julio"), 8: ("August", "agosto"), 9: ("September", "septiembre"),
+    10: ("October", "octubre"), 11: ("November", "noviembre"),
+    12: ("December", "diciembre")}
+
+
+def grade_worst_month_this_year(reply, truth):
+    if truth["month"] is None:
+        return _declined(reply), "this year has no complete month yet"
+    text = reply or ""
+    year, month = truth["month"].split("-")
+    names = MONTH_NAMES[int(month)] + (truth["month"],)
+    if not any(re.search(rf"\b{n}\b", text, re.IGNORECASE) for n in names):
+        return False, f"the worst complete month this year is {truth['month']}"
+    other_years = [y for y in re.findall(r"\b20\d{2}\b", text) if y != year]
+    if other_years:
+        return False, f"names {other_years[0]}; the answer is in {year}"
+    return True, f"{truth['month']}, {truth['kwh']} kWh"
+
+
+def _energies(text):
+    """(value, unit) for each figure, with unit 'kwh', 'wh' or None.
+
+    Reads 33,377 and 33.377 Wh as thousands, and 33,4 as a Spanish decimal.
+    """
+    cleaned = DATE_RE.sub(" ", TIME_RE.sub(" ", text or ""))
+    out = []
+    for raw, unit in re.findall(r"(-?\d[\d.,]*)\s*(kwh|wh)?\b", cleaned, re.IGNORECASE):
+        unit = unit.lower() or None
+        raw = raw.rstrip(".,")
+        if re.fullmatch(r"-?\d+,\d{1,2}", raw):
+            raw = raw.replace(",", ".")
+        elif unit == "wh" and re.fullmatch(r"-?\d{1,3}\.\d{3}", raw):
+            raw = raw.replace(".", "")
+        try:
+            out.append((float(raw.replace(",", "")), unit))
+        except ValueError:
+            pass
+    return out
+
+
+def truth_solar_yesterday(conn, cfg, now):
+    start, end, _ = sunmod.window_span(cfg, "yesterday", now)
+    wh = conn.execute(
+        "SELECT SUM(wh_in) wh FROM hourly WHERE device='solar' "
+        "AND hour_ts >= ? AND hour_ts < ?", (start, end)).fetchone()["wh"]
+    return {"wh": round(wh) if wh is not None else None,
+            "kwh": round(wh / 1000.0, 1) if wh is not None else None}
+
+
+def grade_solar_yesterday(reply, truth):
+    """33.4 kWh or 33,377 Wh. 33,377 kWh is a thousand times the array's output."""
+    if truth["wh"] is None:
+        return _declined(reply), "no solar recorded for yesterday"
+    for value, unit in _energies(reply):
+        if unit in ("kwh", None) and abs(value - truth["kwh"]) <= 0.5:
+            return True, f"{truth['kwh']} kWh"
+        if unit == "wh" and abs(value - truth["wh"]) <= 500:
+            return True, f"{truth['wh']} Wh"
+    if any(unit == "kwh" and abs(value - truth["wh"]) <= 500
+           for value, unit in _energies(reply)):
+        return False, f"calls {truth['wh']} Wh kilowatt-hours"
+    return False, f"yesterday's solar was {truth['kwh']} kWh and no figure matches"
+
+
+SPANISH_RE = re.compile(r"\b(ayer|produj\w*|generó|generaron|fueron|fue|de solar)\b",
+                        re.IGNORECASE)
+
+
+def grade_solar_yesterday_es(reply, truth):
+    passed, why = grade_solar_yesterday(reply, truth)
+    if passed and not SPANISH_RE.search(reply or ""):
+        return False, "right figure, but not answered in Spanish"
+    return passed, why
+
+
 CASES = [
     {"id": "kubota_twice",
      "question": "Why did the Kubota start twice yesterday morning?",
@@ -195,4 +366,24 @@ CASES = [
      "question": "What was the battery voltage at exactly 2:47 am last night?",
      "truth": truth_voltage_at, "grade": grade_voltage_at,
      "about": "a point reading, or a refusal - never a window aggregate"},
+    {"id": "last_night_low",
+     "question": "What was the lowest battery voltage last night?",
+     "truth": truth_last_night_low, "grade": grade_last_night_low,
+     "about": "the night that finished, even when asked in the evening"},
+    {"id": "tonight_shortfall",
+     "question": "Will a generator run tonight, and what's the shortfall?",
+     "truth": truth_shortfall, "grade": grade_shortfall,
+     "about": "the shortfall itself, not the energy available"},
+    {"id": "worst_month_this_year",
+     "question": "Which month this year had the worst solar?",
+     "truth": truth_worst_month_this_year, "grade": grade_worst_month_this_year,
+     "about": "this year's complete months, not the whole record"},
+    {"id": "solar_yesterday_kwh",
+     "question": "How many kWh of solar did we make yesterday?",
+     "truth": truth_solar_yesterday, "grade": grade_solar_yesterday,
+     "about": "Wh and kWh kept apart"},
+    {"id": "solar_yesterday_kwh_es",
+     "question": "¿Cuántos kWh de solar produjimos ayer?", "lang": "es",
+     "truth": truth_solar_yesterday, "grade": grade_solar_yesterday_es,
+     "about": "the same in Spanish, where it went wrong"},
 ]

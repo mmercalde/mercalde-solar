@@ -393,9 +393,12 @@ def faults(results, cfg, limit=12):
 
 # --- the exam: questions put to the running agent ----------------------------
 
-def ask(url, question, timeout=90):
+def ask(url, question, timeout=90, lang=None):
     """POST one question to the agent's own /ask, as Alexa and the dashboard do."""
-    r = requests.post(url, json={"text": question}, timeout=timeout)
+    body = {"text": question}
+    if lang:
+        body["lang"] = lang
+    r = requests.post(url, json=body, timeout=timeout)
     r.raise_for_status()
     return r.text.strip()
 
@@ -409,7 +412,7 @@ def exam(url, cfg, conn, timeout=90, only=None):
             continue
         truth = case["truth"](conn, cfg, now)
         try:
-            reply = ask(url, case["question"], timeout=timeout)
+            reply = ask(url, case["question"], timeout=timeout, lang=case.get("lang"))
             passed, why = case["grade"](reply, truth)
         except requests.RequestException as e:
             reply, passed, why = "", False, f"the agent did not answer: {e}"
@@ -638,7 +641,7 @@ def exam_candidate(candidate, cfg, snapshot, repeat=1, only=None, questions=(),
                     continue
                 for attempt in range(1, repeat + 1):
                     wait()
-                    row = ask_candidate(exam_agent, case["question"], None, cfg)
+                    row = ask_candidate(exam_agent, case["question"], case.get("lang"), cfg)
                     truth = case["truth"](truth_conn, cfg, int(time.time()))
                     passed, why = case["grade"](row["reply"], truth)
                     cases.append(dict(row, id=case["id"], about=case["about"],
