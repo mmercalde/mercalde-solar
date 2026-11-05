@@ -929,3 +929,97 @@ def test_the_run_reason_decides_nothing(conn, cfg):
     src = open(guard.__file__).read()
     for name in ("run_reason", "on_reason", "REASON_KIND", "exercise"):
         assert name not in src, f"guard.py should not know about {name}"
+
+
+# --- Tonight's shortfall -----------------------------------------------------
+#
+# 2026-11-04: get_load_forecast returned available_wh 26,164, and both models
+# reported that as "the shortfall". The night had 9 kWh to spare.
+
+class Night:
+    """A load model that answers only what the tool asks it."""
+
+    def __init__(self, deficit):
+        self.deficit = deficit
+
+    def load_forecast(self, hours, now=None):
+        return {"hours": hours, "total_wh": 9000, "by_hour": []}
+
+    def project_voltage(self, target_v, now=None):
+        return {"reached": None, "reason": "not reached within 24 h",
+                "voltage": 56.58, "available_wh": 26164}
+
+    def overnight_deficit(self, until, floor_v=52.0, now=None):
+        self.asked = (until, floor_v, now)
+        return self.deficit
+
+    def overnight_drawdown(self, month=None, now=None):
+        return None
+
+
+def night_tools(conn, cfg, deficit):
+    t = tools.Tools(conn, cfg)
+    t.model = Night(deficit)
+    return t
+
+
+SPARE = {"deficit_wh": -9063, "needed_wh": 17101, "available_wh": 26164, "hours": 11.2}
+SHORT = {"deficit_wh": 6508, "needed_wh": 15000, "available_wh": 8492, "hours": 8.0}
+
+
+def test_available_is_named_for_what_it_is(conn, cfg):
+    out = night_tools(conn, cfg, SPARE).get_load_forecast(24)
+    p = out["projected_52v"]
+    assert "available_wh" not in json.dumps(out)
+    assert p["available_above_start_wh"] == 26164
+    assert p["available_above_start_kwh"] == 26.2
+
+
+def test_a_night_with_energy_to_spare_has_no_shortfall(conn, cfg):
+    night = night_tools(conn, cfg, SPARE).get_load_forecast(24)["tonight"]
+    assert night["shortfall_wh"] == 0 and night["shortfall_kwh"] == 0.0
+    assert night["expected_draw_wh"] == 17101
+    assert night["available_above_start_wh"] == 26164
+    assert night["verdict"].startswith("No shortfall")
+    assert "26.2 kWh" in night["verdict"] and "17.1 kWh" in night["verdict"]
+
+
+def test_a_short_night_says_by_how_much(conn, cfg):
+    night = night_tools(conn, cfg, SHORT).get_load_forecast(24)["tonight"]
+    assert night["shortfall_wh"] == 6508 and night["shortfall_kwh"] == 6.5
+    assert night["verdict"].startswith("Shortfall of 6.5 kWh")
+
+
+def test_exactly_enough_is_no_shortfall(conn, cfg):
+    even = {"deficit_wh": 0, "needed_wh": 9000, "available_wh": 9000, "hours": 8.0}
+    assert night_tools(conn, cfg, even).get_load_forecast(24)["tonight"]["shortfall_wh"] == 0
+
+
+def test_when_the_model_cannot_say_nor_does_the_tool(conn, cfg):
+    night = night_tools(conn, cfg, {"deficit_wh": None, "reason": "load profile not learned"}
+                        ).get_load_forecast(24)["tonight"]
+    assert night["shortfall_wh"] is None
+    assert "load profile not learned" in night["verdict"]
+
+
+def test_the_shortfall_asks_about_the_next_sunrise_above_52(conn, cfg, monkeypatch):
+    now = at(cfg, (2026, 9, 3, 21, 0))
+    frozen(monkeypatch, now)
+    t = night_tools(conn, cfg, SPARE)
+    t.get_load_forecast(24)
+    until, floor, asked_now = t.model.asked
+    assert until == sunmod.next_sunrise(cfg, now=now) and until > now
+    assert floor == 52.0 and asked_now == now
+
+
+def test_a_projection_with_no_figure_is_left_alone():
+    p = {"reached": None, "reason": "no battery sample"}
+    assert tools.relabel_projection(p) == p
+
+
+def test_the_load_model_keeps_its_own_field_name():
+    """policy.py reads available_wh from the deficit: only the tool output changes."""
+    p = {"available_wh": 100}
+    tools.relabel_projection(p)
+    assert p == {"available_wh": 100}
+

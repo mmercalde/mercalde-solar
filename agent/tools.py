@@ -300,7 +300,10 @@ SCHEMAS = [
     {"type": "function", "function": {
         "name": "get_load_forecast",
         "description": "Expected house consumption in Wh for the next N hours, "
-                       "and the projected time the pack reaches 52.0 V.",
+                       "the projected time the pack reaches 52.0 V, and "
+                       "`tonight`: what the pack holds against what the night "
+                       "will take, with shortfall_wh and a plain verdict already "
+                       "worked out. Read a shortfall from there.",
         "parameters": {"type": "object", "properties": {
             "hours": {"type": "integer", "description": "How many hours ahead, 1 to 48."}},
             "required": ["hours"]}}},
@@ -462,6 +465,52 @@ WRITE_TOOLS = {"set_gen_thresholds"}
 # 1,500 tokens: enough for any answer here, and well inside what the KAMRUI
 # can read and reason over inside the model timeout.
 TOOL_RESULT_WARN_CHARS = 6000
+
+
+def _kwh(wh):
+    """Watt-hours as the kilowatt-hours a person says, to one decimal."""
+    return None if wh is None else round(wh / 1000.0, 1)
+
+
+def relabel_projection(projection):
+    """project_voltage's result, with the field named for what it holds.
+
+    `available_wh` is what the pack holds above the start voltage. On
+    2026-11-04 both models read 26,164 of it out as tonight's shortfall. The
+    load model and policy.py keep the old name; only what the model reads
+    changes.
+    """
+    out = dict(projection)
+    if "available_wh" in out:
+        wh = out.pop("available_wh")
+        out["available_above_start_wh"] = wh
+        out["available_above_start_kwh"] = _kwh(wh)
+    return out
+
+
+def tonight_energy(model, cfg, now, floor_v=52.0):
+    """What the pack holds against what the night will take, already compared.
+
+    overnight_deficit is the one the top-up rule decides on, so this and the
+    plan cannot disagree. The subtraction is here so the model never does it.
+    """
+    until = sunmod.next_sunrise(cfg, now=now)
+    d = model.overnight_deficit(until, floor_v=floor_v, now=now)
+    if d.get("deficit_wh") is None:
+        reason = d.get("reason") or "unknown"
+        return {"shortfall_wh": None, "shortfall_kwh": None, "reason": reason,
+                "verdict": f"Cannot say whether there is a shortfall: {reason}."}
+    available, draw = d["available_wh"], d["needed_wh"]
+    shortfall = max(0, round(draw - available))
+    holds = (f"the pack holds {_kwh(available):.1f} kWh above {floor_v:.1f} V and "
+             f"about {_kwh(draw):.1f} kWh is expected out of it by sunrise")
+    return {"until_sunrise_hours": d.get("hours"),
+            "available_above_start_wh": available,
+            "available_above_start_kwh": _kwh(available),
+            "expected_draw_wh": draw, "expected_draw_kwh": _kwh(draw),
+            "shortfall_wh": shortfall, "shortfall_kwh": _kwh(shortfall),
+            "verdict": (f"Shortfall of {_kwh(shortfall):.1f} kWh: {holds}."
+                        if shortfall else f"No shortfall: {holds}.")}
 
 
 class Tools:
@@ -640,7 +689,8 @@ class Tools:
     def get_load_forecast(self, hours):
         hours = max(1, min(int(hours), 48))
         out = self.model.load_forecast(hours)
-        out["projected_52v"] = self.model.project_voltage(52.0)
+        out["projected_52v"] = relabel_projection(self.model.project_voltage(52.0))
+        out["tonight"] = tonight_energy(self.model, self.cfg, int(time.time()))
         drawdown = self.model.overnight_drawdown()
         if drawdown:
             out["overnight_drawdown"] = drawdown

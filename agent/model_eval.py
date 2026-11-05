@@ -202,7 +202,9 @@ class EvalTools(toolsmod.Tools):
     def get_load_forecast(self, hours):
         hours = max(1, min(int(hours), 48))
         out = self.model.load_forecast(hours, now=self.at)
-        out["projected_52v"] = self.model.project_voltage(52.0, now=self.at)
+        out["projected_52v"] = toolsmod.relabel_projection(
+            self.model.project_voltage(52.0, now=self.at))
+        out["tonight"] = toolsmod.tonight_energy(self.model, self.cfg, self.at)
         drawdown = self.model.overnight_drawdown(now=self.at)
         if drawdown:
             out["overnight_drawdown"] = drawdown
