@@ -849,6 +849,10 @@ def latest_sample(conn, at=None):
                         "ORDER BY ts DESC LIMIT 1", (int(at),)).fetchone()
 
 
+def _kwh(wh):
+    return None if wh is None else round(wh / 1000.0, 1)
+
+
 def summary(conn, hours=None, now=None, since=None, until=None,
             cfg=None):
     """Voltage, energy and generator minutes over a span.
@@ -899,6 +903,10 @@ def summary(conn, hours=None, now=None, since=None, until=None,
         "min_v": _r(v["minv"], 2), "max_v": _r(v["maxv"], 2), "avg_v": _r(v["avgv"], 2),
         "solar_wh": _i(e["solar"]), "load_wh": _i(e["load"]),
         "battery_out_wh": _i(e["batt_out"]),
+        # In a Spanish answer on 2026-11-04 both models called 33,377 of solar_wh
+        # kWh. A figure already in the unit people say cannot go that way.
+        "solar_kwh": _kwh(e["solar"]), "load_kwh": _kwh(e["load"]),
+        "battery_out_kwh": _kwh(e["batt_out"]),
         "gen_minutes": gen,
     }
     # The house's watt-hours and the pack's are the same energy counted on

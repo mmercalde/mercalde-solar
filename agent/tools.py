@@ -275,7 +275,8 @@ SCHEMAS = [
         "parameters": {"type": "object", "properties": {}, "required": []}}},
     {"type": "function", "function": {
         "name": "get_history",
-        "description": "Voltage, solar Wh, load Wh, battery Wh out and generator "
+        "description": "Voltage, solar, load and battery energy out (each *_wh "
+                       "with a *_kwh beside it; quote the kWh) and generator "
                        "minutes over a span. For last night use "
                        "window=\"last_night\"; for tonight or since sunset use "
                        "window=\"overnight\"; for today or yesterday use "
@@ -681,6 +682,8 @@ class Tools:
         row = self.conn.execute("SELECT * FROM daily WHERE day=?", (today,)).fetchone()
         if row:
             out["today"] = {"solar_wh": row["solar_wh"], "load_wh": row["load_wh"],
+                            "solar_kwh": _kwh(row["solar_wh"]),
+                            "load_kwh": _kwh(row["load_wh"]),
                             "peak_v": row["peak_v"], "min_v": row["min_v"],
                             "mep_minutes": row["mep_minutes"],
                             "kub_minutes": row["kub_minutes"]}
@@ -692,11 +695,12 @@ class Tools:
     def get_load_forecast(self, hours):
         hours = max(1, min(int(hours), 48))
         out = self.model.load_forecast(hours)
+        out["total_kwh"] = _kwh(out.get("total_wh"))
         out["projected_52v"] = relabel_projection(self.model.project_voltage(52.0))
         out["tonight"] = tonight_energy(self.model, self.cfg, int(time.time()))
         drawdown = self.model.overnight_drawdown()
         if drawdown:
-            out["overnight_drawdown"] = drawdown
+            out["overnight_drawdown"] = dict(drawdown, kwh=_kwh(drawdown.get("wh")))
         return out
 
     def fuel_totals(self, now=None):
@@ -919,6 +923,8 @@ class Tools:
             est = self.model.estimate_solar_wh(weather.cloud_of(w), day=day)
             w["estimated_solar_wh"] = est["wh"] if est else None
             w["clear_day_wh"] = est["clear_day_wh"] if est else None
+            w["estimated_solar_kwh"] = _kwh(w["estimated_solar_wh"])
+            w["clear_day_kwh"] = _kwh(w["clear_day_wh"])
         return out
 
     def get_system_specs(self):
@@ -979,6 +985,7 @@ class Tools:
                         "chemistry": b["chemistry"],
                         "configuration": b["configuration"]},
             "learned": {"capacity_wh": self.model.capacity_wh(),
+                        "capacity_kwh": _kwh(self.model.capacity_wh()),
                         "capacity_ah": self.model.capacity_ah(),
                         "curve_points": curve["points"],
                         "curve_volts": [curve["volts_low"], curve["volts_high"]],

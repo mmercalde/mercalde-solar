@@ -1023,3 +1023,62 @@ def test_the_load_model_keeps_its_own_field_name():
     tools.relabel_projection(p)
     assert p == {"available_wh": 100}
 
+
+# --- Energy in the unit people say --------------------------------------------
+#
+# 2026-11-04, in Spanish: "33,377 kWh de solar", from solar_wh 33377.
+
+def test_history_gives_kwh_beside_every_energy_total(conn, cfg, monkeypatch):
+    a_day_and_a_night(conn, cfg)
+    frozen(monkeypatch, at(cfg, (2026, 9, 3, 6, 0)))
+    out = tools.Tools(conn, cfg).get_history(window="yesterday")
+    for key in ("solar", "load", "battery_out"):
+        wh, kwh = out[f"{key}_wh"], out[f"{key}_kwh"]
+        if wh is None:
+            assert kwh is None
+        else:
+            assert kwh == round(wh / 1000.0, 1), key
+    assert out["solar_wh"] and out["load_wh"], "the Wh fields stay, for code"
+
+
+def test_the_today_block_has_kwh_too(conn, cfg, monkeypatch):
+    now = at(cfg, (2026, 9, 3, 6, 0))
+    frozen(monkeypatch, now)
+    conn.execute("INSERT INTO daily (day, solar_wh, load_wh) VALUES (?, 31295.4, 17087.5)",
+                 (history.local_day(now, cfg),))
+    today = tools.Tools(conn, cfg).get_history(hours=1)["today"]
+    assert today["solar_kwh"] == 31.3 and today["load_kwh"] == 17.1
+    assert today["solar_wh"] == 31295.4
+
+
+def test_the_forecast_has_kwh_too(conn, cfg):
+    class WithDrawdown(Night):
+        def overnight_drawdown(self, month=None, now=None):
+            return {"month": 11, "wh": 17754, "nights": 9}
+    t = tools.Tools(conn, cfg)
+    t.model = WithDrawdown(SPARE)
+    out = t.get_load_forecast(24)
+    assert out["total_kwh"] == 9.0 and out["total_wh"] == 9000
+    assert out["overnight_drawdown"]["kwh"] == 17.8
+    assert out["overnight_drawdown"]["wh"] == 17754
+
+
+def test_the_weather_estimate_has_kwh_too(conn, cfg, monkeypatch):
+    class Sky:
+        def estimate_solar_wh(self, cloud, day=None):
+            return {"wh": 32105, "clear_day_wh": 33261}
+    monkeypatch.setattr(tools.weather, "summary", lambda cfg, **k: {
+        "today": {"cloud_pct": 87}, "today_date": "2026-11-04",
+        "next_daylight": {"cloud_pct": 17}, "next_daylight_date": "2026-11-05"})
+    monkeypatch.setattr(tools.weather, "cloud_of", lambda w: w["cloud_pct"])
+    t = tools.Tools(conn, cfg)
+    t.model = Sky()
+    w = t.get_weather()["next_daylight"]
+    assert w["estimated_solar_kwh"] == 32.1 and w["clear_day_kwh"] == 33.3
+    assert w["estimated_solar_wh"] == 32105
+
+
+def test_no_figure_stays_no_figure():
+    assert tools._kwh(None) is None and tools._kwh(0) == 0.0
+    assert tools._kwh(33377) == 33.4
+
