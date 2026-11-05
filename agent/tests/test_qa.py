@@ -489,6 +489,49 @@ def test_a_real_shortfall_must_be_the_right_size():
     assert not eval_cases.grade_shortfall("There is no shortfall.", SHORT)[0]
 
 
+def test_the_shortfall_truth_knows_whether_the_sun_is_up(conn, cfg, monkeypatch):
+    monkeypatch.setattr(eval_cases.loadmodel.LoadModel, "overnight_deficit",
+                        lambda self, until, now=None: {"deficit_wh": 6508, "needed_wh": 15000,
+                                                       "available_wh": 8492})
+    assert eval_cases.truth_shortfall(conn, cfg, ts_at(cfg, "2026-11-05", 12, 0))["sun_up"]
+    for hour in (3, 18, 22):
+        assert "sun_up" not in eval_cases.truth_shortfall(
+            conn, cfg, ts_at(cfg, "2026-11-05", hour, 0))
+
+
+@pytest.mark.parametrize("reply", [
+    "Not final: the shortfall is 6.5 kWh for now, and the top-up rule decides at 9:00 pm.",
+    "The shortfall is 6.5 kWh, but that is not the final figure.",
+    "So far 6.5 kWh short. Solar still to come will likely shrink it.",
+    "The shortfall is 6,508 Wh and will be decided at 9 p.m.",
+])
+def test_a_daylight_shortfall_passes_with_the_caveat(reply):
+    assert eval_cases.grade_shortfall(reply, dict(SHORT, sun_up=True))[0]
+
+
+@pytest.mark.parametrize("reply", [
+    "The shortfall is 6.5 kWh.",
+    "The shortfall is 6.5 kWh, and a generator starts at 9 pm.",
+    "The shortfall is 6.5 kWh, with 18.5 kWh of solar left today.",
+])
+def test_a_daylight_shortfall_fails_without_the_caveat(reply):
+    ok, why = eval_cases.grade_shortfall(reply, dict(SHORT, sun_up=True))
+    assert not ok and "not final" in why
+
+
+def test_the_caveat_does_not_rescue_a_wrong_figure_or_apply_after_dark():
+    assert not eval_cases.grade_shortfall("The shortfall is 15 kWh, not final.",
+                                          dict(SHORT, sun_up=True))[0]
+    assert eval_cases.grade_shortfall("The shortfall is 6.5 kWh.", SHORT)[0]
+
+
+def test_a_daylight_reply_of_no_shortfall_needs_the_caveat_too():
+    spare = dict(SPARE, sun_up=True)
+    assert not eval_cases.grade_shortfall("There is no shortfall.", spare)[0]
+    assert eval_cases.grade_shortfall(
+        "There is no shortfall, though this is not final until 9:00 pm.", spare)[0]
+
+
 def test_an_unknowable_shortfall_wants_it_said():
     truth = {"shortfall_wh": None, "reason": "load profile not learned"}
     assert eval_cases.grade_shortfall("I don't have that figure.", truth)[0]

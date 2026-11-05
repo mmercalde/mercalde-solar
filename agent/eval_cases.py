@@ -228,8 +228,11 @@ def truth_shortfall(conn, cfg, now):
     d = loadmodel.LoadModel(conn, cfg).overnight_deficit(until, now=now)
     if d.get("deficit_wh") is None:
         return {"shortfall_wh": None, "reason": d.get("reason")}
-    return {"shortfall_wh": max(0, round(d["needed_wh"] - d["available_wh"])),
-            "needed_wh": d["needed_wh"], "available_wh": d["available_wh"]}
+    truth = {"shortfall_wh": max(0, round(d["needed_wh"] - d["available_wh"])),
+             "needed_wh": d["needed_wh"], "available_wh": d["available_wh"]}
+    if sunmod.daylight(cfg, now):
+        truth["sun_up"] = True
+    return truth
 
 
 NO_SHORTFALL_RE = re.compile(
@@ -239,11 +242,15 @@ NO_SHORTFALL_RE = re.compile(
     r"\b(?:shortfall|deficit)\b[^.]{0,30}\b(?:none|zero|0)\b", re.IGNORECASE)
 
 
-def grade_shortfall(reply, truth):
-    """Available energy read out as a shortfall is the failure this exists for."""
+# The tool's "Not final" sentence, in the words a reply might put it in. A time
+# on its own is not enough: "a generator starts at 9 pm" is not that caveat.
+NOT_FINAL_RE = re.compile(
+    r"\bnot\s+(?:yet\s+)?(?:the\s+)?final\b|\bshrink|\bstill\s+to\s+come\b|"
+    r"\bdecid(?:es?|ed)\b[^.]{0,40}\b\d{1,2}(?::\d\d)?\s*[ap]\.?m\b", re.IGNORECASE)
+
+
+def _grade_shortfall_figure(reply, truth):
     wanted = truth["shortfall_wh"]
-    if wanted is None:
-        return _declined(reply), f"cannot be known: {truth.get('reason')}"
     stated = [(wh, unit) for wh, unit in _energies(reply) if unit]
     as_wh = [v * 1000.0 if unit == "kwh" else v for v, unit in stated]
     if wanted == 0:
@@ -255,6 +262,20 @@ def grade_shortfall(reply, truth):
     if any(abs(v - wanted) <= max(500, 0.1 * wanted) for v in as_wh):
         return True, f"matches the {wanted} Wh shortfall"
     return False, f"the shortfall is {wanted} Wh and no stated figure matches it"
+
+
+def grade_shortfall(reply, truth):
+    """Available energy read out as a shortfall is the failure this exists for.
+
+    While the sun is up the figure is not settled, and a reply that gives it as
+    if it were has the plan's answer wrong however right the number.
+    """
+    if truth["shortfall_wh"] is None:
+        return _declined(reply), f"cannot be known: {truth.get('reason')}"
+    ok, why = _grade_shortfall_figure(reply, truth)
+    if ok and truth.get("sun_up") and not NOT_FINAL_RE.search(reply or ""):
+        return False, f"{why}, but the sun is up and the reply does not say it is not final"
+    return ok, why
 
 
 def truth_worst_month_this_year(conn, cfg, now):
