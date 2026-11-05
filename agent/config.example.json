@@ -1,7 +1,7 @@
 {
   "dashboard_url": "http://192.168.3.10:8080",
   "llm_url": "http://127.0.0.1:8080/v1/chat/completions",
-  "llm_model": "qwen3",
+  "llm_model": "gemma4",
   "telegram": {"token": "", "chat_id": ""},
   "gateway": {"url": "https://192.168.3.131", "user": "Admin", "password": ""},
   "lat": 32.36, "lon": -117.06, "tz": "America/Tijuana",

@@ -312,3 +312,33 @@ Questions are answered in under a minute.
 Also observed: llama-server runs multiple slots (ids 2 and 3 seen) and picks
 one by prefix similarity, so the tick prompts and question prompts do not
 evict each other's cache.
+
+## 2026-11-04 — live model switched to Gemma 4 E4B
+
+**The change:** `llama-server` now serves
+`~/models/gemma-4-E4B-it-Q4_K_M.gguf` in place of `Qwen3-8B-Q4_K_M.gguf`.
+Every other `ExecStart` argument is the same, and so are the device
+`After=`/`Wants=`/`ExecStartPre`. `llm_model` is `gemma4`. `llm.py` is unchanged:
+it still sends `temperature: 0.2` and `enable_thinking: False`.
+
+**Why:** in the question-path exam (`model_exam_2026-11.md`) Gemma answered at
+least as reliably as Qwen3-8B, at 28 s per answer against 66 s, and the incumbent
+once invented a generator start. In the tick A/B (`model_candidates_2026-10.md`)
+its warm tick was 8.7 s against 17.8 s, and its cold tick 48 s against 95 s.
+Michael approved the switch on 2026-11-04.
+
+**What to expect:**
+- GTT about 7.6 GB raw with the model up, against about 9.3 GB for Qwen3-8B.
+  Idle with the server stopped is 1.69 GB, so `llama_gpu_check`'s 1 GB floor can't
+  fail on this box. Check for at least 7 GB by hand.
+- Warm ticks about 10 s, a cold tick about 60 s.
+- Tctl can still touch 85 °C under sustained questions, as both models did in the
+  exam.
+
+**Rollback:** `Qwen3-8B-Q4_K_M.gguf` stays in `~/models/`.
+
+```
+sudo cp /etc/systemd/system/llama-server.service.qwen3-bak /etc/systemd/system/llama-server.service && sudo systemctl daemon-reload && sudo systemctl restart llama-server && sudo systemctl restart solar-agent
+```
+
+Set `llm_model` back to `qwen3` in `agent/config.json` as well.

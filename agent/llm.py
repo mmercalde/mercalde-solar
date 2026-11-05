@@ -1,4 +1,4 @@
-"""OpenAI-compatible client for the local llama-server (Qwen3-8B).
+"""OpenAI-compatible client for the local llama-server.
 
 Verified against llama-server --jinja: tool calls come back in
 message.tool_calls with JSON-string arguments, finish_reason "tool_calls".

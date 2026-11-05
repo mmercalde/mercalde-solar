@@ -596,8 +596,8 @@ curl -s http://192.168.3.152:8090/plan
 
 ### Answers are grounded
 
-Qwen3-8B will sometimes answer a question about live state without calling a
-tool, and then invent the number — asked in Spanish during testing it replied
+The model will sometimes answer a question about live state without calling a
+tool, and then invent the number — asked in Spanish during testing, Qwen3-8B replied
 "55.2 V" while the pack sat at 54.09 V. POLICY 7 forbids exactly that, so an
 ungrounded reply is retried once, and if the model still will not look,
 Python answers from `/data` instead. A made-up voltage never reaches the

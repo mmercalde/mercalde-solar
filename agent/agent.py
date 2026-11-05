@@ -1035,7 +1035,7 @@ class Agent:
     def answer(self, text, lang=None):
         """Shared by Telegram inbound and POST /ask.
 
-        An answer must be grounded in a tool result. Qwen3-8B will sometimes
+        An answer must be grounded in a tool result. The model will sometimes
         answer a question about live state without calling anything, and then
         it invents the number — which POLICY 9 forbids. So a reply produced
         with no tool call is retried once, and if the model still will not
@@ -1097,7 +1097,7 @@ class Agent:
                 plan_text = plan_text[:600] + " ..."
             lines.append(f"Plan recorded {history.stamp(snap['ts'], self.cfg)}: "
                          f"{plan_text}")
-        # The plan text is the agent's shorthand, and Qwen3-8B misread it on
+        # The plan text is the agent's shorthand, and Qwen3-8B, live then, misread it on
         # the first afternoon this block existed: every rule said "held" and
         # the recommendation said "no change", so it announced no run and no
         # shortfall tonight - while "projected 52.0 V at 10:13 pm" sat two
