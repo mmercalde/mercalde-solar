@@ -498,24 +498,41 @@ def tonight_energy(model, cfg, now, floor_v=52.0):
 
     overnight_deficit is the one the top-up rule decides on, so this and the
     plan cannot disagree. The subtraction is here so the model never does it.
+
+    In daylight that compares the pack as it stands now, and the sun has not
+    finished filling it: at midday a "shortfall" here can be one the afternoon
+    covers, while the plan rightly holds. So the verdict says so for as long
+    as there is solar to come. Before dawn remaining_solar_wh counts the coming
+    day, which is past the sunrise this figure runs to and no help to tonight.
     """
+    day = sunmod.daylight(cfg, now)
+    left = model.remaining_solar_wh(now=now) if day else 0
+    solar = {"remaining_solar_today_wh": left, "remaining_solar_today_kwh": _kwh(left)}
     until = sunmod.next_sunrise(cfg, now=now)
     d = model.overnight_deficit(until, floor_v=floor_v, now=now)
     if d.get("deficit_wh") is None:
         reason = d.get("reason") or "unknown"
-        return {"shortfall_wh": None, "shortfall_kwh": None, "reason": reason,
+        return {"shortfall_wh": None, "shortfall_kwh": None, "reason": reason, **solar,
                 "verdict": f"Cannot say whether there is a shortfall: {reason}."}
     available, draw = d["available_wh"], d["needed_wh"]
     shortfall = max(0, round(draw - available))
     holds = (f"the pack holds {_kwh(available):.1f} kWh above {floor_v:.1f} V and "
              f"about {_kwh(draw):.1f} kWh is expected out of it by sunrise")
+    verdict = (f"Shortfall of {_kwh(shortfall):.1f} kWh: {holds}."
+               if shortfall else f"No shortfall: {holds}.")
+    if left != 0:  # None is a forecast or solar model that cannot say, not no sun
+        opens = policymod.window_opens(cfg, {"now": now, "sunset_ts": day[1]})
+        coming = ("any solar still to come today, which cannot be estimated right now"
+                  if left is None
+                  else f"the {_kwh(left):.1f} kWh of solar still expected today")
+        verdict += (f" This figure is before {coming}, so it is not final: the "
+                    f"top-up rule decides at {history.clock(opens, cfg)}.")
     return {"until_sunrise_hours": d.get("hours"),
             "available_above_start_wh": available,
             "available_above_start_kwh": _kwh(available),
             "expected_draw_wh": draw, "expected_draw_kwh": _kwh(draw),
             "shortfall_wh": shortfall, "shortfall_kwh": _kwh(shortfall),
-            "verdict": (f"Shortfall of {_kwh(shortfall):.1f} kWh: {holds}."
-                        if shortfall else f"No shortfall: {holds}.")}
+            **solar, "verdict": verdict}
 
 
 class Tools:

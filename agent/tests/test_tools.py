@@ -939,8 +939,9 @@ def test_the_run_reason_decides_nothing(conn, cfg):
 class Night:
     """A load model that answers only what the tool asks it."""
 
-    def __init__(self, deficit):
+    def __init__(self, deficit, left=0):
         self.deficit = deficit
+        self.left = left
 
     def load_forecast(self, hours, now=None):
         return {"hours": hours, "total_wh": 9000, "by_hour": []}
@@ -956,10 +957,13 @@ class Night:
     def overnight_drawdown(self, month=None, now=None):
         return None
 
+    def remaining_solar_wh(self, now=None, until=None):
+        return self.left
 
-def night_tools(conn, cfg, deficit):
+
+def night_tools(conn, cfg, deficit, left=0):
     t = tools.Tools(conn, cfg)
-    t.model = Night(deficit)
+    t.model = Night(deficit, left)
     return t
 
 
@@ -1000,6 +1004,49 @@ def test_when_the_model_cannot_say_nor_does_the_tool(conn, cfg):
                         ).get_load_forecast(24)["tonight"]
     assert night["shortfall_wh"] is None
     assert "load profile not learned" in night["verdict"]
+
+
+@pytest.mark.parametrize("deficit,opening", [(SHORT, "Shortfall of 6.5 kWh"),
+                                             (SPARE, "No shortfall")])
+def test_at_midday_the_verdict_is_before_the_solar_still_to_come(
+        conn, cfg, monkeypatch, deficit, opening):
+    """A midday "shortfall" contradicted a plan holding for the afternoon's sun."""
+    frozen(monkeypatch, at(cfg, (2026, 9, 3, 12, 0)))
+    cfg = dict(cfg, topup_earliest="21:00")
+    night = night_tools(conn, cfg, deficit, left=12345).get_load_forecast(24)["tonight"]
+    assert night["remaining_solar_today_wh"] == 12345
+    assert night["remaining_solar_today_kwh"] == 12.3
+    assert night["verdict"].startswith(opening)
+    assert "before the 12.3 kWh of solar still expected today" in night["verdict"]
+    assert "the top-up rule decides at 9:00 pm" in night["verdict"]
+
+
+def test_after_dark_the_verdict_stands_on_its_own(conn, cfg, monkeypatch):
+    frozen(monkeypatch, at(cfg, (2026, 9, 3, 22, 0)))
+    night = night_tools(conn, cfg, SHORT).get_load_forecast(24)["tonight"]
+    assert night["remaining_solar_today_wh"] == 0
+    assert night["remaining_solar_today_kwh"] == 0.0
+    assert night["verdict"].startswith("Shortfall of 6.5 kWh")
+    assert "solar" not in night["verdict"] and "top-up" not in night["verdict"]
+
+
+def test_before_dawn_the_coming_days_sun_is_no_help_to_tonight(conn, cfg, monkeypatch):
+    """remaining_solar_wh counts the day ahead at 3 am. Sunrise comes first, and
+    tonight's 9 pm has been and gone."""
+    frozen(monkeypatch, at(cfg, (2026, 9, 3, 3, 0)))
+    night = night_tools(conn, cfg, SHORT, left=30000).get_load_forecast(24)["tonight"]
+    assert night["remaining_solar_today_wh"] == 0
+    assert "solar" not in night["verdict"] and "top-up" not in night["verdict"]
+
+
+def test_in_daylight_a_forecast_that_cannot_say_is_not_taken_for_no_sun(conn, cfg, monkeypatch):
+    frozen(monkeypatch, at(cfg, (2026, 9, 3, 12, 0)))
+    cfg = dict(cfg, topup_earliest="21:00")
+    night = night_tools(conn, cfg, SHORT, left=None).get_load_forecast(24)["tonight"]
+    assert night["remaining_solar_today_wh"] is None
+    assert night["remaining_solar_today_kwh"] is None
+    assert "cannot be estimated" in night["verdict"]
+    assert "the top-up rule decides at 9:00 pm" in night["verdict"]
 
 
 def test_the_shortfall_asks_about_the_next_sunrise_above_52(conn, cfg, monkeypatch):
