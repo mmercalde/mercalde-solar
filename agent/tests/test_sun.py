@@ -174,9 +174,59 @@ def test_yesterday_is_a_whole_local_day(cfg):
 
 def test_the_owners_other_words_for_the_same_night(cfg):
     now = at(cfg, (2026, 9, 3, 3, 0))
-    for word in ("last night", "since sunset", "OVERNIGHT", " tonight "):
+    for word in ("since sunset", "OVERNIGHT", " tonight "):
         assert sun.window_span(cfg, word, now)[0] == \
             sun.window_span(cfg, "overnight", now)[0], word
+
+
+def _sun(cfg, day):
+    return sun.times(cfg, day)
+
+
+def test_last_night_in_the_evening_is_not_tonight(cfg):
+    """2026-11-04: asked at 6:45 pm, overnight gave tonight's low as last night's."""
+    now = at(cfg, (2026, 9, 3, 21, 0))
+    start, end, label = sun.window_span(cfg, "last_night", now)
+    assert start == _sun(cfg, "2026-09-02")[1]
+    assert end == _sun(cfg, "2026-09-03")[0]
+    assert "last night" in label
+    assert sun.window_span(cfg, "overnight", now)[0] == _sun(cfg, "2026-09-03")[1]
+
+
+def test_last_night_by_day_is_the_night_just_ended(cfg):
+    now = at(cfg, (2026, 9, 3, 12, 0))
+    assert sun.window_span(cfg, "last_night", now)[:2] == \
+        sun.window_span(cfg, "overnight", now)[:2]
+
+
+def test_last_night_before_dawn_is_the_last_finished_night(cfg):
+    now = at(cfg, (2026, 9, 3, 3, 0))
+    start, end, _ = sun.window_span(cfg, "last_night", now)
+    assert start == _sun(cfg, "2026-09-01")[1]
+    assert end == _sun(cfg, "2026-09-02")[0]
+    assert end <= now
+
+
+def test_last_night_has_always_finished(cfg):
+    for hour in (0, 3, 6, 7, 12, 18, 19, 20, 23):
+        now = at(cfg, (2026, 9, 3, hour, 30))
+        start, end, _ = sun.window_span(cfg, "last_night", now)
+        assert start < end <= now, hour
+        assert 8 * 3600 < end - start < 15 * 3600, hour
+
+
+def test_the_words_for_last_night_all_reach_it(cfg):
+    now = at(cfg, (2026, 9, 3, 21, 0))
+    for word in ("last_night", "last night", " LAST NIGHT "):
+        assert sun.window_span(cfg, word, now)[0] == _sun(cfg, "2026-09-02")[1], word
+
+
+def test_last_night_across_the_autumn_clock_change(cfg):
+    """2026-11-01, 2 am to 1 am: the 25-hour day must not lose a date."""
+    now = at(cfg, (2026, 11, 2, 3, 0))
+    start, end, _ = sun.window_span(cfg, "last_night", now)
+    assert history.local_day(start, cfg) == "2026-10-31"
+    assert history.local_day(end, cfg) == "2026-11-01"
 
 
 def test_a_word_it_does_not_know_says_so_rather_than_guessing(cfg):

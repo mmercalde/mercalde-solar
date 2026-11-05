@@ -153,7 +153,8 @@ house is drawing nothing.
 
 A question about a span the owner named - "overnight", "last night", "since
 sunset", "today", "yesterday" - goes to get_history with window= set to that
-word: window="overnight", window="today", window="yesterday". Do not translate
+word: window="last_night" for last night, window="overnight" for tonight or
+since sunset, window="today", window="yesterday". Do not translate
 the word into a number of hours. hours=24 is the last twenty-four hours, which
 is a whole day and its sunlight; answering "how much did we use overnight"
 with it reported 25,273 Wh for a night that used about half of that. Then say

@@ -276,18 +276,23 @@ SCHEMAS = [
     {"type": "function", "function": {
         "name": "get_history",
         "description": "Voltage, solar Wh, load Wh, battery Wh out and generator "
-                       "minutes over a span. For overnight / last night / since "
-                       "sunset use window=\"overnight\"; for today or yesterday "
-                       "use window=\"today\" or window=\"yesterday\". hours=N is "
+                       "minutes over a span. For last night use "
+                       "window=\"last_night\"; for tonight or since sunset use "
+                       "window=\"overnight\"; for today or yesterday use "
+                       "window=\"today\" or window=\"yesterday\". hours=N is "
                        "a trailing window ending now and is NOT overnight. "
-                       "Example: get_history(window=\"overnight\") for last "
+                       "Example: get_history(window=\"last_night\") for last "
                        "night; get_history(hours=72) for the last three days.",
         "parameters": {"type": "object", "properties": {
             "hours": {"type": "integer", "description": "Trailing hours ending "
                       "now, 1 to 720. Ignored when window is given."},
-            "window": {"type": "string", "enum": ["overnight", "today", "yesterday"],
-                       "description": "A named span. overnight is sunset to now, "
-                       "or the night just ended once the sun is up; today is "
+            "window": {"type": "string",
+                       "enum": ["overnight", "last_night", "today", "yesterday"],
+                       "description": "A named span. last_night is the most "
+                       "recent finished night, sunset to sunrise, at any hour; "
+                       "it answers \"last night\". overnight is sunset to now, "
+                       "or the night just ended once the sun is up; it answers "
+                       "\"tonight\". today is "
                        "since local midnight; yesterday is the previous local "
                        "day. Preferred whenever the question uses one of these "
                        "words."}},
@@ -608,6 +613,9 @@ class Tools:
                 f"This is {label} - state that span in the answer. It is not "
                 f"the last {out['hours']:.0f} hours and must not be called "
                 f"a day's figure.")
+            if label.startswith("overnight"):
+                out["window_note"] += (" This night so far, not last night; "
+                                       "for last night use window='last_night'.")
             hours = out["hours"]
         else:
             hours = max(1, min(int(hours), 720))
@@ -616,7 +624,7 @@ class Tools:
             out["window_note"] = (
                 f"A trailing {hours}-hour window ending now. This is NOT "
                 f"overnight and NOT a calendar day; for those pass "
-                f"window='overnight', 'today' or 'yesterday'.")
+                f"window='overnight', 'last_night', 'today' or 'yesterday'.")
         today = history.local_day(int(time.time()), self.cfg)
         row = self.conn.execute("SELECT * FROM daily WHERE day=?", (today,)).fetchone()
         if row:

@@ -108,7 +108,7 @@ def next_sunrise(cfg, now=None, days=3):
     return None
 
 
-WINDOWS = ("overnight", "today", "yesterday")
+WINDOWS = ("overnight", "last_night", "today", "yesterday")
 
 
 def window_span(cfg, name, now=None):
@@ -121,13 +121,19 @@ def window_span(cfg, name, now=None):
     overnight is the most recent sunset to now while the night is still
     running, and the night that just ended once the sun is up: asked at
     lunchtime, "last night" is last night and not the twelve hours behind us.
+    In the evening that makes it tonight, so it cannot answer "last night".
+
+    last_night is always the most recent night that has finished, previous
+    sunset to most recent sunrise, whatever the time now. On 2026-11-04, asked
+    at 6:45 pm, both models read overnight's 56.57 V as last night's low when
+    it had been 54.11 V at 5:47 am.
     """
     now = int(now or datetime.now().timestamp())
     name = str(name or "").strip().lower().replace("_", " ")
-    aliases = {"last night": "overnight", "tonight": "overnight",
-               "since sunset": "overnight", "this morning": "today"}
+    aliases = {"tonight": "overnight", "since sunset": "overnight",
+               "this morning": "today"}
     name = aliases.get(name, name)
-    if name not in WINDOWS:
+    if name.replace(" ", "_") not in WINDOWS:
         return None, None, (f"{name!r} is not a window; use one of "
                             f"{', '.join(WINDOWS)}")
 
@@ -146,6 +152,16 @@ def window_span(cfg, name, now=None):
     if not t_today or not t_yest:
         return None, None, "sunrise and sunset are not computable here"
     sunrise, sunset = t_today
+    if name == "last night":
+        label = "last night, sunset to sunrise"
+        if now >= sunrise:
+            return t_yest[1], sunrise, label
+        # Before dawn tonight has not finished, so last night is the one before.
+        # Noon two days back is on the right date whatever a clock change did.
+        t_before = times(cfg, history.local_day(midnight - 36 * 3600, cfg))
+        if not t_before:
+            return None, None, "sunrise and sunset are not computable here"
+        return t_before[1], t_yest[0], label
     if now >= sunset:
         # The evening: the night is running and has not ended yet.
         return sunset, now, "overnight, since sunset"

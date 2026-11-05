@@ -722,6 +722,19 @@ def test_a_named_window_states_its_own_span(conn, cfg, monkeypatch):
     assert "sunset" in out["window_label"]
 
 
+def test_last_night_reads_the_finished_night_in_the_evening(conn, cfg, monkeypatch):
+    a_day_and_a_night(conn, cfg)
+    frozen(monkeypatch, at(cfg, (2026, 9, 3, 21, 0)))
+    t = tools.Tools(conn, cfg)
+    out = t.get_history(window="last_night")
+    assert out["window"] == "last_night"
+    assert "7:11 pm" in out["window_start"] and "2026-09-02" in out["window_start"]
+    assert "2026-09-03" in out["window_end"] and "am" in out["window_end"]
+    assert "last night" in out["window_label"]
+    assert "last_night" in t.get_history(window="overnight")["window_note"]
+    assert "last_night" not in out["window_note"]
+
+
 def test_trailing_hours_say_they_are_not_overnight(conn, cfg, monkeypatch):
     a_day_and_a_night(conn, cfg)
     frozen(monkeypatch, at(cfg, (2026, 9, 3, 6, 0)))
