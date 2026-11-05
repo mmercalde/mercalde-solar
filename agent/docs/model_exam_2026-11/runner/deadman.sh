@@ -1,10 +1,10 @@
 #!/bin/bash
 # Separate from the runner, so it still acts if the runner is kill -9'd.
-# At 03:30: if live is not healthy, stop the test and start it regardless.
+# At 20:20: if live is not healthy, stop the test and start it regardless.
 # Then the sudoers rule goes, whatever happened.
 D=${ABX_DIR:-/tmp/abexam}
 RULE=/etc/sudoers.d/llama-abtest
-AT=${ABX_DEADMAN:-$(date -d "2026-11-05 03:30" +%s)}
+AT=${ABX_DEADMAN:-$(date -d "2026-11-04 20:20" +%s)}
 RUNNER_PID=$1
 say() { echo "$(date '+%F %T') dead-man: $*" >> "$D/events.log"; }
 live_ok() { [ "$(curl -s -m 3 http://127.0.0.1:8080/health)" = '{"status":"ok"}' ]; }
@@ -19,11 +19,11 @@ while [ "$(date +%s)" -lt "$AT" ]; do
 done
 
 if live_ok && [ -e "$D/done" ]; then
-  say "03:30: live healthy"
+  say "20:20: live healthy"
 elif live_ok && kill -0 "$RUNNER_PID" 2>/dev/null; then
-  say "03:30: live healthy, runner still going; leaving it to finish on its own"
+  say "20:20: live healthy, runner still going; leaving it to finish on its own"
   for _ in $(seq 1 180); do [ -e "$D/done" ] && break; sleep 20; done   # up to an hour
-  [ -e "$D/done" ] || { say "runner still not done at 04:30; stopping it"; touch "$D/STOP"; kill -TERM "$RUNNER_PID" 2>/dev/null; sleep 300; }
+  [ -e "$D/done" ] || { say "runner still not done at 21:20; stopping it"; touch "$D/STOP"; kill -TERM "$RUNNER_PID" 2>/dev/null; sleep 300; }
 else
   say "stopping the test and starting live (live_ok=$(live_ok && echo yes || echo no))"
   touch "$D/STOP"

@@ -1,5 +1,5 @@
 #!/bin/bash
-# The scheduled job. run.sh sleeps until 00:05 itself; this only starts the two
+# The scheduled job. run.sh starts as soon as this launches it; this only starts the two
 # processes, detached so they outlive the SSH session. `at` is not installed,
 # and a crontab entry would be one more thing left on the box.
 D=/tmp/abexam

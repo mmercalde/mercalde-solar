@@ -59,7 +59,7 @@ EOF
 cat > "$W/repo/agent/venv/bin/python" <<'EOF'
 #!/bin/bash
 case "$*" in
-  *llama_gpu_check*) exit 0 ;;
+  *llama_gpu_check*) [ -e "$STATE/gpu_fails" ] && exit 1; exit 0 ;;
   *make_snapshot*) [ -e "$STATE/snapshot_fails" ] && exit 1; echo snap > "$ABX_DIR/history.sqlite"; echo "snapshot taken"; exit 0 ;;
   *model_eval*) echo "$*" >> "$STATE/exam.log"
      [ -e "$STATE/exam_slow" ] && sleep 30.7731
@@ -191,12 +191,23 @@ waitdone
 check "never stopped live" '! grep -q stop "$STATE/systemctl.log" 2>/dev/null'
 check "rule removed" '[ -s "$STATE/rule.log" ]'
 
-scenario "no real tick after Gemma: no incumbent"
+scenario "no real ticks at all: the incumbent still runs, and the miss after it is logged"
 touch "$STATE/no_tick"; export ABX_TICK_TRIES=1
 "$HERE/run.sh" > /dev/null 2>&1 &
 waitdone 200
-check "one exam only" '[ "$(grep -c model_eval "$STATE/exam.log")" = 1 ]'
+check "both models ran" '[ "$(grep -c model_eval "$STATE/exam.log")" = 2 ]'
+check "only the wait after the incumbent happened" '[ "$(grep -c "no tick completed" "$ABX_DIR/events.log")" = 1 ] && grep -q "no real tick after the incumbent" "$ABX_DIR/events.log"'
 check "live restored" restored
+check "rule removed" '[ -s "$STATE/rule.log" ]'
+
+scenario "llama_gpu_check fails after Gemma: no incumbent"
+touch "$STATE/gpu_fails"
+"$HERE/run.sh" > /dev/null 2>&1 &
+waitdone 200
+check "one exam only" '[ "$(grep -c model_eval "$STATE/exam.log")" = 1 ]'
+check "reason recorded" 'grep -q "live not verified after Gemma" "$ABX_DIR/status"'
+check "gpu rc reported" 'grep -q "gpu_rc=1" "$ABX_DIR/status"'
+check "rule removed" '[ -s "$STATE/rule.log" ]'
 
 scenario "inside the 20:30-23:00 window: no stop made"
 ABX_HHMM=2100 "$HERE/run.sh" > /dev/null 2>&1 &

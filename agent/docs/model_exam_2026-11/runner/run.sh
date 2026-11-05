@@ -6,8 +6,8 @@ BIN=${ABX_BIN:-$HOME/llama.cpp/build/bin/llama-server}
 REPO=${ABX_REPO:-$HOME/mercalde-solar}
 RULE=/etc/sudoers.d/llama-abtest
 SWAP_LIMIT_KB=1953125
-START_AT=${ABX_START:-$(date -d "2026-11-05 00:05" +%s)}
-NO_NEW_MODEL_AFTER=${ABX_NO_NEW:-$(date -d "2026-11-05 02:30" +%s)}
+START_AT=${ABX_START:-$(date +%s)}   # as soon as it is launched
+NO_NEW_MODEL_AFTER=${ABX_NO_NEW:-$(date -d "2026-11-04 19:20" +%s)}
 TICK_TRIES=${ABX_TICK_TRIES:-120}          # 10 s apart: 20 minutes
 PAUSE=${ABX_PAUSE:-30}
 HEALTH_POLLS=${ABX_HEALTH_POLLS:-60}       # 3 s apart: 180 s
@@ -92,7 +92,7 @@ cleanup() {  # the one way out. Runs at most once, from every trap.
   if [ "$live" = up ]; then
     sudo -n /usr/bin/rm "$RULE" && say "sudoers rule removed" || say "sudoers rule NOT removed"
   else
-    say "live down: leaving the rule for the 03:30 dead-man's last attempt, which then removes it"
+    say "live down: leaving the rule for the 20:20 dead-man's last attempt, which then removes it"
   fi
   status done "$why; live=$live gpu_rc=${GPU_RC:-unset}"
   touch "$D/done"
@@ -181,8 +181,8 @@ else
   [ ! -e "$D/KILLED" ] || cleanup "non-thermal limit kill during Gemma; incumbent not run"
 fi
 [ ! -e "$D/GEN_FLAG" ] || cleanup "a generator started during Gemma; incumbent not run"
-status tick "waiting for one real tick before the incumbent"
-wait_tick || cleanup "no real tick after Gemma; incumbent not run"
+# Nothing further between the models: restore above has already required
+# /health ok and llama_gpu_check rc=0. The real-tick check comes after the incumbent.
 
 # Incumbent: the unit's own ExecStart arguments, on 127.0.0.1:8082.
 rc=0; run_model incumbent qwen3 "$HOME/models/Qwen3-8B-Q4_K_M.gguf" || rc=$?

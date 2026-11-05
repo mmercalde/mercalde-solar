@@ -47,9 +47,16 @@
 --- snapshot fails: no stop made
   ok   never stopped live
   ok   rule removed
---- no real tick after Gemma: no incumbent
-  ok   one exam only
+--- no real ticks at all: the incumbent still runs, and the miss after it is logged
+  ok   both models ran
+  ok   only the wait after the incumbent happened
   ok   live restored
+  ok   rule removed
+--- llama_gpu_check fails after Gemma: no incumbent
+  ok   one exam only
+  ok   reason recorded
+  ok   gpu rc reported
+  ok   rule removed
 --- inside the 20:30-23:00 window: no stop made
   ok   never stopped live
   ok   no exam
@@ -90,7 +97,7 @@
   ok   live restored
 --- kill -9 the runner mid-exam: the dead-man restores live and removes the rule
   ok   live is down after the kill
-./selftest.sh: line 311: 1469289 Killed                  "$HERE/run.sh" > /dev/null 2>&1
+./selftest.sh: line 322: 1505502 Killed                  "$HERE/run.sh" > /dev/null 2>&1
   ok   live restored
   ok   8082 cleared
   ok   rule removed
@@ -108,4 +115,4 @@
   ok   stop flag set
   ok   rule removed
 
-passed=85 failed=0
+passed=91 failed=0

@@ -6,7 +6,7 @@ SWAP_LIMIT_KB=1953125
 TCTL_LIMIT=85000
 HOT_SECONDS=10
 MEMINFO=${ABX_MEMINFO:-/proc/meminfo}
-CUT=${ABX_CUT:-$(date -d "2026-11-05 03:25" +%s)}   # leaves the dead-man a clean look at 03:30
+CUT=${ABX_CUT:-$(date -d "2026-11-04 20:15" +%s)}   # leaves the dead-man a clean look at 20:20
 hot_since=0; last_line=""; last_change=$(date +%s); tick=0
 
 # Read directly, as run.sh does. The flight log is only for Tctl and GTT.
@@ -43,7 +43,7 @@ while [ -e "$D/guard.run" ]; do
     else
       hot_since=0
     fi
-    [ "$now" -ge "$CUT" ] && kill_cand "03:25 backstop"
+    [ "$now" -ge "$CUT" ] && kill_cand "20:15 backstop"
   else
     hot_since=0
   fi
