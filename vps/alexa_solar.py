@@ -218,6 +218,31 @@ def get_gen_id(generator_name):
         return 'all'
     return None
 
+def resolved_generator(data):
+    """The generator the slot names, or None. Never a placeholder like "unknown".
+
+    Alexa's entity resolution gives the slot type's canonical name, but only on
+    ER_SUCCESS_MATCH. Otherwise the raw value is what's left. A name that maps to
+    no generator counts as no generator, so it can't reach speech or a command.
+    """
+    intent = data.get('request', {}).get('intent') or {}
+    slot = (intent.get('slots') or {}).get('generator') or {}
+    candidates = [slot.get('value')]
+    try:
+        authority = slot['resolutions']['resolutionsPerAuthority'][0]
+        if authority['status']['code'] == 'ER_SUCCESS_MATCH':
+            candidates.insert(0, authority['values'][0]['value']['name'])
+    except (KeyError, IndexError, TypeError):
+        pass
+    for name in candidates:
+        if isinstance(name, str) and get_gen_id(name):
+            return name
+    return None
+
+def ask_which_generator(spanish):
+    speech = "¿Cuál generador, el Kubota o el MEP?" if spanish else "Which generator, the Kubota or the MEP?"
+    return build_response(speech, end_session=False)
+
 def is_spanish(data):
     locale = data.get('request', {}).get('locale', 'en-US')
     return locale.startswith('es')
@@ -547,8 +572,10 @@ def alexa_handler():
             
             elif intent == 'StartGeneratorIntent':
                 confirmation = data['request'].get('intent', {}).get('confirmationStatus', '')
-                slots = data['request'].get('intent', {}).get('slots', {})
-                generator = slots.get('generator', {}).get('value', 'unknown')
+                generator = resolved_generator(data)
+                
+                if not generator and confirmation != 'DENIED':
+                    return ask_which_generator(spanish)
                 
                 if confirmation == 'CONFIRMED':
                     gen_id = get_gen_id(generator)
@@ -556,11 +583,9 @@ def alexa_handler():
                         set_generator(50, 1)
                         set_generator(51, 1)
                         speech = "Prendiendo ambos generadores." if spanish else "Starting both generators."
-                    elif gen_id:
+                    else:
                         set_generator(gen_id, 1)
                         speech = f"Prendiendo el generador {generator}." if spanish else f"Starting the {generator} generator."
-                    else:
-                        speech = f"No reconozco el generador {generator}." if spanish else f"I don't recognize the generator {generator}."
                 elif confirmation == 'DENIED':
                     speech = "Está bien, no lo haré." if spanish else "OK, I won't."
                 else:
@@ -570,8 +595,10 @@ def alexa_handler():
             
             elif intent == 'StopGeneratorIntent':
                 confirmation = data['request'].get('intent', {}).get('confirmationStatus', '')
-                slots = data['request'].get('intent', {}).get('slots', {})
-                generator = slots.get('generator', {}).get('value', 'unknown')
+                generator = resolved_generator(data)
+                
+                if not generator and confirmation != 'DENIED':
+                    return ask_which_generator(spanish)
                 
                 if confirmation == 'CONFIRMED':
                     gen_id = get_gen_id(generator)
@@ -580,12 +607,10 @@ def alexa_handler():
                         stop_and_auto(50)
                         stop_and_auto(51)
                         speech = "Apagando ambos generadores. Esto tomara unos minutos." if spanish else "Stopping both generators. This will take a few minutes."
-                    elif gen_id:
+                    else:
                         # Use robust stop
                         stop_and_auto(gen_id)
                         speech = f"Apagando el generador {generator}. Esto tomara unos minutos." if spanish else f"Stopping the {generator} generator. This will take a few minutes."
-                    else:
-                        speech = f"No reconozco el generador {generator}." if spanish else f"I don't recognize the generator {generator}."
                 elif confirmation == 'DENIED':
                     speech = "Está bien, no lo haré." if spanish else "OK, I won't."
                 else:
@@ -594,26 +619,27 @@ def alexa_handler():
                 return build_response(speech)
             
             elif intent == 'SetGeneratorAutoIntent':
-                slots = data['request'].get('intent', {}).get('slots', {})
-                generator = slots.get('generator', {}).get('value', 'unknown')
+                generator = resolved_generator(data)
+                if not generator:
+                    return ask_which_generator(spanish)
                 
                 gen_id = get_gen_id(generator)
                 if gen_id == 'all':
                     set_generator(50, 2)
                     set_generator(51, 2)
                     speech = "Poniendo ambos generadores en automatico." if spanish else "Setting both generators to auto mode."
-                elif gen_id:
+                else:
                     set_generator(gen_id, 2)
                     speech = f"Poniendo el generador {generator} en automatico." if spanish else f"Setting the {generator} generator to auto mode."
-                else:
-                    speech = f"No reconozco el generador {generator}." if spanish else f"I don't recognize the generator {generator}."
                 return build_response(speech)
             
             elif intent == 'SetGeneratorOffIntent':
                 print("DEBUG: SetGeneratorOffIntent triggered")
                 confirmation = data['request'].get('intent', {}).get('confirmationStatus', '')
-                slots = data['request'].get('intent', {}).get('slots', {})
-                generator = slots.get('generator', {}).get('value', 'unknown')
+                generator = resolved_generator(data)
+                
+                if not generator and confirmation != 'DENIED':
+                    return ask_which_generator(spanish)
                 
                 if confirmation == 'CONFIRMED':
                     gen_id = get_gen_id(generator)
@@ -621,11 +647,9 @@ def alexa_handler():
                         set_generator(50, 0)
                         set_generator(51, 0)
                         speech = "Poniendo ambos generadores en modo apagado." if spanish else "Setting both generators to off mode."
-                    elif gen_id:
+                    else:
                         set_generator(gen_id, 0)
                         speech = f"Poniendo el generador {generator} en modo apagado." if spanish else f"Setting the {generator} generator to off mode."
-                    else:
-                        speech = f"No reconozco el generador {generator}." if spanish else f"I don't recognize the generator {generator}."
                 elif confirmation == 'DENIED':
                     speech = "Está bien, no lo haré." if spanish else "OK, I won't."
                 else:

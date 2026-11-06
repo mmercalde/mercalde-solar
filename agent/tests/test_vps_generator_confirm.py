@@ -131,11 +131,93 @@ def test_auto_is_left_as_it_was(alexa):
     assert alexa.calls == [f"{alexa.ESP8266_GEN_URL}?id=50&state=2"]
 
 
-@pytest.mark.parametrize("intent", GUARDED)
-def test_a_confirmed_generator_it_cannot_name_moves_nothing(alexa, intent):
-    response = say(alexa, intent, "CONFIRMED", "the blue one")
+# --- which generator ---------------------------------------------------------------
+
+ALL_FOUR = GUARDED + ["SetGeneratorAutoIntent"]
+WHICH = {"en-US": "Which generator, the Kubota or the MEP?",
+         "es-US": "¿Cuál generador, el Kubota o el MEP?",
+         "es-MX": "¿Cuál generador, el Kubota o el MEP?"}
+
+
+def say_slot(alexa, intent, slot, status="NONE", locale="en-US"):
+    body = {"name": intent, "confirmationStatus": status}
+    if slot is not None:
+        body["slots"] = {"generator": slot}
+    alexa.flask_request.json = {"request": {"type": "IntentRequest", "locale": locale,
+                                            "intent": body}}
+    alexa.calls.clear()
+    return alexa.alexa_handler()["response"]
+
+
+def resolved(raw, code, name=None):
+    values = [{"value": {"name": name, "id": "x"}}] if name else []
+    return {"name": "generator", "value": raw, "resolutions": {"resolutionsPerAuthority": [
+        {"authority": "a", "status": {"code": code}, "values": values}]}}
+
+
+NOBODY = [
+    None,                                                # no slots at all
+    {"name": "generator"},                               # slot with nothing in it
+    {"name": "generator", "value": ""},
+    {"name": "generator", "value": "unknown"},
+    {"name": "generator", "value": "the blue one"},
+    resolved("the blue one", "ER_SUCCESS_NO_MATCH"),
+    resolved("unknown", "ER_SUCCESS_NO_MATCH"),
+    {"name": "generator", "resolutions": {"resolutionsPerAuthority": []}},
+    {"name": "generator", "resolutions": None},
+]
+
+
+@pytest.mark.parametrize("intent", ALL_FOUR)
+@pytest.mark.parametrize("status", ["NONE", "CONFIRMED"])
+@pytest.mark.parametrize("locale", list(WHICH))
+@pytest.mark.parametrize("slot", NOBODY)
+def test_no_generator_asks_which_and_moves_nothing(alexa, intent, status, locale, slot):
+    response = say_slot(alexa, intent, slot, status, locale)
     assert alexa.calls == []
-    assert "recognize" in speech(response)
+    assert speech(response) == WHICH[locale]
+    assert response["shouldEndSession"] is False
+
+
+@pytest.mark.parametrize("intent", GUARDED)
+@pytest.mark.parametrize("slot", NOBODY)
+def test_denied_needs_no_generator(alexa, intent, slot):
+    response = say_slot(alexa, intent, slot, "DENIED")
+    assert alexa.calls == []
+    assert speech(response) == "OK, I won't."
+    assert response["shouldEndSession"] is True
+
+
+@pytest.mark.parametrize("intent", ALL_FOUR)
+@pytest.mark.parametrize("slot", NOBODY)
+def test_unknown_is_never_spoken(alexa, intent, slot):
+    for status in ("NONE", "DENIED", "CONFIRMED"):
+        assert "unknown" not in speech(say_slot(alexa, intent, slot, status)).lower()
+
+
+def test_the_resolved_name_wins_over_what_was_heard(alexa):
+    response = say_slot(alexa, "StartGeneratorIntent",
+                        resolved("cubota", "ER_SUCCESS_MATCH", "kubota"))
+    assert speech(response) == "Please confirm: start the kubota?"
+
+
+def test_the_resolved_name_is_the_one_acted_on(alexa):
+    say_slot(alexa, "StartGeneratorIntent",
+             resolved("the military one", "ER_SUCCESS_MATCH", "mep"), "CONFIRMED")
+    assert alexa.calls == [f"{alexa.ESP8266_GEN_URL}?id=51&state=1"]
+
+
+def test_a_name_resolved_without_a_match_is_ignored(alexa):
+    """Only ER_SUCCESS_MATCH counts, so the raw value decides here."""
+    say_slot(alexa, "SetGeneratorOffIntent",
+             resolved("kubota", "ER_SUCCESS_NO_MATCH", "mep"), "CONFIRMED")
+    assert alexa.calls == [f"{alexa.ESP8266_GEN_URL}?id=50&state=0"]
+
+
+def test_a_canonical_name_that_maps_to_nothing_falls_back_to_the_raw_value(alexa):
+    say_slot(alexa, "StopGeneratorIntent",
+             resolved("kubota", "ER_SUCCESS_MATCH", "generator one"), "CONFIRMED")
+    assert alexa.calls == [f"{alexa.ESP8266_STOPGEN_URL}?id=50"]
 
 
 def test_the_generator_ids_are_the_pi5s():

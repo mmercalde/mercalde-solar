@@ -144,6 +144,28 @@ Until then a voice Off changes nothing and only gets "Please confirm: …".
 `SetGeneratorAutoIntent`, `EnableAutoGenIntent` and `DisableAutoGenIntent` don't check
 for confirmation.
 
+### Which generator
+
+Since 2026-11-06, about 1:50 pm, the `generator` slot is required, with an elicitation
+prompt, on `StartGeneratorIntent`, `StopGeneratorIntent`, `SetGeneratorAutoIntent` and
+`SetGeneratorOffIntent`, in en-US, es-US and es-MX. Before this, if Alexa missed the
+name, the confirmation read "prender unknown".
+
+Samples added at the same time:
+
+- Spanish: "que prenda el…", "que arranque el…", "prende el generador", and similar.
+- English, with no name: "start the generator", "turn on the generator".
+
+**Any change to the es-US model must also be copied to es-MX (Clone).**
+
+The VPS has its own backstop in these four handlers. It takes the name from the slot's
+entity resolution when the status code is `ER_SUCCESS_MATCH`, otherwise the raw value.
+If neither maps to a generator, it says "Which generator, the Kubota or the MEP?" /
+"¿Cuál generador, el Kubota o el MEP?", keeps the session open and moves nothing.
+"unknown" never reaches speech. `DENIED` still gets "OK, I won't", since a refusal needs
+no name. The `CONFIRMED`-only rule is unchanged, and Auto still doesn't check for
+confirmation.
+
 `SessionEndedRequest` gets an empty response, and its reason and error go to the log
 as `DEBUG SessionEnded`. That is where to look when Alexa reports an invalid response.
 
