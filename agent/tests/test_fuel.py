@@ -367,8 +367,11 @@ def test_the_runtime_tool_serves_summed_figures(conn, cfg):
             kind="exercise")
     t = toolsmod.Tools(conn, cfg)
     f = t.fuel_totals(now=now)["kubota"]
-    assert f["hours_today"] == 1.5 and f["fuel_today_gal"] == pytest.approx(0.48)
-    assert f["hours_mtd"] == 2.5 and f["fuel_mtd_gal"] == pytest.approx(0.80)
+    # Fuel burned is fuel burned: the exercise counts, and its share is beside it.
+    assert f["hours_today"] == 2.0 and f["fuel_today_gal"] == pytest.approx(0.64)
+    assert f["hours_mtd"] == 3.0 and f["fuel_mtd_gal"] == pytest.approx(0.96)
+    assert f["exercise_hours_today"] == 0.5
+    assert f["exercise_fuel_mtd_gal"] == pytest.approx(0.16)
     assert f["fuel_today_unpriced_runs"] == 0
 
 

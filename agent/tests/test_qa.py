@@ -160,6 +160,23 @@ def test_a_generator_that_did_not_run_is_named(conn, cfg, monkeypatch):
     assert "do not answer as though the assumption were true" in out["note"]
 
 
+def test_the_runtime_key_counts_an_exercise_run(conn, cfg):
+    """"Neither generator ran" passed on 2026-11-05 with the Kubota 14 minutes
+    into its exercise, because the answer key left exercise out as well."""
+    now = ts_at(cfg, "2026-08-30", 13, 0)
+    start = now - 3600
+    conn.execute("INSERT INTO gen_runs (gen, start_ts, stop_ts, duration_min, "
+                 "solo, kind) VALUES ('kubota', ?, ?, 14, 1, 'exercise')",
+                 (start, start + 840))
+    conn.commit()
+    truth = eval_cases.truth_runtime(conn, cfg, now)
+    assert truth["kubota"] == {"runs": 1, "minutes": 14.0}
+    assert truth["mep"]["runs"] == 0
+    assert not eval_cases.grade_runtime("Neither generator ran in the last 24 hours.", truth)[0]
+    assert eval_cases.grade_runtime(
+        "The Kubota ran for 14 minutes, its exercise. The MEP did not run.", truth)[0]
+
+
 # --- the graders --------------------------------------------------------------
 
 def test_blaming_a_low_battery_fails_the_start_case():

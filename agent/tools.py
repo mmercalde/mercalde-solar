@@ -310,7 +310,8 @@ SCHEMAS = [
             "required": ["hours"]}}},
     {"type": "function", "function": {
         "name": "get_gen_runtime",
-        "description": "Generator runs over the last N days with observed charge "
+        "description": "Generator runs over the last N days, exercise runs "
+                       "included and labelled by kind, with observed charge "
                        "rates in amps into the pack, per generator totals, and "
                        "solo vs paired rates. `fuel_window`: hours and modelled "
                        "gallons per generator and in total for those N days. "
@@ -766,8 +767,12 @@ class Tools:
                 r = self.conn.execute(
                     "SELECT COUNT(*) runs, COALESCE(SUM(duration_min), 0) mins, "
                     "       SUM(fuel_gal) gal, "
-                    "       SUM(fuel_gal IS NULL) unpriced "
-                    "FROM gen_runs WHERE gen=? AND kind != 'exercise' "
+                    "       SUM(fuel_gal IS NULL) unpriced, "
+                    "       COALESCE(SUM(CASE WHEN kind='exercise' "
+                    "                    THEN duration_min END), 0) ex_mins, "
+                    "       COALESCE(SUM(CASE WHEN kind='exercise' "
+                    "                    THEN fuel_gal END), 0) ex_gal "
+                    "FROM gen_runs WHERE gen=? "
                     "AND start_ts >= ? AND start_ts <= ?",
                     (gen, since, until)).fetchone()
                 runs, gal = int(r["runs"] or 0), r["gal"]
@@ -781,6 +786,8 @@ class Tools:
                 row[f"fuel_{label}_gal"] = (round(gal, 2)
                                             if gal is not None else None)
                 row[f"fuel_{label}_unpriced_runs"] = int(r["unpriced"] or 0)
+                row[f"exercise_hours_{label}"] = round(r["ex_mins"] / 60.0, 2)
+                row[f"exercise_fuel_{label}_gal"] = round(r["ex_gal"], 2)
                 c = fuelmod.cost(self.cfg, gal)
                 if c is not None:
                     row[f"fuel_{label}_cost"] = c
@@ -790,10 +797,10 @@ class Tools:
                        "curves, not metered: each generator's curve read at "
                        "the gross output the run actually delivered, with a "
                        "minute both engines were running split between them "
-                       "by their learned solo rates. Hours exclude the 09:00 "
-                       "exercise runs, which are not the agent's and are not "
-                       "a signal. Quote the summary as it stands and say "
-                       "modelled.")
+                       "by their learned solo rates. Hours and gallons count "
+                       "every run, exercise included, with the exercise share "
+                       "in the exercise_ fields. Quote the summary as it "
+                       "stands and say modelled.")
         return out
 
     def fuel_window(self, runs, days):
@@ -805,11 +812,15 @@ class Tools:
         """
         def tally(rows):
             priced = [r["fuel_gal"] for r in rows if r["fuel_gal"] is not None]
+            drill = [r for r in rows if r["kind"] == "exercise"]
             return {"runs": len(rows),
                     "hours": round(sum(r["duration_min"] or 0 for r in rows) / 60.0, 1),
                     # None only when runs happened and none could be priced.
                     "fuel_gal": (round(sum(priced), 2) if priced or not rows else None),
-                    "unpriced_runs": len(rows) - len(priced)}
+                    "unpriced_runs": len(rows) - len(priced),
+                    "exercise_runs": len(drill),
+                    "exercise_hours": round(sum(r["duration_min"] or 0 for r in drill) / 60.0, 1),
+                    "exercise_fuel_gal": round(sum(r["fuel_gal"] or 0 for r in drill), 2)}
 
         def clause(label, row):
             gal = row["fuel_gal"]
@@ -819,10 +830,13 @@ class Tools:
         out = {g: tally([r for r in runs if r["gen"] == g]) for g in history.GENS}
         out["total"] = tally(runs)
         short = out["total"]["unpriced_runs"]
+        whole = out["total"]
+        drill = (f", of which exercise {whole['exercise_hours']:.1f} h / "
+                 f"{whole['exercise_fuel_gal']:.2f} gal" if whole["exercise_runs"] else "")
         out["summary"] = (
             f"Last {days} day{'s' if days != 1 else ''}: "
             + ", ".join(clause(g, out[g]) for g in sorted(history.GENS))
-            + f"; {clause('total', out['total'])}. Gallons are modelled, not metered"
+            + f"; {clause('total', whole)}{drill}. Gallons are modelled, not metered"
             + (f"; {short} run{'s' if short != 1 else ''} had no fuel figure."
                if short else "."))
         return out
@@ -864,12 +878,16 @@ class Tools:
 
     def get_gen_runtime(self, days):
         days = max(1, min(int(days), 365))
-        runs = history.gen_runs(self.conn, days)
+        runs = history.gen_runs(self.conn, days, include_exercise=True)
         totals = {}
         for r in runs:
-            totals.setdefault(r["gen"], {"minutes": 0.0, "runs": 0})
-            totals[r["gen"]]["minutes"] += r["duration_min"] or 0
-            totals[r["gen"]]["runs"] += 1
+            t = totals.setdefault(r["gen"], {"minutes": 0.0, "runs": 0,
+                                             "exercise_minutes": 0.0, "exercise_runs": 0})
+            t["minutes"] += r["duration_min"] or 0
+            t["runs"] += 1
+            if r["kind"] == "exercise":
+                t["exercise_minutes"] += r["duration_min"] or 0
+                t["exercise_runs"] += 1
         now = int(time.time())
         today = history.local_day(now, self.cfg)
         yesterday = history.local_day(now - 86400, self.cfg)
@@ -883,7 +901,8 @@ class Tools:
             "days": days,
             "as_of": history.stamp(now, self.cfg),
             "today": today, "yesterday": yesterday,
-            "totals": {g: {"minutes": round(t["minutes"], 1), "runs": t["runs"]}
+            "totals": {g: {**t, "minutes": round(t["minutes"], 1),
+                           "exercise_minutes": round(t["exercise_minutes"], 1)}
                        for g, t in totals.items()},
             "fuel_window": self.fuel_window(runs, days),
             "fuel": self.fuel_totals(now=now),
@@ -913,7 +932,10 @@ class Tools:
                     "assumes a run happened on a day these rows do not show "
                     "one, say so and give the days the runs were actually on; "
                     "do not answer as though the assumption were true. "
-                    "Exercise runs are excluded. A charge rate is amps into "
+                    "Exercise runs are included, with kind \"exercise\": "
+                    "`minutes`, `runs` and fuel count every run, and the "
+                    "exercise_ fields are the share of them that was exercise. "
+                    "charge_rates leave exercise out. A charge rate is amps into "
                     "the pack and the state of charge per hour that gives; "
                     "observed_v_per_h is what the terminal voltage did under "
                     "whatever the house was drawing at the time, and is not a "

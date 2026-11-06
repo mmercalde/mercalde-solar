@@ -114,7 +114,9 @@ def grade_gen_starts(reply, truth):
 
 
 def truth_runtime(conn, cfg, now):
-    runs = history.gen_runs(conn, 1, now=now)
+    """Exercise runs count. On 2026-11-05 "neither generator ran" passed, with the
+    Kubota 14 minutes into its exercise, because this key left them out too."""
+    runs = history.gen_runs(conn, 1, now=now, include_exercise=True)
     return {gen: {"runs": len([r for r in runs if r["gen"] == gen]),
                   "minutes": _minutes([r for r in runs if r["gen"] == gen])}
             for gen in history.GENS}

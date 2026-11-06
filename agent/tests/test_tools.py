@@ -1166,9 +1166,10 @@ def test_fuel_is_given_for_the_days_asked_about(conn, cfg):
     _run(conn, "kubota", now - 3 * 86400, 90, 0.75)
     _run(conn, "mep", now - 40 * 86400, 60, 9.0)
     out = tools.Tools(conn, cfg).get_gen_runtime(7)["fuel_window"]
-    assert out["mep"] == {"runs": 1, "hours": 2.0, "fuel_gal": 1.5, "unpriced_runs": 0}
-    assert out["kubota"] == {"runs": 1, "hours": 1.5, "fuel_gal": 0.75, "unpriced_runs": 0}
-    assert out["total"] == {"runs": 2, "hours": 3.5, "fuel_gal": 2.25, "unpriced_runs": 0}
+    none = {"unpriced_runs": 0, "exercise_runs": 0, "exercise_hours": 0.0, "exercise_fuel_gal": 0}
+    assert out["mep"] == {"runs": 1, "hours": 2.0, "fuel_gal": 1.5, **none}
+    assert out["kubota"] == {"runs": 1, "hours": 1.5, "fuel_gal": 0.75, **none}
+    assert out["total"] == {"runs": 2, "hours": 3.5, "fuel_gal": 2.25, **none}
     assert "Last 7 days" in out["summary"] and "modelled" in out["summary"]
     assert "total 3.5 h / 2.25 gal" in out["summary"]
 
@@ -1180,15 +1181,89 @@ def test_the_month_to_date_fields_stay(conn, cfg):
     assert "fuel_mtd_gal" in fuel["mep"] and "summary" in fuel
 
 
-def test_an_exercise_run_is_not_in_the_fuel_window(conn, cfg):
-    _run(conn, "kubota", int(time.time()) - 3600, 30, 0.2, kind="exercise")
+def test_an_exercise_run_burns_fuel_and_its_share_is_shown(conn, cfg):
+    now = int(time.time())
+    _run(conn, "kubota", now - 3600, 30, 0.2, kind="exercise")
+    _run(conn, "kubota", now - 7200, 60, 1.0)
     out = tools.Tools(conn, cfg).get_gen_runtime(7)["fuel_window"]
-    assert out["total"]["runs"] == 0 and out["kubota"]["fuel_gal"] == 0
+    assert out["kubota"]["runs"] == 2 and out["kubota"]["hours"] == 1.5
+    assert out["kubota"]["fuel_gal"] == 1.2
+    assert out["kubota"]["exercise_runs"] == 1
+    assert out["kubota"]["exercise_hours"] == 0.5
+    assert out["kubota"]["exercise_fuel_gal"] == 0.2
+    assert "of which exercise 0.5 h / 0.20 gal" in out["summary"]
+
+
+def test_a_window_with_no_exercise_does_not_mention_it(conn, cfg):
+    _run(conn, "kubota", int(time.time()) - 7200, 60, 1.0)
+    assert "exercise" not in tools.Tools(conn, cfg).get_gen_runtime(7)["fuel_window"]["summary"]
+
+
+def test_the_days_fuel_counts_an_exercise_run_and_shows_its_share(conn, cfg):
+    now = int(time.time())
+    _run(conn, "kubota", now - 60, 30, 0.2, kind="exercise")
+    fuel = tools.Tools(conn, cfg).fuel_totals(now=now)["kubota"]
+    assert fuel["runs_today"] == 1 and fuel["hours_today"] == 0.5
+    assert fuel["fuel_today_gal"] == 0.2
+    assert fuel["exercise_hours_today"] == 0.5 and fuel["exercise_fuel_today_gal"] == 0.2
+
+
+def test_runtime_totals_split_out_exercise_and_label_each_run(conn, cfg):
+    now = int(time.time())
+    _run(conn, "kubota", now - 3600, 14, 0.1, kind="exercise")
+    _run(conn, "kubota", now - 7200, 60, 1.0)
+    out = tools.Tools(conn, cfg).get_gen_runtime(1)
+    assert out["totals"]["kubota"] == {"minutes": 74.0, "runs": 2,
+                                       "exercise_minutes": 14.0, "exercise_runs": 1}
+    assert sorted(r["kind"] for r in out["runs"]) == ["auto", "exercise"]
+    assert out["generators_with_no_runs"] == ["mep"]
+
+
+def test_a_generator_that_only_exercised_did_run(conn, cfg):
+    """"Neither generator ran" was the wrong answer on 2026-11-05."""
+    _run(conn, "kubota", int(time.time()) - 3600, 14, 0.1, kind="exercise")
+    assert "kubota" not in tools.Tools(conn, cfg).get_gen_runtime(1)["generators_with_no_runs"]
+
+
+def test_charge_rate_learning_still_ignores_exercise(conn, cfg):
+    """Showing exercise runs must not teach anything from them. The exercise run
+    here would move every rate if it were read: long enough to count, with a
+    gross ten times the real one."""
+    now = int(time.time())
+    def learned():
+        t = tools.Tools(conn, cfg)
+        out = t.get_gen_runtime(30)
+        return (out["charge_rates"], t.model.charge_rates(),
+                t.model.charge_rate("kubota", solo=True),
+                [dict(r) for r in history.charge_samples(conn)])
+    for i in range(3):
+        conn.execute(
+            "INSERT INTO gen_runs (gen, start_ts, stop_ts, duration_min, solo, kind, "
+            "gross_w, load_w, rate_a, rate_v_per_h, fuel_gal) "
+            "VALUES ('kubota', ?, ?, 60, 1, 'auto', 3000, 800, 40, 1.0, 0.5)",
+            (now - (i + 1) * 86400, now - (i + 1) * 86400 + 3600))
+        ts = now - (i + 1) * 86400 + 600
+        conn.execute("INSERT INTO samples (ts, battery_v, batt_soc) VALUES (?, 54.5, 70)", (ts,))
+    conn.commit()
+    before = learned()
+    assert before[1], "the fixture must teach a rate, or this proves nothing"
+    start = now - 4 * 3600
+    conn.execute(
+        "INSERT INTO gen_runs (gen, start_ts, stop_ts, duration_min, solo, kind, "
+        "gross_w, load_w, rate_a, rate_v_per_h, fuel_gal) "
+        "VALUES ('kubota', ?, ?, 60, 1, 'exercise', 30000, 800, 400, 10.0, 5.0)",
+        (start, start + 3600))
+    conn.execute("INSERT INTO samples (ts, battery_v, batt_soc) VALUES (?, 58.0, 99)", (start + 600,))
+    conn.commit()
+    assert learned() == before
+    # and the run is there to be seen
+    assert "exercise" in [r["kind"] for r in tools.Tools(conn, cfg).get_gen_runtime(30)["runs"]]
 
 
 def test_days_with_no_runs_burned_nothing(conn, cfg):
     out = tools.Tools(conn, cfg).fuel_window([], 1)
-    assert out["total"] == {"runs": 0, "hours": 0.0, "fuel_gal": 0, "unpriced_runs": 0}
+    assert out["total"] == {"runs": 0, "hours": 0.0, "fuel_gal": 0, "unpriced_runs": 0,
+                            "exercise_runs": 0, "exercise_hours": 0.0, "exercise_fuel_gal": 0}
     assert "Last 1 day:" in out["summary"]
 
 
