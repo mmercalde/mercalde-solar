@@ -18,6 +18,7 @@ ESP8266_GEN_URL = "http://10.8.0.2:8080/setgen"
 ESP8266_STOPGEN_URL = "http://10.8.0.2:8080/stopgen"  # NEW V1.4.29 endpoint
 ESP8266_EVENTS_URL = "http://10.8.0.2:8080/events"
 ESP8266_AUTOGEN_URL = "http://10.8.0.2:8080/autogen"
+ESP8266_CONFIG_URL = "http://10.8.0.2:8080/config"
 
 # Solar agent on the KAMRUI, reached over WireGuard through the Pi5.
 AGENT_ASK_URL = "http://192.168.3.152:8090/ask"
@@ -25,6 +26,17 @@ AGENT_ASK_URL = "http://192.168.3.152:8090/ask"
 # up after about 8 s, and Gemma takes 15 to 30.
 AGENT_WAIT_S = 5
 AGENT_TIMEOUT = 7
+# After the agent, a screen still has to be built inside Alexa's 8 s. Past this many
+# seconds it goes without the Pi5's figures rather than risk the answer.
+AGENT_STATUS_DEADLINE = 6.5
+AGENT_STATUS_TIMEOUT = (0.5, 0.5)
+
+AGENT_SENT_TO_PHONE = {
+    "en": "Answer sent to your phone",
+    "es": "Respuesta enviada a tu teléfono",
+}
+SCREEN_QUESTION_CHARS = 300
+SCREEN_ANSWER_CHARS = 2000
 
 AGENT_FALLBACK = {
     "en": "The solar agent is not answering right now.",
@@ -90,12 +102,26 @@ def ask_agent(query, lang):
         print(f"ERROR ask_agent: {e}")
         return AGENT_FALLBACK[lang]
 
-def get_solar_data():
+def get_solar_data(timeout=5):
     try:
-        resp = requests.get(ESP8266_DATA_URL, timeout=5)
+        resp = requests.get(ESP8266_DATA_URL, timeout=timeout)
         return resp.json()
     except Exception as e:
         print(f"ERROR get_solar_data: {e}")
+        return None
+
+def get_thresholds(timeout=2):
+    """{generator: (start V, stop V)} from the Pi5's /config, or None.
+
+    A GET with no parameters writes nothing. The response also holds the Telegram
+    token, so only the two voltages are taken and the response is never logged.
+    """
+    try:
+        cfg = requests.get(ESP8266_CONFIG_URL, timeout=timeout).json()['config']
+        return {gen: (float(cfg[gen]['startVoltage']), float(cfg[gen]['stopVoltage']))
+                for gen in ('mep803a', 'kubota')}
+    except Exception as e:
+        print(f"ERROR get_thresholds: {type(e).__name__}")
         return None
 
 def get_events():
@@ -260,16 +286,129 @@ def supports_apl(data):
     except:
         return False
 
+def threshold_line(thresholds, gen, spanish):
+    if not thresholds:
+        return ""
+    start, stop = thresholds[gen]
+    if spanish:
+        return f"Prende {start:.1f} V · Apaga {stop:.1f} V"
+    return f"Start {start:.1f} V · Stop {stop:.1f} V"
+
+def clip(text, limit):
+    return text if len(text) <= limit else text[:limit - 1].rstrip() + "…"
+
+ROUND = "${viewport.shape == 'round'}"
+NOT_ROUND = "${viewport.shape != 'round'}"
+# 15% each way is the square that fits inside the circle.
+PADDING = {
+    "paddingLeft": "${viewport.shape == 'round' ? '15vw' : '5vw'}",
+    "paddingRight": "${viewport.shape == 'round' ? '15vw' : '5vw'}",
+    "paddingTop": "${viewport.shape == 'round' ? '15vh' : '4vh'}",
+    "paddingBottom": "${viewport.shape == 'round' ? '15vh' : '4vh'}",
+}
+TEXT_ALIGN = "${viewport.shape == 'round' ? 'center' : 'left'}"
+
+def apl_screen(items):
+    return {
+        "type": "APL",
+        "version": "1.6",
+        "theme": "dark",
+        "settings": {"idleTimeout": 60000},
+        "mainTemplate": {"parameters": ["payload"], "items": items},
+    }
+
+def round_text(text, color, size, **extra):
+    return {"type": "Text", "text": text, "color": color, "fontSize": size,
+            "width": "100%", "textAlign": "center", **extra}
+
+def round_dashboard():
+    return {
+        "type": "Container",
+        "when": ROUND,
+        "width": "100vw",
+        "height": "100vh",
+        "justifyContent": "center",
+        "paddingLeft": "15vw",
+        "paddingRight": "15vw",
+        "paddingTop": "15vh",
+        "paddingBottom": "15vh",
+        "items": [
+            round_text("${payload.batterySOC}%", "${payload.batteryColor}", "16vh", fontWeight="bold"),
+            round_text("${payload.batteryVoltage} V", "#FFFFFF", "6vh"),
+            round_text("${payload.totalSolar} W", "#FFD93D", "6vh"),
+            round_text("MEP-803A: ${payload.mepStatus}", "${payload.mepColor}", "4vh"),
+            round_text("${payload.mepThresholds}", "#B0BEC5", "3vh", when="${payload.mepThresholds != ''}"),
+            round_text("KUBOTA: ${payload.kubotaStatus}", "${payload.kubotaColor}", "4vh"),
+            round_text("${payload.kubotaThresholds}", "#B0BEC5", "3vh", when="${payload.kubotaThresholds != ''}"),
+            round_text("${payload.notice}", "#BBDEFB", "3vh", when="${payload.notice != ''}"),
+        ]
+    }
+
+def build_answer_document():
+    return apl_screen([{
+        "type": "Container",
+        "width": "100vw",
+        "height": "100vh",
+        **PADDING,
+        "items": [
+            {"type": "Text", "text": "${payload.question}", "color": "#BBDEFB", "fontSize": "4vh",
+             "maxLines": 2, "textAlign": TEXT_ALIGN},
+            {"type": "ScrollView", "grow": 1, "shrink": 1, "marginTop": "2vh", "item": {
+                "type": "Text", "text": "${payload.answer}", "color": "#FFFFFF",
+                "fontSize": "${viewport.shape == 'round' ? '4vh' : '5vh'}", "textAlign": TEXT_ALIGN}},
+            {"type": "Text", "when": "${payload.statusLine != ''}", "text": "${payload.statusLine}",
+             "color": "${payload.statusColor}", "fontSize": "3.5vh", "marginTop": "2vh", "textAlign": "center"},
+            {"type": "Text", "when": "${payload.genLine != ''}", "text": "${payload.genLine}",
+             "color": "#B0BEC5", "fontSize": "3vh", "textAlign": "center"},
+        ]
+    }])
+
+def build_answer_datasource(question, answer, solar, spanish):
+    payload = {"question": clip(question, SCREEN_QUESTION_CHARS),
+               "answer": clip(answer, SCREEN_ANSWER_CHARS),
+               "statusLine": "", "statusColor": "#FFFFFF", "genLine": ""}
+    if solar:
+        soc = solar.get('batterySOC', 0)
+        voltage = round(solar.get('batteryVoltage', 0), 2)
+        total = (solar.get('mppt80PVPower', 0) + solar.get('southArrayPVPower', 0)
+                 + solar.get('westArrayPVPower', 0))
+        mep = get_gen_mode(solar.get('mep803aMode', 0), spanish).upper()
+        kubota = get_gen_mode(solar.get('kubotaMode', 0), spanish).upper()
+        payload.update(statusLine=f"{soc}% · {voltage} V · {total} W",
+                       statusColor=get_battery_color(soc),
+                       genLine=f"MEP-803A: {mep} · KUBOTA: {kubota}")
+    return payload
+
+def build_events_document():
+    return apl_screen([{
+        "type": "Container",
+        "width": "100vw",
+        "height": "100vh",
+        **PADDING,
+        "items": [
+            {"type": "Text", "text": "${payload.title}", "color": "#FFD93D", "fontSize": "5vh",
+             "fontWeight": "bold", "textAlign": "center"},
+            {"type": "ScrollView", "grow": 1, "shrink": 1, "marginTop": "2vh", "item": {
+                "type": "Container", "width": "100%", "items": [{
+                    "type": "Text", "data": "${payload.events}", "text": "${data}", "color": "#FFFFFF",
+                    "fontSize": "${viewport.shape == 'round' ? '3.5vh' : '4vh'}",
+                    "paddingBottom": "2vh", "textAlign": TEXT_ALIGN}]}},
+        ]
+    }])
+
 def build_apl_document():
     return {
         "type": "APL",
         "version": "1.6",
         "theme": "dark",
+        "settings": {"idleTimeout": 60000},
         "mainTemplate": {
             "parameters": ["payload"],
             "items": [
+                round_dashboard(),
                 {
                     "type": "Container",
+                    "when": NOT_ROUND,
                     "width": "100vw",
                     "height": "100vh",
                     "style": "background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%)",
@@ -344,7 +483,8 @@ def build_apl_document():
                                             "style": "background: rgba(255,255,255,0.1); borderRadius: 20px",
                                             "items": [
                                                 {"type": "Text", "text": "⚡ MEP-803A", "color": "#BBDEFB", "fontSize": "3vh"},
-                                                {"type": "Text", "text": "${payload.mepStatus}", "color": "${payload.mepColor}", "fontSize": "8vh", "fontWeight": "bold"}
+                                                {"type": "Text", "text": "${payload.mepStatus}", "color": "${payload.mepColor}", "fontSize": "8vh", "fontWeight": "bold"},
+                                                {"type": "Text", "when": "${payload.mepThresholds != ''}", "text": "${payload.mepThresholds}", "color": "#B0BEC5", "fontSize": "3vh"}
                                             ]
                                         },
                                         {
@@ -356,7 +496,8 @@ def build_apl_document():
                                             "style": "background: rgba(255,255,255,0.1); borderRadius: 20px",
                                             "items": [
                                                 {"type": "Text", "text": "⚡ KUBOTA", "color": "#BBDEFB", "fontSize": "3vh"},
-                                                {"type": "Text", "text": "${payload.kubotaStatus}", "color": "${payload.kubotaColor}", "fontSize": "8vh", "fontWeight": "bold"}
+                                                {"type": "Text", "text": "${payload.kubotaStatus}", "color": "${payload.kubotaColor}", "fontSize": "8vh", "fontWeight": "bold"},
+                                                {"type": "Text", "when": "${payload.kubotaThresholds != ''}", "text": "${payload.kubotaThresholds}", "color": "#B0BEC5", "fontSize": "3vh"}
                                             ]
                                         }
                                     ]
@@ -369,7 +510,8 @@ def build_apl_document():
                                     "alignItems": "center",
                                     "justifyContent": "center",
                                     "items": [
-                                        {"type": "Text", "text": "🤖 ${payload.autoControlLabel}: ${payload.autoControl}", "color": "${payload.autoControlColor}", "fontSize": "3vh"}
+                                        {"type": "Text", "text": "🤖 ${payload.autoControlLabel}: ${payload.autoControl}", "color": "${payload.autoControlColor}", "fontSize": "3vh"},
+                                        {"type": "Text", "when": "${payload.notice != ''}", "text": "${payload.notice}", "color": "#BBDEFB", "fontSize": "3vh"}
                                     ]
                                 }
                             ]
@@ -380,7 +522,7 @@ def build_apl_document():
         }
     }
 
-def build_apl_datasource(solar, spanish=False):
+def build_apl_datasource(solar, spanish=False, thresholds=None, notice=""):
     soc = solar.get('batterySOC', 0)
     voltage = round(solar.get('batteryVoltage', 0), 2)
     mppt80 = solar.get('mppt80PVPower', 0)
@@ -407,7 +549,10 @@ def build_apl_datasource(solar, spanish=False):
             "kubotaColor": get_gen_mode_color(kubota_mode),
             "autoControlLabel": "CONTROL AUTO",
             "autoControl": "ACTIVADO" if auto_enabled else "DESACTIVADO",
-            "autoControlColor": "#00E676" if auto_enabled else "#FF6B6B"
+            "autoControlColor": "#00E676" if auto_enabled else "#FF6B6B",
+            "mepThresholds": threshold_line(thresholds, 'mep803a', spanish),
+            "kubotaThresholds": threshold_line(thresholds, 'kubota', spanish),
+            "notice": notice
         }
     else:
         return {
@@ -425,7 +570,10 @@ def build_apl_datasource(solar, spanish=False):
             "kubotaColor": get_gen_mode_color(kubota_mode),
             "autoControlLabel": "AUTO CONTROL",
             "autoControl": "ENABLED" if auto_enabled else "DISABLED",
-            "autoControlColor": "#00E676" if auto_enabled else "#FF6B6B"
+            "autoControlColor": "#00E676" if auto_enabled else "#FF6B6B",
+            "mepThresholds": threshold_line(thresholds, 'mep803a', spanish),
+            "kubotaThresholds": threshold_line(thresholds, 'kubota', spanish),
+            "notice": notice
         }
 
 def build_response(speech, end_session=True, apl_document=None, apl_datasource=None):
@@ -435,10 +583,12 @@ def build_response(speech, end_session=True, apl_document=None, apl_datasource=N
             "outputSpeech": {
                 "type": "PlainText",
                 "text": speech
-            },
-            "shouldEndSession": end_session
+            }
         }
     }
+    # Left unset, a screen device keeps the session open without opening the mic.
+    if end_session is not None:
+        response["response"]["shouldEndSession"] = end_session
     
     if apl_document and apl_datasource:
         response["response"]["directives"] = [
@@ -451,6 +601,30 @@ def build_response(speech, end_session=True, apl_document=None, apl_datasource=N
         ]
     
     return jsonify(response)
+
+def dashboard_response(speech, solar, spanish, end_session=None, notice="", thresholds_timeout=2):
+    return build_response(speech, end_session=end_session,
+                          apl_document=build_apl_document(),
+                          apl_datasource=build_apl_datasource(
+                              solar, spanish, get_thresholds(thresholds_timeout), notice))
+
+def agent_screen_response(speech, question, spanish, started):
+    """The answer on a screen. The Pi5's figures are extras: Alexa's clock is running."""
+    lang = 'es' if spanish else 'en'
+    in_time = lambda: time.monotonic() - started < AGENT_STATUS_DEADLINE
+    solar = get_solar_data(AGENT_STATUS_TIMEOUT) if in_time() else None
+    if speech == AGENT_LATER[lang]:
+        notice = AGENT_SENT_TO_PHONE[lang]
+        if solar:
+            if in_time():
+                return dashboard_response(speech, solar, spanish, notice=notice,
+                                          thresholds_timeout=AGENT_STATUS_TIMEOUT)
+            return build_response(speech, end_session=None, apl_document=build_apl_document(),
+                                  apl_datasource=build_apl_datasource(solar, spanish, None, notice))
+        return build_response(speech, end_session=None, apl_document=build_answer_document(),
+                              apl_datasource=build_answer_datasource(question, notice, None, spanish))
+    return build_response(speech, end_session=None, apl_document=build_answer_document(),
+                          apl_datasource=build_answer_datasource(question, speech, solar, spanish))
 
 @app.route('/alexa', methods=['POST'])
 def alexa_handler():
@@ -477,9 +651,7 @@ def alexa_handler():
                 speech = "Welcome to Solar System. You can ask for battery status, solar production, generator status, or control the generators."
             
             if has_display and solar:
-                return build_response(speech, end_session=False, 
-                                     apl_document=build_apl_document(),
-                                     apl_datasource=build_apl_datasource(solar, spanish))
+                return dashboard_response(speech, solar, spanish, end_session=False)
             return build_response(speech, end_session=False)
         
         if request_type == 'IntentRequest':
@@ -499,8 +671,7 @@ def alexa_handler():
                     speech = f"Battery is at {soc} percent with {voltage} volts."
                 
                 if has_display:
-                    return build_response(speech, apl_document=build_apl_document(),
-                                         apl_datasource=build_apl_datasource(solar, spanish))
+                    return dashboard_response(speech, solar, spanish)
                 return build_response(speech)
             
             elif intent == 'GetStatusIntent':
@@ -522,8 +693,7 @@ def alexa_handler():
                     speech = f"Battery at {soc} percent, {voltage} volts. Solar producing {total_solar} watts. MEP 803 Alpha is {mep_mode}. Kubota is {kubota_mode}. Auto control {auto_status}."
                 
                 if has_display:
-                    return build_response(speech, apl_document=build_apl_document(),
-                                         apl_datasource=build_apl_datasource(solar, spanish))
+                    return dashboard_response(speech, solar, spanish)
                 return build_response(speech)
             
             elif intent == 'GetSolarIntent':
@@ -541,8 +711,7 @@ def alexa_handler():
                     speech = f"Solar producing {total} watts total. MPPT 80 has {mppt80} watts, South Array has {south} watts, West Array has {west} watts."
                 
                 if has_display:
-                    return build_response(speech, apl_document=build_apl_document(),
-                                         apl_datasource=build_apl_datasource(solar, spanish))
+                    return dashboard_response(speech, solar, spanish)
                 return build_response(speech)
             
             elif intent == 'GetGeneratorIntent':
@@ -558,8 +727,7 @@ def alexa_handler():
                     speech = f"MEP 803 Alpha is {mep_mode}. Kubota is {kubota_mode}."
                 
                 if has_display:
-                    return build_response(speech, apl_document=build_apl_document(),
-                                         apl_datasource=build_apl_datasource(solar, spanish))
+                    return dashboard_response(speech, solar, spanish)
                 return build_response(speech)
             
             elif intent == 'GetEventsIntent':
@@ -569,11 +737,16 @@ def alexa_handler():
                     return build_response(speech)
                 
                 events = events_data.get('events', [])
-                if not events or all(e == '' for e in events):
+                recent = [e for e in events if e][:5]
+                if not recent:
                     speech = "No hay eventos recientes." if spanish else "No recent events."
                 else:
-                    recent = [e for e in events if e][:5]
                     speech = ("Eventos recientes: " if spanish else "Recent events: ") + ". ".join(recent)
+                if has_display:
+                    return build_response(speech, end_session=None, apl_document=build_events_document(),
+                                          apl_datasource={
+                                              "title": "EVENTOS RECIENTES" if spanish else "RECENT EVENTS",
+                                              "events": recent or [speech]})
                 return build_response(speech)
             
             elif intent == 'StartGeneratorIntent':
@@ -707,7 +880,10 @@ def alexa_handler():
                     return build_response(speech, end_session=False)
                 question = f"{AGENT_PREFIX[intent]} {query}".strip()
                 print(f"DEBUG {intent}: {question}")
+                started = time.monotonic()
                 speech = ask_agent(question, 'es' if spanish else 'en')
+                if has_display:
+                    return agent_screen_response(speech, question, spanish, started)
                 return build_response(speech)
 
             elif intent == 'AMAZON.HelpIntent':
@@ -715,6 +891,9 @@ def alexa_handler():
                     speech = "Puedes decir: estado de bateria, produccion solar, estado de generadores, que paso, activar control automatico, o desactivar control automatico. Para controlar generadores di: prende el Kubota, apaga el MEP, o pon los generadores en automatico. Tambien puedes preguntarle al agente, por ejemplo: pregunta al agente cual es el plan de esta noche."
                 else:
                     speech = "You can say: battery status, solar production, generator status, what happened, enable auto control, or disable auto control. To control generators say: start the Kubota, stop the MEP, or put generators on auto. You can also ask the agent, for example: ask the agent what the plan is tonight."
+                solar = get_solar_data() if has_display else None
+                if solar:
+                    return dashboard_response(speech, solar, spanish, end_session=False)
                 return build_response(speech, end_session=False)
             
             elif intent in ['AMAZON.CancelIntent', 'AMAZON.StopIntent']:
