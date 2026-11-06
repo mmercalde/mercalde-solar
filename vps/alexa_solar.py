@@ -5,11 +5,23 @@ Alexa Solar Flask Backend V3
 - No more timing guesswork - ESP8266 handles entire stop→auto sequence
 - stop_and_auto() is now a simple single call with longer timeout
 """
+from datetime import datetime, timedelta, timezone
+import math
 import re
 from flask import Flask, request, jsonify
 import requests
 import threading
 import time
+
+try:
+    from zoneinfo import ZoneInfo
+    SITE_TZ = ZoneInfo("America/Tijuana")
+except ImportError:  # the VPS is on Python 3.8
+    import pytz
+    SITE_TZ = pytz.timezone("America/Tijuana")
+
+SITE_LAT = 32.36
+SITE_LON = -117.06
 
 app = Flask(__name__)
 
@@ -218,22 +230,13 @@ def get_gen_mode(mode, spanish=False):
         return "en automatico" if spanish else "AUTO"
     return "desconocido" if spanish else "UNKNOWN"
 
-def get_gen_mode_color(mode):
-    if mode == 0:
-        return "#FF6B6B"
-    elif mode == 1:
-        return "#00E676"
-    elif mode == 2:
-        return "#FFD93D"
-    return "#9E9E9E"
-
 def get_battery_color(soc):
     if soc >= 70:
-        return "#00E676"
+        return "#34D399"
     elif soc >= 40:
-        return "#FFD93D"
+        return "#FBBF24"
     else:
-        return "#FF6B6B"
+        return "#F87171"
 
 def get_gen_id(generator_name):
     # Whole words only: "small" and "install" must not count as "all".
@@ -294,8 +297,303 @@ def threshold_line(thresholds, gen, spanish):
         return f"Prende {start:.1f} V · Apaga {stop:.1f} V"
     return f"Start {start:.1f} V · Stop {stop:.1f} V"
 
+EMOJI = re.compile("[\U0001F000-\U0001FAFF⌀-⏿☀-➿⬀-⯿️‍]")
+
+def no_emoji(text):
+    """Screens carry no emoji, and Pi5 events and agent replies can contain them."""
+    return re.sub(r"\s{2,}", " ", EMOJI.sub("", text)).strip()
+
 def clip(text, limit):
     return text if len(text) <= limit else text[:limit - 1].rstrip() + "…"
+
+# --- the sky ---------------------------------------------------------------------------
+
+def current_time():
+    return time.time()
+
+def sun_times(day):
+    """Sunrise and sunset for a calendar date, as epoch seconds. NOAA's general formula."""
+    gamma = 2 * math.pi / 365 * (day.timetuple().tm_yday - 1)
+    eqtime = 229.18 * (0.000075 + 0.001868 * math.cos(gamma) - 0.032077 * math.sin(gamma)
+                       - 0.014615 * math.cos(2 * gamma) - 0.040849 * math.sin(2 * gamma))
+    decl = (0.006918 - 0.399912 * math.cos(gamma) + 0.070257 * math.sin(gamma)
+            - 0.006758 * math.cos(2 * gamma) + 0.000907 * math.sin(2 * gamma)
+            - 0.002697 * math.cos(3 * gamma) + 0.00148 * math.sin(3 * gamma))
+    lat = math.radians(SITE_LAT)
+    hour_angle = math.degrees(math.acos(math.cos(math.radians(90.833)) / (math.cos(lat) * math.cos(decl))
+                                        - math.tan(lat) * math.tan(decl)))
+    midnight = datetime(day.year, day.month, day.day, tzinfo=timezone.utc).timestamp()
+    return (midnight + 60 * (720 - 4 * (SITE_LON + hour_angle) - eqtime),
+            midnight + 60 * (720 - 4 * (SITE_LON - hour_angle) - eqtime))
+
+def sky_state(now):
+    """Day runs from the exact sunrise to the exact sunset, both included."""
+    today = datetime.fromtimestamp(now, SITE_TZ).date()
+    sunrise, sunset = sun_times(today)
+    if sunrise <= now <= sunset:
+        return {"day": True, "fraction": (now - sunrise) / (sunset - sunrise), "next": sunset}
+    following = sunrise if now < sunrise else sun_times(today + timedelta(days=1))[0]
+    return {"day": False, "fraction": None, "next": following}
+
+def clock_text(ts, spanish):
+    t = datetime.fromtimestamp(ts, SITE_TZ)
+    hour = t.hour % 12 or 12
+    if spanish:
+        return f"{hour}:{t.minute:02d} {'p. m.' if t.hour >= 12 else 'a. m.'}"
+    return f"{hour}:{t.minute:02d} {'pm' if t.hour >= 12 else 'am'}"
+
+def sun_xy(layout, fraction):
+    """Left horizon at 0, the top at 0.5, right horizon at 1, in the layout's own units."""
+    angle = math.pi * fraction
+    return (round(layout["arc_cx"] - layout["arc_r"] * math.cos(angle), 1),
+            round(layout["horizon"] - layout["arc_r"] * math.sin(angle), 1))
+
+PALETTE = {
+    True: {"sky": "#13306B", "ground": "#081734", "horizon": "#2B4A8A", "secondary": "#AFC3E8", "dim": "#7F95BF"},
+    False: {"sky": "#070B1A", "ground": "#04060D", "horizon": "#1C2440", "secondary": "#8B95A5", "dim": "#5B6575"},
+}
+PRIMARY = "#FFFFFF"
+AMBER = "#FBBF24"
+BLUE = "#60A5FA"
+GREEN = "#34D399"
+
+GEN_STATES = {
+    "running": (GREEN, "Running", "Prendido"),
+    "auto": (AMBER, "Auto", "Automático"),
+    "off": ("#5B6575", "Off", "Apagado"),
+    "fault": ("#F87171", "Fault", "Falla"),
+}
+AGS_RUNNING = 9
+AGS_TURNING = (0, 1, 2, 3, 4, 5, 6, 7, 8, 11)  # starting or stopping, as the dashboard's chips
+
+def generator_state(solar, gen):
+    """off, auto, running or fault. The same order as the Pi5 dashboard's chipFor()."""
+    short, long = ("mep", "mep803a") if gen == "mep" else ("kubota", "kubota")
+    if solar.get(f"{short}State") == "ags_fault" or solar.get(f"{short}Fault"):
+        return "fault"
+    mode = solar.get(f"{long}Mode", 0)
+    action = solar.get(f"{long}Action", 255)
+    if action == AGS_RUNNING or action in AGS_TURNING or mode in (1, 3):
+        return "running"
+    return "auto" if mode == 2 else "off"
+
+def generator_turning(solar, gen):
+    long = "mep803a" if gen == "mep" else "kubota"
+    return solar.get(f"{long}Action", 255) == AGS_RUNNING
+
+def generator_charge_w(solar, gen):
+    """MEP charges through the two XW Pros, the Kubota through the XW+."""
+    if gen == "mep":
+        return (solar.get('chargePower1') or 0) + (solar.get('chargePower2') or 0)
+    return solar.get('chargePower3') or 0
+
+def kw_text(watts):
+    return f"{watts / 1000.0:.1f} kW"
+
+def flow_divisor(watts):
+    """elapsedTime is divided by this: the more power, the faster the dashes move."""
+    return round(max(10.0, min(60.0, 30000.0 / max(watts, 1))), 1)
+
+# --- the two scenes, in their own units --------------------------------------------------
+
+SHOW = {
+    "key": "show", "w": 960, "h": 600, "horizon": 372, "arc_cx": 480, "arc_r": 288,
+    "battery": (360, 342, 72, 30), "house": (506, 412, 46),
+    "house_from": (436, 360), "house_ctrl": (500, 372), "house_to": (514, 420),
+    "gen_from": {"mep": (352, 402), "kubota": (352, 464)},
+    "gen_to": {"mep": (372, 372), "kubota": (384, 372)},
+    "gen_ctrl": {"mep": (372, 402), "kubota": (384, 440)},
+    "gen_dot": {"mep": (52, 402), "kubota": (52, 464)},
+    "gen_label": {"mep": (394, 382), "kubota": (356, 470)},
+    # The sun's flow bends out to here, so it doesn't cross the big numbers or the icon.
+    "hero": (300, 500),
+    "moon": (112, 118), "moon_r": 20,
+    "stars": [(200, 70), (330, 150), (455, 60), (610, 130), (720, 62), (820, 170), (905, 96)],
+    "stroke": 3.5, "dash": [2, 7], "dot_r": 7, "sun_r": 13, "glow_r": 24,
+}
+SPOT = {
+    "key": "spot", "w": 480, "h": 480, "horizon": 278, "arc_cx": 240, "arc_r": 185,
+    "battery": (210, 252, 60, 22), "house": (366, 298, 36),
+    "house_from": (276, 262), "house_ctrl": (350, 268), "house_to": (376, 304),
+    "gen_from": {"mep": (184, 310), "kubota": (184, 338)},
+    "gen_to": {"mep": (218, 274), "kubota": (212, 274)},
+    "gen_ctrl": {"mep": (192, 282), "kubota": (174, 290)},
+    "gen_dot": {"mep": (78, 310), "kubota": (78, 338)},
+    "gen_label": {"mep": (140, 303), "kubota": (140, 331)},
+    "hero": (190, 290),
+    "moon": (140, 112), "moon_r": 16,
+    "stars": [(95, 170), (205, 62), (250, 130), (300, 72), (345, 140), (400, 185), (170, 205)],
+    "stroke": 3, "dash": [2, 6], "dot_r": 5, "sun_r": 10, "glow_r": 18,
+}
+SCENE_PARAMS = {
+    "color": ["sky", "ground", "horizon", "battColor", "mepDot", "kubDot"],
+    "number": ["sunX", "sunY", "dayOpacity", "nightOpacity", "solarOpacity", "houseOpacity",
+               "mepOpacity", "kubOpacity", "solarDash", "houseDash", "mepDash", "kubDash"],
+    "string": ["solarPath", "mepPath", "kubPath", "fillPath"],
+}
+
+def circle(x, y, r):
+    return f"M{x - r} {y}a{r} {r} 0 1 0 {2 * r} 0a{r} {r} 0 1 0 {-2 * r} 0z"
+
+def quad(start, ctrl, end):
+    return f"M{start[0]} {start[1]}Q{ctrl[0]} {ctrl[1]} {end[0]} {end[1]}"
+
+def battery_fill_width(soc, inner_width):
+    return round(inner_width * max(0, min(100, soc)) / 100.0, 1)
+
+def battery_fill_path(layout, soc):
+    x, y, w, h = layout["battery"]
+    return f"M{x + 3} {y + 3}h{battery_fill_width(soc, w - 6)}v{h - 6}h{-battery_fill_width(soc, w - 6)}z"
+
+def solar_flow(layout, sun):
+    """A slight curve from the sun into the near side of the battery, under the big numbers."""
+    x, y, w, h = layout["battery"]
+    end = (x + w + 5, y + h / 2) if sun[0] >= x + w / 2 else (x - 1, y + h / 2)
+    ctrl_x = sun[0]
+    if layout.get("hero"):
+        ctrl_x = max(sun[0], layout["hero"][1]) if end[0] > x else min(sun[0], layout["hero"][0])
+    ctrl = (ctrl_x, end[1])
+    mid = ((sun[0] + 2 * ctrl[0] + end[0]) / 4, (sun[1] + 2 * ctrl[1] + end[1]) / 4)
+    return quad(sun, ctrl, end), mid
+
+def flow_path(colour, opacity, path, dash, layout):
+    return {"type": "path", "pathData": path, "stroke": colour, "strokeOpacity": opacity,
+            "strokeWidth": layout["stroke"], "strokeDashArray": layout["dash"],
+            "strokeDashOffset": dash, "strokeLineCap": "round"}
+
+def scene_graphic(layout):
+    x, y, w, h = layout["battery"]
+    hx, hy, hs = layout["house"]
+    moon_x, moon_y = layout["moon"]
+    r = layout["moon_r"]
+    left = layout["arc_cx"] - layout["arc_r"]
+    right = layout["arc_cx"] + layout["arc_r"]
+    horizon = layout["horizon"]
+    full_w, full_h = layout["w"], layout["h"]
+    return {
+        "type": "AVG", "version": "1.2", "width": full_w, "height": full_h,
+        "parameters": [{"name": n, "type": t} for t, names in SCENE_PARAMS.items() for n in names],
+        "items": [
+            {"type": "path", "fill": "${sky}", "pathData": f"M0 0H{full_w}V{full_h}H0z"},
+            {"type": "group", "opacity": "${nightOpacity}", "items": [
+                {"type": "path", "fill": "#CBD5E1",
+                 "pathData": "".join(circle(sx, sy, 1.5) for sx, sy in layout["stars"])},
+                {"type": "path", "fill": "#E5E7EB", "pathData": circle(moon_x, moon_y, r)},
+                {"type": "path", "fill": "${sky}", "pathData": circle(moon_x + r * 0.45, moon_y - r * 0.2, r * 0.85)},
+            ]},
+            {"type": "path", "stroke": AMBER, "strokeOpacity": "${dayOpacity * 0.5}", "strokeWidth": 1.5,
+             "strokeDashArray": [4, 8],
+             "pathData": f"M{left} {horizon}A{layout['arc_r']} {layout['arc_r']} 0 0 1 {right} {horizon}"},
+            flow_path(AMBER, "${solarOpacity}", "${solarPath}", "${solarDash}", layout),
+            {"type": "path", "fill": "${ground}", "pathData": f"M0 {horizon}H{full_w}V{full_h}H0z"},
+            {"type": "path", "stroke": "${horizon}", "strokeWidth": 1.5, "pathData": f"M0 {horizon}H{full_w}"},
+            {"type": "group", "opacity": "${dayOpacity}", "translateX": "${sunX}", "translateY": "${sunY}", "items": [
+                {"type": "path", "fill": AMBER, "fillOpacity": 0.25, "pathData": circle(0, 0, layout["glow_r"])},
+                {"type": "path", "fill": AMBER, "pathData": circle(0, 0, layout["sun_r"])},
+            ]},
+            flow_path(BLUE, "${houseOpacity}", quad(layout["house_from"], layout["house_ctrl"], layout["house_to"]),
+                      "${houseDash}", layout),
+            flow_path(GREEN, "${mepOpacity}", "${mepPath}", "${mepDash}", layout),
+            flow_path(GREEN, "${kubOpacity}", "${kubPath}", "${kubDash}", layout),
+            {"type": "path", "fill": "${battColor}", "pathData": "${fillPath}"},
+            {"type": "path", "stroke": "#E3E8EF", "strokeWidth": 2, "pathData": f"M{x} {y}h{w}v{h}h{-w}z"},
+            {"type": "path", "fill": "#E3E8EF", "pathData": f"M{x + w} {y + h * 0.3}h4v{h * 0.4}h-4z"},
+            {"type": "path", "stroke": BLUE, "strokeWidth": 2, "strokeLineCap": "round",
+             "pathData": (f"M{hx} {hy + hs * 0.45}L{hx + hs * 0.5} {hy}L{hx + hs} {hy + hs * 0.45}"
+                          f"M{hx + hs * 0.15} {hy + hs * 0.35}V{hy + hs}H{hx + hs * 0.85}V{hy + hs * 0.35}")},
+            {"type": "path", "fill": "${mepDot}",
+             "pathData": circle(*layout["gen_dot"]["mep"], layout["dot_r"])},
+            {"type": "path", "fill": "${kubDot}",
+             "pathData": circle(*layout["gen_dot"]["kubota"], layout["dot_r"])},
+        ],
+    }
+
+def scene_component(layout):
+    key, period = layout["key"], sum(layout["dash"])
+    dash = lambda name: f"${{-(elapsedTime / solar.{name}Div) % {period}}}"
+    return {
+        "type": "VectorGraphic", "source": f"{key}Scene", "scale": "fill",
+        "position": "absolute", "width": "100vw", "height": "100vh",
+        "sky": "${solar.sky}", "ground": "${solar.ground}", "horizon": "${solar.horizon}",
+        "battColor": "${solar.batteryColor}", "mepDot": "${solar.mepDot}", "kubDot": "${solar.kubotaDot}",
+        "dayOpacity": "${solar.dayOpacity}", "nightOpacity": "${solar.nightOpacity}",
+        "solarOpacity": "${solar.solarOpacity}", "houseOpacity": "${solar.houseOpacity}",
+        "mepOpacity": "${solar.mepOpacity}", "kubOpacity": "${solar.kubotaOpacity}",
+        "solarDash": dash("solar"), "houseDash": dash("house"), "mepDash": dash("mep"), "kubDash": dash("kubota"),
+        "sunX": f"${{solar.{key}SunX}}", "sunY": f"${{solar.{key}SunY}}",
+        "solarPath": f"${{solar.{key}SolarPath}}", "fillPath": f"${{solar.{key}FillPath}}",
+        "mepPath": f"${{solar.{key}MepPath}}", "kubPath": f"${{solar.{key}KubotaPath}}",
+    }
+
+def scene_text(text, left, top, width, size, color="#FFFFFF", align="left", **extra):
+    return {"type": "Text", "position": "absolute", "text": text, "left": left, "top": top,
+            "width": width, "fontSize": size, "color": color, "textAlign": align, **extra}
+
+def gen_rows_show():
+    rows = []
+    for gen, name, top, under in (("mep", "MEP-803A", "64.8vh", "68.8vh"),
+                                  ("kubota", "Kubota", "75.2vh", "79.2vh")):
+        rows += [
+            scene_text(name, "7.2vw", top, "20vw", "3.3vh"),
+            scene_text(f"${{solar.{gen}Word}}", "20vw", top, "15.5vw", "3vh", f"${{solar.{gen}Dot}}", "right"),
+            scene_text(f"${{solar.{gen}Thresholds}}", "7.2vw", under, "29vw", "2.5vh", "${solar.secondary}",
+                       when=f"${{solar.{gen}Thresholds != ''}}"),
+        ]
+    return rows
+
+def flow_labels(layout):
+    key = layout["key"]
+    return [
+        scene_text(f"${{solar.{gen}Kw}}", f"${{solar.{key}{gen.title()}LabelX}}", f"${{solar.{key}{gen.title()}LabelY}}",
+                   "11vw", "2.6vh", GREEN, when=f"${{solar.{gen}Flow}}")
+        for gen in ("mep", "kubota")
+    ] + [scene_text("${solar.solarKw}", f"${{solar.{key}SolarLabelX}}", f"${{solar.{key}SolarLabelY}}",
+                    "12vw" if key == "show" else "22vw", "3vh", AMBER, "center", when="${solar.solarFlow}")]
+
+def show_scene():
+    return page({"type": "Container", "width": "100%", "height": "100%", "items": [
+        scene_component(SHOW),
+        # the top line
+        {"type": "VectorGraphic", "source": "dot", "position": "absolute", "left": "3.6vw", "top": "4.6vh",
+         "width": "14dp", "height": "14dp", "colour": "${solar.autoDot}"},
+        scene_text("${solar.autoText}", "6vw", "3.4vh", "50vw", "3vh", "${solar.secondary}"),
+        scene_text("${solar.nowText}", "70vw", "3vh", "26vw", "3.7vh", align="right"),
+        # the battery
+        scene_text("${solar.batterySOC}%", "25.2vw", "38.6vh", "32vw", "9.33vh", "${solar.batteryColor}",
+                   "center", fontWeight="300"),
+        scene_text("${solar.batteryVoltage}", "25.2vw", "51vh", "32vw", "3.5vh", "#E3E8EF", "center"),
+        # the flows' labels
+        *flow_labels(SHOW),
+        scene_text("${solar.houseLabel}", "47vw", "77vh", "22vw", "2.6vh", BLUE, "center", when="${solar.houseFlow}"),
+        # the ground
+        *gen_rows_show(),
+        scene_text("${solar.arrayTitle}", "72vw", "64.8vh", "24vw", "2.7vh", "${solar.secondary}"),
+        scene_text("MPPT80", "72vw", "70vh", "12vw", "3vh", "#E3E8EF"),
+        scene_text("${solar.mpptW}", "84vw", "70vh", "12vw", "3vh", align="right"),
+        scene_text("${solar.southLabel}", "72vw", "75vh", "12vw", "3vh", "#E3E8EF"),
+        scene_text("${solar.southW}", "84vw", "75vh", "12vw", "3vh", align="right"),
+        scene_text("${solar.westLabel}", "72vw", "80vh", "12vw", "3vh", "#E3E8EF"),
+        scene_text("${solar.westW}", "84vw", "80vh", "12vw", "3vh", align="right"),
+        scene_text("${solar.notice}", "30vw", "86vh", "40vw", "2.7vh", "${solar.secondary}", "center",
+                   when="${solar.notice != ''}"),
+        scene_text("${solar.skyEvent}", "30vw", "92vh", "40vw", "3vh", "${solar.secondary}", "center"),
+    ]}, when=NOT_ROUND)
+
+def spot_scene():
+    return page({"type": "Container", "width": "100%", "height": "100%", "items": [
+        scene_component(SPOT),
+        scene_text("${solar.nowText}", "25vw", "5.5vh", "50vw", "4vh", align="center"),
+        *flow_labels(SPOT),
+        scene_text("${solar.batterySOC}%", "30vw", "59vh", "40vw", "7.5vh", "${solar.batteryColor}",
+                   "center", fontWeight="300"),
+        scene_text("${solar.batteryVoltage}", "30vw", "69.6vh", "40vw", "3vh", "#E3E8EF", "center"),
+        scene_text("MEP", "18.2vw", "62.8vh", "12vw", "3vh", "#E3E8EF"),
+        scene_text("Kubota", "18.2vw", "68.6vh", "12vw", "3vh", "#E3E8EF"),
+        scene_text("${solar.houseKw}", "70vw", "71vh", "20vw", "2.8vh", BLUE, "center", when="${solar.houseFlow}"),
+        scene_text("${solar.skyEvent}", "20vw", "80.5vh", "60vw", "3vh", "${solar.secondary}", "center"),
+        scene_text("${solar.notice}", "20vw", "85.5vh", "60vw", "2.5vh", "${solar.secondary}", "center",
+                   when="${solar.notice != ''}"),
+    ]}, when=ROUND)
 
 ROUND = "${viewport.shape == 'round'}"
 NOT_ROUND = "${viewport.shape != 'round'}"
@@ -308,58 +606,34 @@ PADDING = {
 }
 TEXT_ALIGN = "${viewport.shape == 'round' ? 'center' : 'left'}"
 
-def apl_screen(items):
-    return {
+def apl_screen(items, graphics=None):
+    document = {
         "type": "APL",
         "version": "1.6",
         "theme": "dark",
         "settings": {"idleTimeout": 60000},
         "mainTemplate": {"parameters": ["solar"], "items": items},
     }
+    if graphics:
+        document["graphics"] = graphics
+    return document
 
 def page(content, when=None):
     """The whole screen's background. A Frame holds one child, in "item"."""
     frame = {"type": "Frame", "width": "100vw", "height": "100vh",
-             "backgroundColor": "#1a1a2e", "item": content}
+             "backgroundColor": "${solar.sky}", "item": content}
     if when:
         frame["when"] = when
     return frame
 
-def card(items):
-    return {"type": "Frame", "width": "48%", "height": "100%",
-            "backgroundColor": "#FFFFFF1A", "borderRadius": "20dp",
-            "item": {"type": "Container", "width": "100%", "height": "100%",
-                     "alignItems": "center", "justifyContent": "center", "items": items}}
-
-def card_row(height, cards):
-    return {"type": "Container", "direction": "row", "width": "100%", "height": height,
-            "marginTop": "3vh", "justifyContent": "spaceBetween", "items": cards}
-
-def round_text(text, color, size, **extra):
-    return {"type": "Text", "text": text, "color": color, "fontSize": size,
-            "width": "100%", "textAlign": "center", **extra}
-
-def round_dashboard():
-    return page({
-        "type": "Container",
-        "width": "100%",
-        "height": "100%",
-        "justifyContent": "center",
-        "paddingLeft": "15vw",
-        "paddingRight": "15vw",
-        "paddingTop": "15vh",
-        "paddingBottom": "15vh",
-        "items": [
-            round_text("${solar.batterySOC}%", "${solar.batteryColor}", "16vh", fontWeight="bold"),
-            round_text("${solar.batteryVoltage} V", "#FFFFFF", "6vh"),
-            round_text("${solar.totalSolar} W", "#FFD93D", "6vh"),
-            round_text("MEP-803A: ${solar.mepStatus}", "${solar.mepColor}", "4vh"),
-            round_text("${solar.mepThresholds}", "#B0BEC5", "3vh", when="${solar.mepThresholds != ''}"),
-            round_text("KUBOTA: ${solar.kubotaStatus}", "${solar.kubotaColor}", "4vh"),
-            round_text("${solar.kubotaThresholds}", "#B0BEC5", "3vh", when="${solar.kubotaThresholds != ''}"),
-            round_text("${solar.notice}", "#BBDEFB", "3vh", when="${solar.notice != ''}"),
-        ]
-    }, when=ROUND)
+def build_apl_document():
+    return apl_screen([spot_scene(), show_scene()], graphics={
+        "showScene": scene_graphic(SHOW),
+        "spotScene": scene_graphic(SPOT),
+        "dot": {"type": "AVG", "version": "1.2", "width": 14, "height": 14,
+                "parameters": [{"name": "colour", "type": "color"}],
+                "items": [{"type": "path", "fill": "${colour}", "pathData": circle(7, 7, 7)}]},
+    })
 
 def build_answer_document():
     return apl_screen([page({
@@ -368,32 +642,32 @@ def build_answer_document():
         "height": "100%",
         **PADDING,
         "items": [
-            {"type": "Text", "text": "${solar.question}", "color": "#BBDEFB", "fontSize": "4vh",
+            {"type": "Text", "text": "${solar.question}", "color": "${solar.secondary}", "fontSize": "4vh",
              "maxLines": 2, "textAlign": TEXT_ALIGN},
             {"type": "ScrollView", "grow": 1, "shrink": 1, "marginTop": "2vh", "item": {
-                "type": "Text", "text": "${solar.answer}", "color": "#FFFFFF",
+                "type": "Text", "text": "${solar.answer}", "color": PRIMARY,
                 "fontSize": "${viewport.shape == 'round' ? '4vh' : '5vh'}", "textAlign": TEXT_ALIGN}},
             {"type": "Text", "when": "${solar.statusLine != ''}", "text": "${solar.statusLine}",
              "color": "${solar.statusColor}", "fontSize": "3.5vh", "marginTop": "2vh", "textAlign": "center"},
             {"type": "Text", "when": "${solar.genLine != ''}", "text": "${solar.genLine}",
-             "color": "#B0BEC5", "fontSize": "3vh", "textAlign": "center"},
+             "color": "${solar.secondary}", "fontSize": "3vh", "textAlign": "center"},
         ]
     })])
 
-def build_answer_datasource(question, answer, solar, spanish):
-    screen = {"question": clip(question, SCREEN_QUESTION_CHARS),
-               "answer": clip(answer, SCREEN_ANSWER_CHARS),
-               "statusLine": "", "statusColor": "#FFFFFF", "genLine": ""}
+def build_answer_datasource(question, answer, solar, spanish, now=None):
+    state = sky_state(current_time() if now is None else now)
+    screen = {"question": clip(no_emoji(question), SCREEN_QUESTION_CHARS),
+              "answer": clip(no_emoji(answer), SCREEN_ANSWER_CHARS),
+              "statusLine": "", "statusColor": PRIMARY, "genLine": "", **PALETTE[state["day"]]}
     if solar:
         soc = solar.get('batterySOC', 0)
-        voltage = round(solar.get('batteryVoltage', 0), 2)
+        voltage = round(solar.get('batteryVoltage', 0), 1)
         total = (solar.get('mppt80PVPower', 0) + solar.get('southArrayPVPower', 0)
                  + solar.get('westArrayPVPower', 0))
-        mep = get_gen_mode(solar.get('mep803aMode', 0), spanish).upper()
-        kubota = get_gen_mode(solar.get('kubotaMode', 0), spanish).upper()
+        word = lambda gen: GEN_STATES[generator_state(solar, gen)][2 if spanish else 1]
         screen.update(statusLine=f"{soc}% · {voltage} V · {total} W",
-                       statusColor=get_battery_color(soc),
-                       genLine=f"MEP-803A: {mep} · KUBOTA: {kubota}")
+                      statusColor=get_battery_color(soc),
+                      genLine=f"MEP-803A: {word('mep')} · Kubota: {word('kubota')}")
     return screen
 
 def build_events_document():
@@ -403,118 +677,105 @@ def build_events_document():
         "height": "100%",
         **PADDING,
         "items": [
-            {"type": "Text", "text": "${solar.title}", "color": "#FFD93D", "fontSize": "5vh",
-             "fontWeight": "bold", "textAlign": "center"},
+            {"type": "Text", "text": "${solar.title}", "color": PRIMARY, "fontSize": "5vh",
+             "fontWeight": "300", "textAlign": "center"},
             {"type": "ScrollView", "grow": 1, "shrink": 1, "marginTop": "2vh", "item": {
                 "type": "Container", "width": "100%", "items": [{
-                    "type": "Text", "data": "${solar.events}", "text": "${data}", "color": "#FFFFFF",
+                    "type": "Text", "data": "${solar.events}", "text": "${data}", "color": "#E3E8EF",
                     "fontSize": "${viewport.shape == 'round' ? '3.5vh' : '4vh'}",
                     "paddingBottom": "2vh", "textAlign": TEXT_ALIGN}]}},
         ]
     })])
 
-def build_apl_document():
-    return apl_screen([round_dashboard(), page({
-        "type": "Container",
-        "width": "100%",
-        "height": "100%",
-        "paddingLeft": "5vw",
-        "paddingRight": "5vw",
-        "paddingTop": "3vh",
-        "items": [
-            {"type": "Text", "text": "☀️ ${solar.title}", "textAlign": "center", "color": "#FFD93D", "fontWeight": "bold", "fontSize": "6vh"},
-            card_row("35vh", [
-                card([
-                    {"type": "Text", "text": "🔋 ${solar.batteryLabel}", "color": "#BBDEFB", "fontSize": "3vh"},
-                    {"type": "Text", "text": "${solar.batterySOC}%", "color": "${solar.batteryColor}", "fontSize": "12vh", "fontWeight": "bold"},
-                    {"type": "Text", "text": "${solar.batteryVoltage}V", "color": "#FFFFFF", "fontSize": "5vh"},
-                ]),
-                card([
-                    {"type": "Text", "text": "☀️ ${solar.solarLabel}", "color": "#BBDEFB", "fontSize": "3vh"},
-                    {"type": "Text", "text": "${solar.totalSolar}W", "color": "#FFD93D", "fontSize": "12vh", "fontWeight": "bold"},
-                    {"type": "Text", "text": "${solar.solarDetails}", "color": "#B0BEC5", "fontSize": "2.5vh", "textAlign": "center"},
-                ]),
-            ]),
-            card_row("25vh", [
-                card([
-                    {"type": "Text", "text": "⚡ MEP-803A", "color": "#BBDEFB", "fontSize": "3vh"},
-                    {"type": "Text", "text": "${solar.mepStatus}", "color": "${solar.mepColor}", "fontSize": "8vh", "fontWeight": "bold"},
-                    {"type": "Text", "when": "${solar.mepThresholds != ''}", "text": "${solar.mepThresholds}", "color": "#B0BEC5", "fontSize": "3vh"},
-                ]),
-                card([
-                    {"type": "Text", "text": "⚡ KUBOTA", "color": "#BBDEFB", "fontSize": "3vh"},
-                    {"type": "Text", "text": "${solar.kubotaStatus}", "color": "${solar.kubotaColor}", "fontSize": "8vh", "fontWeight": "bold"},
-                    {"type": "Text", "when": "${solar.kubotaThresholds != ''}", "text": "${solar.kubotaThresholds}", "color": "#B0BEC5", "fontSize": "3vh"},
-                ]),
-            ]),
-            {
-                "type": "Container",
-                "width": "100%",
-                "height": "10vh",
-                "marginTop": "2vh",
-                "alignItems": "center",
-                "justifyContent": "center",
-                "items": [
-                    {"type": "Text", "text": "🤖 ${solar.autoControlLabel}: ${solar.autoControl}", "color": "${solar.autoControlColor}", "fontSize": "3vh"},
-                    {"type": "Text", "when": "${solar.notice != ''}", "text": "${solar.notice}", "color": "#BBDEFB", "fontSize": "3vh"},
-                ],
-            },
-        ],
-    }, when=NOT_ROUND)])
+def build_events_datasource(events, spanish, now=None):
+    state = sky_state(current_time() if now is None else now)
+    return {"title": "Eventos recientes" if spanish else "Recent events",
+            "events": [no_emoji(e) for e in events], **PALETTE[state["day"]]}
 
-def build_apl_datasource(solar, spanish=False, thresholds=None, notice=""):
+def scene_geometry(layout, state, soc):
+    """Everything that moves, in the layout's own units, plus where its labels go."""
+    key = layout["key"]
+    vw = lambda x: f"{round(100.0 * x / layout['w'], 1)}vw"
+    vh = lambda y: f"{round(100.0 * y / layout['h'], 1)}vh"
+    sun = sun_xy(layout, state["fraction"]) if state["day"] else (layout["arc_cx"], layout["horizon"])
+    path, mid = solar_flow(layout, sun)
+    half = 0.5 * (0.12 * layout["w"] if key == "show" else 0.22 * layout["w"])
+    data = {f"{key}SunX": sun[0], f"{key}SunY": sun[1], f"{key}SolarPath": path,
+            f"{key}SolarLabelX": vw(mid[0] - half + (46 if sun[0] >= layout["battery"][0] + layout["battery"][2] / 2 else -46)),
+            f"{key}SolarLabelY": vh(mid[1] - 12),
+            f"{key}FillPath": battery_fill_path(layout, soc)}
+    for gen, name in (("mep", "Mep"), ("kubota", "Kubota")):
+        data[f"{key}{name}Path"] = quad(layout["gen_from"][gen], layout["gen_ctrl"][gen], layout["gen_to"][gen])
+        label = layout["gen_label"][gen]
+        data[f"{key}{name}LabelX"] = vw(label[0])
+        data[f"{key}{name}LabelY"] = vh(label[1])
+    return data
+
+def build_apl_datasource(solar, spanish=False, thresholds=None, notice="", now=None):
+    now = current_time() if now is None else now
+    state = sky_state(now)
     soc = solar.get('batterySOC', 0)
-    voltage = round(solar.get('batteryVoltage', 0), 2)
     mppt80 = solar.get('mppt80PVPower', 0)
     south = solar.get('southArrayPVPower', 0)
     west = solar.get('westArrayPVPower', 0)
     total_solar = mppt80 + south + west
-    mep_mode = solar.get('mep803aMode', 0)
-    kubota_mode = solar.get('kubotaMode', 0)
+    load = (solar.get('acPower1') or 0) + (solar.get('acPower2') or 0)
     auto_enabled = solar.get('autoGenEnabled', True)
-    
+    # While a generator runs the inverters' AC output is the generator's, so the
+    # house's draw can't be read. Same rule as the agent's load_w.
+    states = {gen: generator_state(solar, gen) for gen in ("mep", "kubota")}
+    house_known = "running" not in states.values()
+    solar_flowing = state["day"] and total_solar > 50
+
     if spanish:
-        return {
-            "title": "MI SISTEMA SOLAR",
-            "batteryLabel": "BATERÍA",
-            "batterySOC": soc,
-            "batteryVoltage": voltage,
-            "batteryColor": get_battery_color(soc),
-            "solarLabel": "PRODUCCIÓN",
-            "totalSolar": total_solar,
-            "solarDetails": f"MPPT80: {mppt80}W | Sur: {south}W | Oeste: {west}W",
-            "mepStatus": get_gen_mode(mep_mode, True).upper(),
-            "mepColor": get_gen_mode_color(mep_mode),
-            "kubotaStatus": get_gen_mode(kubota_mode, True).upper(),
-            "kubotaColor": get_gen_mode_color(kubota_mode),
-            "autoControlLabel": "CONTROL AUTO",
-            "autoControl": "ACTIVADO" if auto_enabled else "DESACTIVADO",
-            "autoControlColor": "#00E676" if auto_enabled else "#FF6B6B",
-            "mepThresholds": threshold_line(thresholds, 'mep803a', spanish),
-            "kubotaThresholds": threshold_line(thresholds, 'kubota', spanish),
-            "notice": notice
-        }
+        auto_text = "Control automático activado" if auto_enabled else "Control automático desactivado"
+        event = ("Atardecer " if state["day"] else "Amanecer ") + clock_text(state["next"], True)
+        house_label = f"{kw_text(load)} casa"
     else:
-        return {
-            "title": "MY SOLAR SYSTEM",
-            "batteryLabel": "BATTERY",
-            "batterySOC": soc,
-            "batteryVoltage": voltage,
-            "batteryColor": get_battery_color(soc),
-            "solarLabel": "PRODUCTION",
-            "totalSolar": total_solar,
-            "solarDetails": f"MPPT80: {mppt80}W | South: {south}W | West: {west}W",
-            "mepStatus": get_gen_mode(mep_mode, False),
-            "mepColor": get_gen_mode_color(mep_mode),
-            "kubotaStatus": get_gen_mode(kubota_mode, False),
-            "kubotaColor": get_gen_mode_color(kubota_mode),
-            "autoControlLabel": "AUTO CONTROL",
-            "autoControl": "ENABLED" if auto_enabled else "DISABLED",
-            "autoControlColor": "#00E676" if auto_enabled else "#FF6B6B",
-            "mepThresholds": threshold_line(thresholds, 'mep803a', spanish),
-            "kubotaThresholds": threshold_line(thresholds, 'kubota', spanish),
-            "notice": notice
-        }
+        auto_text = "Auto control on" if auto_enabled else "Auto control off"
+        event = ("Sunset " if state["day"] else "Sunrise ") + clock_text(state["next"], False)
+        house_label = f"{kw_text(load)} house"
+
+    data = {
+        **PALETTE[state["day"]],
+        "dayOpacity": 1 if state["day"] else 0,
+        "nightOpacity": 0 if state["day"] else 1,
+        "nowText": clock_text(now, spanish),
+        "skyEvent": event,
+        "autoText": auto_text,
+        "autoDot": GREEN if auto_enabled else GEN_STATES["off"][0],
+        "batterySOC": soc,
+        "batteryVoltage": f"{solar.get('batteryVoltage', 0):.1f} V",
+        "batteryColor": get_battery_color(soc),
+        "solarFlow": solar_flowing,
+        "solarOpacity": 1 if solar_flowing else 0,
+        "solarKw": kw_text(total_solar),
+        "solarDiv": flow_divisor(total_solar),
+        "houseFlow": house_known,
+        "houseOpacity": 1 if house_known else 0,
+        "houseKw": kw_text(load),
+        "houseLabel": house_label,
+        "houseDiv": flow_divisor(load),
+        "arrayTitle": "Solar por arreglo" if spanish else "Solar by array",
+        "southLabel": "Sur" if spanish else "South",
+        "westLabel": "Oeste" if spanish else "West",
+        "mpptW": f"{mppt80} W",
+        "southW": f"{south} W",
+        "westW": f"{west} W",
+        "mepThresholds": threshold_line(thresholds, 'mep803a', spanish),
+        "kubotaThresholds": threshold_line(thresholds, 'kubota', spanish),
+        "notice": notice,
+    }
+    for gen in ("mep", "kubota"):
+        colour, english, spanish_word = GEN_STATES[states[gen]]
+        watts = generator_charge_w(solar, gen)
+        turning = generator_turning(solar, gen)
+        data.update({f"{gen}Dot": colour, f"{gen}Word": spanish_word if spanish else english,
+                     f"{gen}Flow": turning, f"{gen}Opacity": 1 if turning else 0,
+                     f"{gen}Kw": kw_text(watts), f"{gen}Div": flow_divisor(watts)})
+    data.update(scene_geometry(SHOW, state, soc))
+    data.update(scene_geometry(SPOT, state, soc))
+    return data
 
 def build_response(speech, end_session=True, apl_document=None, apl_datasource=None):
     response = {
@@ -684,9 +945,7 @@ def alexa_handler():
                     speech = ("Eventos recientes: " if spanish else "Recent events: ") + ". ".join(recent)
                 if has_display:
                     return build_response(speech, end_session=None, apl_document=build_events_document(),
-                                          apl_datasource={
-                                              "title": "EVENTOS RECIENTES" if spanish else "RECENT EVENTS",
-                                              "events": recent or [speech]})
+                                          apl_datasource=build_events_datasource(recent or [speech], spanish))
                 return build_response(speech)
             
             elif intent == 'StartGeneratorIntent':

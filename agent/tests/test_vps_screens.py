@@ -2,6 +2,7 @@
 for Flask, with every HTTP call answered here, so nothing reaches the Pi5 or the agent.
 """
 
+from datetime import date, datetime, timedelta, timezone
 import importlib.util
 import json
 import os
@@ -26,6 +27,8 @@ CONFIG = {"config": {"mep803a": {"startVoltage": 52.0, "stopVoltage": 56.0},
 WITH_SCREEN = {"System": {"device": {"supportedInterfaces": {"Alexa.Presentation.APL": {}}},
                           "viewport": {"shape": "RECTANGLE"}}}
 NO_SCREEN = {"System": {"device": {"supportedInterfaces": {}}}}
+EMOJI = re.compile("[\U0001F000-\U0001FAFF\u2600-\u27BF\uFE0F]")
+DAY = date(2026, 11, 6)
 READS = ["GetBatteryIntent", "GetStatusIntent", "GetSolarIntent", "GetGeneratorIntent"]
 
 
@@ -47,6 +50,8 @@ def alexa(monkeypatch):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
 
+    sunrise, sunset = module.sun_times(DAY)
+    module.current_time = lambda: (sunrise + sunset) / 2
     module.calls = []
     module.routes = {"data": SOLAR, "config": CONFIG, "events": {"events": []}}
     module.agent = (200, "The battery is fine.")
@@ -139,7 +144,7 @@ def test_confirmation_dialogs_are_unchanged(alexa, name, status):
 @pytest.mark.parametrize("kind,intent", [("LaunchRequest", None), ("IntentRequest", "AMAZON.HelpIntent")])
 def test_launch_and_help_show_the_dashboard_and_keep_the_mic(alexa, kind, intent):
     body = ask(alexa, intent, kind=kind)
-    assert payload(body)["totalSolar"] == 600
+    assert payload(body)["solarKw"] == "0.6 kW"
     assert body["response"]["shouldEndSession"] is False
 
 
@@ -161,7 +166,7 @@ def test_no_config_leaves_the_line_off(alexa, broken):
     alexa.routes["config"] = broken
     body = ask(alexa, "GetGeneratorIntent")
     assert payload(body)["mepThresholds"] == "" and payload(body)["kubotaThresholds"] == ""
-    assert payload(body)["totalSolar"] == 600
+    assert payload(body)["solarKw"] == "0.6 kW"
 
 
 def test_the_config_is_only_ever_read_with_no_parameters(alexa):
@@ -181,17 +186,26 @@ def test_round_and_rectangle_are_each_chosen_by_when(alexa):
     items = directive(ask(alexa, "GetBatteryIntent"))["document"]["mainTemplate"]["items"]
     assert [i["when"] for i in items] == ["${viewport.shape == 'round'}",
                                           "${viewport.shape != 'round'}"]
-    column = items[0]["item"]
-    assert column["paddingLeft"] == "15vw" and column["paddingTop"] == "15vh"
-    assert column.get("direction", "column") == "column"
 
 
-def test_the_round_column_says_what_was_asked_for(alexa):
-    items = directive(ask(alexa, "GetBatteryIntent"))["document"]["mainTemplate"]["items"]
-    text = [c["text"] for c in items[0]["item"]["items"]]
-    for field in ("batterySOC", "batteryVoltage", "totalSolar", "mepStatus", "kubotaStatus",
-                  "mepThresholds", "kubotaThresholds"):
-        assert any(field in t for t in text), field
+def scene_text(alexa, index):
+    items = alexa.build_apl_document()["mainTemplate"]["items"][index]["item"]["items"]
+    return " ".join(i["text"] for i in items if i["type"] == "Text")
+
+
+def test_the_spot_has_no_thresholds_or_arrays(alexa):
+    text = scene_text(alexa, 0)
+    for field in ("Thresholds", "mpptW", "southW", "westW", "arrayTitle"):
+        assert field not in text, field
+    for field in ("nowText", "batterySOC", "batteryVoltage", "skyEvent", "houseKw"):
+        assert field in text, field
+
+
+def test_the_show_has_all_of_it(alexa):
+    text = scene_text(alexa, 1)
+    for field in ("mepThresholds", "kubotaThresholds", "mpptW", "southW", "westW", "arrayTitle",
+                  "autoText", "nowText", "skyEvent", "batterySOC", "houseLabel", "mepWord", "kubotaWord"):
+        assert field in text, field
 
 
 # --- what APL actually accepts ------------------------------------------------------------
@@ -221,7 +235,7 @@ def test_every_builder_is_free_of_payload_bindings(alexa):
 def test_every_binding_has_a_value_to_show(alexa):
     """A name missing from the datasource renders blank on the device, silently."""
     for d in every_screen(alexa):
-        names = set(re.findall(r"\$\{solar\.(\w+)", json.dumps(d["document"])))
+        names = set(re.findall(r"\bsolar\.(\w+)", json.dumps(d["document"])))
         assert names, d["document"]
         assert names <= set(d["datasources"]["solar"]), names - set(d["datasources"]["solar"])
 
@@ -231,26 +245,258 @@ def test_no_style_keys_are_left(alexa):
         assert not [n for n in walk(d["document"]) if "style" in n]
 
 
-def test_frames_hold_one_child_and_a_real_colour(alexa):
+def test_frames_hold_one_child(alexa):
     for d in every_screen(alexa):
         frames = [n for n in walk(d["document"]) if n.get("type") == "Frame"]
         assert frames
-        for frame in frames:
-            assert "item" in frame and "items" not in frame
-            assert re.fullmatch(r"#[0-9A-Fa-f]{6}([0-9A-Fa-f]{2})?", frame["backgroundColor"])
+        assert all("item" in f and "items" not in f for f in frames)
 
 
-def test_every_page_has_the_background(alexa):
+def test_every_page_has_the_sky_behind_it(alexa):
     for d in every_screen(alexa):
         for item in d["document"]["mainTemplate"]["items"]:
-            assert item["type"] == "Frame" and item["backgroundColor"] == "#1a1a2e"
+            assert item["type"] == "Frame" and item["backgroundColor"] == "${solar.sky}"
 
 
-def test_the_dashboard_cards_are_rounded_frames(alexa):
+def test_no_card_fills_are_left(alexa):
+    for d in every_screen(alexa):
+        assert not [n for n in walk(d["document"]) if n.get("borderRadius")]
+
+
+@pytest.mark.parametrize("key", ["show", "spot"])
+def test_the_scene_gets_every_parameter_it_declares(alexa, key):
     doc = alexa.build_apl_document()
-    cards = [n for n in walk(doc) if n.get("borderRadius")]
-    assert len(cards) == 4
-    assert all(c["type"] == "Frame" and c["backgroundColor"] == "#FFFFFF1A" for c in cards)
+    declared = {p["name"] for p in doc["graphics"][f"{key}Scene"]["parameters"]}
+    component = alexa.scene_component(getattr(alexa, key.upper()))
+    assert declared <= set(component), declared - set(component)
+    used = set(re.findall(r"\$\{(\w+)", json.dumps(doc["graphics"][f"{key}Scene"]["items"])))
+    assert used <= declared, used - declared
+
+
+def every_string(node):
+    for n in walk(node):
+        for value in n.values():
+            if isinstance(value, str):
+                yield value
+            elif isinstance(value, list):
+                yield from (v for v in value if isinstance(v, str))
+
+
+def test_no_emoji_anywhere(alexa):
+    alexa.routes["events"] = {"events": ["\u26a0\ufe0f MEP-803A AGS went OFFLINE (FC 0x83)",
+                                         "\u2705 Kubota AGS back ONLINE"]}
+    alexa.agent = (200, "All good \u2600\ufe0f \U0001F50B")
+    for intent, query in (("GetBatteryIntent", None), ("GetEventsIntent", None),
+                          ("AskAgentIntent", "\u26a1 now")):
+        for locale in ("en-US", "es-US"):
+            d = directive(ask(alexa, intent, locale=locale, query=query))
+            assert not [t for t in every_string(d) if EMOJI.search(t)]
+
+
+def test_emoji_leave_the_event_text_readable(alexa):
+    alexa.routes["events"] = {"events": ["\u26a0\ufe0f MEP-803A AGS went OFFLINE", "Kubota stopped \u2192 AUTO"]}
+    assert payload(ask(alexa, "GetEventsIntent"))["events"] == ["MEP-803A AGS went OFFLINE",
+                                                                "Kubota stopped \u2192 AUTO"]
+
+
+# --- the sun ---------------------------------------------------------------------------------
+
+@pytest.mark.parametrize("day,rise,sets", [(date(2026, 11, 6), "06:09", "16:53"),
+                                           (date(2026, 11, 7), "06:10", "16:52")])
+def test_sun_times_are_within_two_minutes_of_open_meteo(alexa, day, rise, sets):
+    for ts, expected in zip(alexa.sun_times(day), (rise, sets)):
+        t = datetime.fromtimestamp(ts, alexa.SITE_TZ)
+        hour, minute = map(int, expected.split(":"))
+        assert abs((t.hour * 60 + t.minute) - (hour * 60 + minute)) <= 2
+
+
+def test_the_sky_turns_at_the_exact_times(alexa):
+    sunrise, sunset = alexa.sun_times(DAY)
+    assert alexa.sky_state(sunrise - 1)["day"] is False
+    assert alexa.sky_state(sunrise)["day"] is True
+    assert alexa.sky_state(sunset)["day"] is True
+    assert alexa.sky_state(sunset + 1)["day"] is False
+
+
+def test_the_next_event(alexa):
+    sunrise, sunset = alexa.sun_times(DAY)
+    tomorrow = alexa.sun_times(DAY + timedelta(days=1))[0]
+    assert alexa.sky_state(sunrise + 60)["next"] == sunset
+    assert alexa.sky_state(sunrise - 60)["next"] == sunrise
+    assert alexa.sky_state(sunset + 60)["next"] == tomorrow
+
+
+@pytest.mark.parametrize("name", ["SHOW", "SPOT"])
+def test_the_sun_runs_along_the_semicircle(alexa, name):
+    layout = getattr(alexa, name)
+    cx, r, horizon = layout["arc_cx"], layout["arc_r"], layout["horizon"]
+    assert alexa.sun_xy(layout, 0) == (cx - r, horizon)
+    assert alexa.sun_xy(layout, 0.5) == (cx, horizon - r)
+    assert alexa.sun_xy(layout, 1) == (cx + r, horizon)
+    x, y = alexa.sun_xy(layout, 0.25)
+    assert abs(((x - cx) ** 2 + (y - horizon) ** 2) ** 0.5 - r) < 0.2
+
+
+@pytest.mark.parametrize("prefix", ["show", "spot"])
+def test_the_datasource_has_the_sun_at_rise_noon_and_set(alexa, prefix):
+    layout = getattr(alexa, prefix.upper())
+    sunrise, sunset = alexa.sun_times(DAY)
+    for now, fraction in ((sunrise, 0), ((sunrise + sunset) / 2, 0.5), (sunset, 1)):
+        data = alexa.build_apl_datasource(SOLAR, now=now)
+        assert (data[f"{prefix}SunX"], data[f"{prefix}SunY"]) == alexa.sun_xy(layout, fraction)
+
+
+def test_solar_noon_is_within_a_minute_of_the_top_of_the_arc(alexa):
+    sunrise, sunset = alexa.sun_times(DAY)
+    # 720 - 4 * lon - eqtime, with the equation of time near +16.4 minutes on this date
+    noon = datetime(2026, 11, 6, tzinfo=timezone.utc).timestamp() + 60 * (720 + 4 * 117.06 - 16.4)
+    assert abs((sunrise + sunset) / 2 - noon) < 60
+
+
+def test_day_shows_the_sun_and_night_the_moon(alexa):
+    sunrise, sunset = alexa.sun_times(DAY)
+    day = alexa.build_apl_datasource(SOLAR, now=sunrise + 3600)
+    night = alexa.build_apl_datasource(SOLAR, now=sunset + 3600)
+    assert (day["dayOpacity"], day["nightOpacity"]) == (1, 0)
+    assert (night["dayOpacity"], night["nightOpacity"]) == (0, 1)
+    assert (day["sky"], day["ground"], day["horizon"]) == ("#13306B", "#081734", "#2B4A8A")
+    assert (night["sky"], night["ground"], night["horizon"]) == ("#070B1A", "#04060D", "#1C2440")
+    assert day["secondary"] == "#AFC3E8" and night["secondary"] == "#8B95A5"
+
+
+def test_seven_stars_at_fixed_places(alexa):
+    for layout in (alexa.SHOW, alexa.SPOT):
+        assert len(layout["stars"]) == 7
+
+
+@pytest.mark.parametrize("now,spanish,text", [
+    (datetime(2026, 11, 6, 23, 41, tzinfo=timezone.utc), False, "3:41 pm"),
+    (datetime(2026, 11, 6, 23, 41, tzinfo=timezone.utc), True, "3:41 p. m."),
+    (datetime(2026, 11, 6, 14, 9, tzinfo=timezone.utc), False, "6:09 am"),
+    (datetime(2026, 11, 6, 14, 9, tzinfo=timezone.utc), True, "6:09 a. m."),
+    (datetime(2026, 11, 7, 8, 5, tzinfo=timezone.utc), False, "12:05 am"),
+    (datetime(2026, 11, 6, 20, 5, tzinfo=timezone.utc), False, "12:05 pm"),
+    (datetime(2026, 7, 1, 19, 5, tzinfo=timezone.utc), False, "12:05 pm"),  # summer time
+])
+def test_twelve_hour_clock_in_tijuana(alexa, now, spanish, text):
+    assert alexa.clock_text(now.timestamp(), spanish) == text
+
+
+@pytest.mark.parametrize("spanish,offset,text", [(False, 3600, "Sunset 4:5"), (True, 3600, "Atardecer 4:5"),
+                                                 (False, -3600, "Sunrise 6:"), (True, -3600, "Amanecer 6:")])
+def test_the_sky_event_line(alexa, spanish, offset, text):
+    sunrise, sunset = alexa.sun_times(DAY)
+    now = sunrise + offset
+    assert alexa.build_apl_datasource(SOLAR, spanish, now=now)["skyEvent"].startswith(text)
+
+
+# --- the flows ---------------------------------------------------------------------------------
+
+def scene_at(alexa, now=None, **fields):
+    return alexa.build_apl_datasource(dict(SOLAR, **fields), now=now)
+
+
+def test_the_solar_flow_needs_daylight_and_over_50_w(alexa):
+    sunrise, sunset = alexa.sun_times(DAY)
+    noon = (sunrise + sunset) / 2
+    over = dict(mppt80PVPower=51, southArrayPVPower=0, westArrayPVPower=0)
+    exact = dict(mppt80PVPower=50, southArrayPVPower=0, westArrayPVPower=0)
+    assert scene_at(alexa, noon, **over)["solarFlow"] is True
+    assert scene_at(alexa, noon, **over)["solarOpacity"] == 1
+    assert scene_at(alexa, noon, **exact)["solarFlow"] is False
+    assert scene_at(alexa, noon, **exact)["solarOpacity"] == 0
+    assert scene_at(alexa, sunset + 3600, **over)["solarFlow"] is False
+
+
+@pytest.mark.parametrize("gen,field,flow", [("mep", "mep803aAction", "mepFlow"),
+                                            ("kubota", "kubotaAction", "kubotaFlow")])
+def test_a_generator_flow_only_while_it_runs(alexa, gen, field, flow):
+    assert scene_at(alexa, **{field: 9})[flow] is True
+    assert scene_at(alexa, **{field: 9})[f"{gen}Opacity"] == 1
+    for action in (10, 2, 5, 255):
+        assert scene_at(alexa, **{field: action})[flow] is False, action
+        assert scene_at(alexa, **{field: action})[f"{gen}Opacity"] == 0
+
+
+def test_charge_power_per_generator(alexa):
+    data = scene_at(alexa, mep803aAction=9, kubotaAction=9,
+                    chargePower1=2100, chargePower2=2000, chargePower3=1800)
+    assert data["mepKw"] == "4.1 kW" and data["kubotaKw"] == "1.8 kW"
+
+
+def test_house_flow_and_load(alexa):
+    data = scene_at(alexa, acPower1=505, acPower2=786)
+    assert data["houseFlow"] is True and data["houseKw"] == "1.3 kW"
+    assert data["houseLabel"] == "1.3 kW house"
+    assert alexa.build_apl_datasource(dict(SOLAR, acPower1=505, acPower2=786), True)["houseLabel"] == "1.3 kW casa"
+
+
+@pytest.mark.parametrize("field,value", [("mep803aAction", 9), ("kubotaAction", 9), ("mep803aMode", 1)])
+def test_the_house_flow_hides_while_a_generator_runs(alexa, field, value):
+    data = scene_at(alexa, acPower1=505, acPower2=786, **{field: value})
+    assert data["houseFlow"] is False and data["houseOpacity"] == 0
+
+
+def test_more_power_moves_the_dashes_faster_within_limits(alexa):
+    assert alexa.flow_divisor(5000) < alexa.flow_divisor(1000) < alexa.flow_divisor(100)
+    assert alexa.flow_divisor(0) == 60 and alexa.flow_divisor(100000) == 10
+
+
+@pytest.mark.parametrize("key,period", [("show", 9), ("spot", 8)])
+def test_the_dashes_animate_on_elapsed_time(alexa, key, period):
+    component = alexa.scene_component(getattr(alexa, key.upper()))
+    assert component["solarDash"] == "${-(elapsedTime / solar.solarDiv) % " + str(period) + "}"
+
+
+# --- battery and generator states ---------------------------------------------------------------
+
+@pytest.mark.parametrize("soc,colour,width", [(0, "#F87171", 0), (39, "#F87171", 25.7), (50, "#FBBF24", 33),
+                                              (69, "#FBBF24", 45.5), (70, "#34D399", 46.2),
+                                              (99, "#34D399", 65.3), (100, "#34D399", 66)])
+def test_battery_fill_and_colour(alexa, soc, colour, width):
+    data = scene_at(alexa, batterySOC=soc)
+    assert data["batteryColor"] == colour
+    assert alexa.battery_fill_width(soc, 66) == width
+    assert f"h{float(width)}v" in data["showFillPath"]
+
+
+def test_battery_fill_stays_inside_the_icon(alexa):
+    assert alexa.battery_fill_width(130, 66) == 66 and alexa.battery_fill_width(-5, 66) == 0
+
+
+@pytest.mark.parametrize("fields,word,word_es,dot", [
+    (dict(mep803aMode=0, mep803aAction=10), "Off", "Apagado", "#5B6575"),
+    (dict(mep803aMode=2, mep803aAction=10), "Auto", "Automático", "#FBBF24"),
+    (dict(mep803aMode=1, mep803aAction=9), "Running", "Prendido", "#34D399"),
+    (dict(mep803aMode=2, mep803aAction=9), "Running", "Prendido", "#34D399"),  # an exercise
+    (dict(mep803aMode=1, mep803aAction=2), "Running", "Prendido", "#34D399"),  # cranking
+    (dict(mep803aMode=2, mep803aAction=5), "Running", "Prendido", "#34D399"),  # cooling down
+    (dict(mep803aMode=1, mep803aAction=10), "Running", "Prendido", "#34D399"),  # just requested
+    (dict(mep803aMode=2, mep803aAction=10, mepState="ags_fault"), "Fault", "Falla", "#F87171"),
+    (dict(mep803aMode=1, mep803aAction=9, mepFault=True), "Fault", "Falla", "#F87171"),
+])
+def test_generator_words(alexa, fields, word, word_es, dot):
+    english = alexa.build_apl_datasource(dict(SOLAR, **fields))
+    spanish = alexa.build_apl_datasource(dict(SOLAR, **fields), True)
+    assert (english["mepWord"], english["mepDot"]) == (word, dot)
+    assert spanish["mepWord"] == word_es
+
+
+def test_the_rest_of_the_spanish(alexa):
+    sunrise, _ = alexa.sun_times(DAY)
+    data = alexa.build_apl_datasource(SOLAR, True, now=sunrise + 3600)
+    assert data["autoText"] == "Control automático activado"
+    assert alexa.build_apl_datasource(dict(SOLAR, autoGenEnabled=False), True)["autoText"] == "Control automático desactivado"
+    assert (data["arrayTitle"], data["southLabel"], data["westLabel"]) == ("Solar por arreglo", "Sur", "Oeste")
+    english = alexa.build_apl_datasource(SOLAR, now=sunrise + 3600)
+    assert english["autoText"] == "Auto control on" and english["arrayTitle"] == "Solar by array"
+
+
+def test_answer_and_events_use_the_palette(alexa):
+    _, sunset = alexa.sun_times(DAY)
+    alexa.current_time = lambda: sunset + 3600
+    assert payload(ask(alexa, "GetEventsIntent"))["sky"] == "#070B1A"
+    assert payload(ask(alexa, "AskAgentIntent", query="anything"))["secondary"] == "#8B95A5"
 
 
 # --- events -------------------------------------------------------------------------------
@@ -260,11 +506,11 @@ def test_events_are_the_last_five_newest_first(alexa):
     assert payload(ask(alexa, "GetEventsIntent"))["events"] == ["e0", "e1", "e2", "e3", "e4"]
 
 
-@pytest.mark.parametrize("locale,title,empty", [("en-US", "RECENT EVENTS", "No recent events."),
-                                                ("es-US", "EVENTOS RECIENTES", "No hay eventos recientes.")])
+@pytest.mark.parametrize("locale,title,empty", [("en-US", "Recent events", "No recent events."),
+                                                ("es-US", "Eventos recientes", "No hay eventos recientes.")])
 def test_events_with_nothing_to_list(alexa, locale, title, empty):
     p = payload(ask(alexa, "GetEventsIntent", locale=locale))
-    assert p == {"title": title, "events": [empty]}
+    assert p["title"] == title and p["events"] == [empty]
 
 
 # --- agent questions -------------------------------------------------------------------------
@@ -273,15 +519,15 @@ def test_an_answer_shows_the_question_the_answer_and_the_strip(alexa):
     body = ask(alexa, "AskWhyIntent", query="did it start")
     p = payload(body)
     assert p["question"] == "why did it start" and p["answer"] == "The battery is fine."
-    assert p["statusLine"] == "85% · 52.46 V · 600 W"
-    assert p["genLine"] == "MEP-803A: AUTO · KUBOTA: OFF"
+    assert p["statusLine"] == "85% · 52.5 V · 600 W"
+    assert p["genLine"] == "MEP-803A: Auto · Kubota: Off"
     assert body["response"]["outputSpeech"]["text"] == "The battery is fine."
 
 
 def test_the_strip_in_spanish(alexa):
     p = payload(ask(alexa, "AskPorQueIntent", locale="es-US", query="arrancó"))
     assert p["question"] == "por qué arrancó"
-    assert p["genLine"] == "MEP-803A: EN AUTOMATICO · KUBOTA: APAGADO"
+    assert p["genLine"] == "MEP-803A: Automático · Kubota: Apagado"
 
 
 @pytest.mark.parametrize("locale,line", [("en-US", "Answer sent to your phone"),
@@ -289,7 +535,7 @@ def test_the_strip_in_spanish(alexa):
 def test_a_202_shows_the_dashboard_and_the_line(alexa, locale, line):
     alexa.agent = (202, "")
     body = ask(alexa, "AskAgentIntent", locale=locale, query="anything")
-    assert payload(body)["notice"] == line and payload(body)["totalSolar"] == 600
+    assert payload(body)["notice"] == line and payload(body)["solarKw"] == "0.6 kW"
     assert payload(body)["mepThresholds"]
     assert "shouldEndSession" not in body["response"]
 

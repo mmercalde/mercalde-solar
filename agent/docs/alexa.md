@@ -207,24 +207,112 @@ as `DEBUG SessionEnded`. That is where to look when Alexa reports an invalid res
 
 ## Screens
 
-Live since 2026-11-06 (`901e9c3`), on devices that report `Alexa.Presentation.APL`.
-Rendering was verified in the console simulator on Hub Landscape Medium and Hub Round
-Small on 2026-11-06 at 3:35 pm. Labels are Spanish when the locale is `es-*`.
+A "sky clock and energy flow" scene, on devices that report `Alexa.Presentation.APL`. All
+of it is built in `vps/alexa_solar.py`. Labels are Spanish when the locale is `es-*`, and
+there are no emoji in any document or datasource string: Pi5 events and agent replies can
+contain them, so `no_emoji()` strips them first.
 
 | Screen | Shown for | What's on it |
 |---|---|---|
-| Dashboard | Launch, help, battery, status, solar, generators | Battery, solar, each generator's state and thresholds, auto control |
+| Scene | Launch, help, battery, status, solar, generators | The sky, battery, flows and generators below |
 | Events | "What happened" | The last 5 events, newest first, or "No recent events." |
 | Agent answer | `AskAgentIntent` and every `Ask*` prefix intent | The question, the answer, then a status strip: battery %, volts, solar W, generator states |
-| Dashboard plus a line | An agent 202 | "Answer sent to your phone" / "Respuesta enviada a tu teléfono" |
+| Scene plus a line | An agent 202 | "Answer sent to your phone" / "Respuesta enviada a tu teléfono" |
 
-- **Round (Echo Spot):** APL `when` on `viewport.shape == 'round'` switches the dashboard
-  to one centered column with 15% padding: big battery %, volts, solar W, and two small
-  generator lines. Events and answers stay one screen, with the same padding when round.
-- **Thresholds:** "Start 52.0 V · Stop 57.0 V" / "Prende 52.0 V · Apaga 57.0 V" under each
-  generator, from a `GET /config` with no parameters, which writes nothing. That response
-  also holds the Telegram token, so the VPS takes only the two voltages and never logs it.
-  If `/config` can't be read, the line is left off.
+Events and answers use the same day and night colors with no scene and no card fills.
+
+### Data fields
+
+From the Pi5's `/data`, the same fields as its dashboard unless noted:
+
+| Item | Fields |
+|---|---|
+| Battery | `batterySOC`, `batteryVoltage` |
+| Solar | `mppt80PVPower`, `southArrayPVPower`, `westArrayPVPower` |
+| House load | `acPower1` + `acPower2` |
+| Generator state | `mepState`, `kubotaState`, `mepFault`, `kubotaFault`, `mep803aAction`, `kubotaAction`, `mep803aMode`, `kubotaMode` |
+| Charge power while running | MEP: `chargePower1` + `chargePower2` (the XW Pros, IDs 10 and 12). Kubota: `chargePower3` (the XW+, ID 11) |
+| Auto control | `autoGenEnabled` |
+| Thresholds | `startVoltage` and `stopVoltage` from a `GET /config` with no parameters |
+
+**Charge power comes from the charger code only.** The history database doesn't store these
+fields, so the mapping hasn't been checked against a real run.
+
+**House load hides during a run.** While any generator counts as running, the
+battery-to-house flow and its label are hidden, because the inverters' AC output is then the
+generator's. That's the same rule as the agent's `load_w`. A Kubota-only run might read
+correctly, since the XW+ doesn't invert to the house, but the screen takes the safe side.
+
+The state word follows the same order as the dashboard's `chipFor()`:
+
+| State | When | Dot and word |
+|---|---|---|
+| Fault | `ags_fault`, or the fault flag | `#F87171` "Fault" / "Falla" |
+| Running | Action 9, starting or stopping, or Mode On with nothing turning yet | `#34D399` "Running" / "Prendido" |
+| Auto | Mode 2 | `#FBBF24` "Auto" / "Automático" |
+| Off | Mode 0, or anything else | `#5B6575` "Off" / "Apagado" |
+
+The green flow appears only at Action 9, not for the rest of "Running".
+
+`GET /config` writes nothing. Its response also holds the Telegram token, so the VPS takes
+only the two voltages and never logs it. If it can't be read, the line is left off.
+
+### The sky
+
+Sunrise and sunset are computed on the VPS with NOAA's general formula for lat 32.36, lon
+-117.06, timezone America/Tijuana, with no outside call. It agreed with Open-Meteo to within
+a minute on 2026-11-06 (6:09 am, 4:54 pm against 4:53 pm). The VPS runs Python 3.8, so the
+timezone comes from `pytz` there and `zoneinfo` elsewhere. Times are 12-hour: "3:41 pm",
+"3:41 p. m."
+
+Day runs from the exact sunrise to the exact sunset, both included. The sun's position is
+the fraction of daylight elapsed, mapped onto the semicircle: left horizon, top, right
+horizon. Python computes x and y per layout and passes them in the datasource. At night
+there's no sun or arc, only the moon and 7 stars at fixed places.
+
+### Colors
+
+| Item | Day | Night |
+|---|---|---|
+| Sky | `#13306B` | `#070B1A` |
+| Ground | `#081734` | `#04060D` |
+| Horizon | `#2B4A8A` | `#1C2440` |
+| Secondary text | `#AFC3E8` | `#8B95A5` |
+
+Stars `#CBD5E1`, moon `#E5E7EB` with a sky-colored disc cut out. Sun `#FBBF24`, with a glow
+at 25% opacity and a dashed path at 50%. Battery by SOC: 70 and up `#34D399`, 40 to 69
+`#FBBF24`, under 40 `#F87171`. Big numbers are weight 300.
+
+### Flows
+
+AVG paths with round caps and moving dashes (`strokeDashOffset` bound to `elapsedTime`,
+faster with more power). A device that doesn't animate shows static dashes.
+
+| Flow | Color | Label | Shown when |
+|---|---|---|---|
+| Sun to battery | Amber `#FBBF24` | Total solar kW | Daytime and solar over 50 W |
+| Battery to house | Blue `#60A5FA` | House kW | No generator running |
+| Generator to battery | Green `#34D399` | That generator's charge kW | That generator at Action 9 |
+
+The sun's flow bends around the big numbers, entering the battery on the sun's side.
+
+### Spot and Show
+
+APL `when` on `viewport.shape == 'round'` picks the layout. One scene graphic per layout
+stretches over the screen, and text sits on top in `vw` and `vh`, so sizes scale with it.
+
+- **Echo Spot (round):** horizon at 58%. Time at the top, then the sun or moon on the sky,
+  and the battery icon just above the horizon. Below it are the big % and volts, generator
+  dots with names on the left, and the house with its kW on the right. "Sunset 4:54 pm" /
+  "Atardecer 4:54 p. m." at night becomes "Sunrise…" / "Amanecer…". No thresholds or arrays.
+- **Echo Show (every landscape Hub size):** a full-width panorama with the ground on the
+  bottom 38% and a sun arc across 60% of the width. The big %, volts and battery icon stand
+  slightly left of center on the horizon. Ground left has each generator's dot, name,
+  right-aligned status and thresholds; ground right has "Solar by array". Top-left is auto
+  control, top-right the time, bottom center the sunset or sunrise.
+
+### Session and limits
+
 - **Session:** read answers leave `shouldEndSession` unset, which keeps the session open
   without the mic, and the documents set `idleTimeout` to 60000 (60 s). Launch and help
   keep the mic open, as they invite a reply. A read that has nothing to show ends the
@@ -234,15 +322,15 @@ Small on 2026-11-06 at 3:35 pm. Labels are Spanish when the locale is `es-*`.
 - **Time limit:** Alexa allows about 8 s and the agent can use 5 to 7. The figures after an
   agent answer use a short timeout and are skipped after 6.5 s, so an answer can appear
   without its strip. If the Pi5 is out on a 202, the answer screen carries the line instead.
-- **Size:** Alexa's limit is 24 KB per response. Dashboards are about 5.5 KB. Agent text is
-  clipped to 2,000 characters on screen, and Alexa still speaks all of it.
+- **Size:** Alexa's limit is 24 KB per response. Agent text is clipped to 2,000 characters
+  on screen, and Alexa still speaks all of it.
 
 **The datasource key is `solar`, never `payload`.** APL reserves `payload` as a
 `mainTemplate` parameter: it binds the whole datasources object, so `${payload.batterySOC}`
-looks for `datasources.batterySOC` and every value renders blank, with no error. Cards
-and page backgrounds are `Frame`s with `backgroundColor` and `borderRadius`; CSS-style
-`"style"` strings aren't APL. `agent/tests/test_vps_screens.py` fails on either mistake,
-but no test renders APL, so a layout change needs the simulator.
+looks for `datasources.batterySOC` and every value renders blank, with no error. An AVG
+graphic can't read the datasource either, so everything it needs is passed as a parameter on
+its `VectorGraphic`. `agent/tests/test_vps_screens.py` checks all of this, but no test
+renders APL, so a layout change needs the simulator.
 
 ## Deploying the backend
 
