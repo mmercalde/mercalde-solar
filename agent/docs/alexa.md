@@ -6,11 +6,13 @@ English or Spanish.
 ```
 "Alexa, ask solar agent why the Kubota started"
 "Alexa, ask solar agent how much solar we made yesterday"
-"Alexa, pregúntale a casa solar por qué arrancó el Kubota"
+"Alexa, pregúntale a agente solar por qué arrancó el Kubota"
 ```
 
-The invocation names are **"solar agent"** (English) and **"casa solar"** (Spanish).
-The skill is listed as "solar system".
+The invocation names are **"solar agent"** (English) and **"agente solar"** (Spanish:
+es-US and es-MX). The Spanish name was "casa solar" until 2026-11-06, 2:22 pm; it changed
+because "Alexa, abre casa solar" didn't open the skill on the Echo. The skill is listed
+as "solar system".
 
 Alexa+ is turned off on the Echo, because its hand-off line says "Alexa exit" aloud.
 
@@ -92,7 +94,7 @@ Every intent below has a slot named `query` of type `AMAZON.SearchQuery`.
 | `AskShouldIntent` | `should {query}` | should |
 | `AskAgentIntent` | `ask the agent {query}`, `ask agent {query}`, `question for the agent {query}`, `what does the agent say about {query}`, `agent {query}`, `to tell me {query}`, `tell me {query}`, `about {query}`, `if {query}`, `whether {query}`, `to explain {query}`, `to check {query}` | none |
 
-### Spanish (invocation "casa solar": "pregúntale a casa solar …")
+### Spanish (invocation "agente solar": "pregúntale a agente solar …")
 
 | Intent | Sample utterances | VPS prefix |
 |---|---|---|
