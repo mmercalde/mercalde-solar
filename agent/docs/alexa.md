@@ -144,6 +144,16 @@ want to start/stop the {generator}?" / "¿Estás seguro que quieres prender/apag
 `SetGeneratorAutoIntent`, `EnableAutoGenIntent` and `DisableAutoGenIntent` don't check
 for confirmation.
 
+### A manual start can stop straight away
+
+A generator started by voice or from the dashboard is stopped by the Pi5's auto loop as
+soon as the battery is at or above that generator's stop voltage. **This is intended:**
+the owner chose to keep it on 2026-11-06. On that day a voice start of the Kubota at 3:18
+pm began stopping 37 s later, at 57.25 V against a 57.0 V stop.
+
+The check runs in `check_auto_generator()`, so it needs auto control enabled. It only
+applies to a generator commanded on: an exercise runs in Mode 2, and the AGS ends it.
+
 ### Which generator
 
 Since 2026-11-06, about 1:50 pm, the `generator` slot is required, with an elicitation
@@ -165,8 +175,22 @@ The `GeneratorType` slot type in the console:
 | en-US | `kubota`, `mep`, `all` |
 | es-US, es-MX | `kubota`, `mep`, `todos` |
 
-Spanish synonyms: los dos, ambos, todos los generadores, ambos generadores, el militar,
-mep 803, el kubota, generador kubota.
+Spanish synonyms, es-US and es-MX:
+
+| Canonical | Synonyms |
+|---|---|
+| `kubota` | el kubota, generador kubota, kubota generador, cobalta, la cobalta, el cobalta, cobalto, el cobalto, generador cobalta, cubota, el cubota, cu bota, kubo |
+| `mep` | el militar, mep 803, eme e pe, emep, el eme, eme |
+| `todos` | los dos, ambos, todos los generadores, ambos generadores |
+
+**Alexa hears "Kubota" as "cobalta" in Spanish** (seen in the voice history on
+2026-11-06), which is why those synonyms are there. They live only in the console:
+`get_gen_id` doesn't know "cobalta", so it works because entity resolution returns
+`kubota`. A "cobalta" that didn't resolve would get "¿Cuál generador…?" and move nothing.
+
+Spanish samples without the article, for the same reason: "prende/arranca/enciende
+generador {generator}" and "apaga/para generador {generator}". Verified in the es-MX
+simulator: it resolved to `kubota`, and the confirmation was denied.
 
 The VPS has its own backstop in these four handlers. It takes the name from the slot's
 entity resolution when the status code is `ER_SUCCESS_MATCH`, otherwise the raw value.
@@ -174,12 +198,51 @@ entity resolution when the status code is `ER_SUCCESS_MATCH`, otherwise the raw 
 it says "Which generator, the Kubota or the MEP?" /
 "¿Cuál generador, el Kubota o el MEP?", keeps the session open and moves nothing.
 "unknown" never reaches speech, and a leading "the " or "el " is dropped from the name
-before it's spoken ("start the kubota?"). `get_gen_id` still gets the name as it came. `DENIED` still gets "OK, I won't", since a refusal needs
-no name. The `CONFIRMED`-only rule is unchanged, and Auto still doesn't check for
+before it's spoken ("start the kubota?"). `get_gen_id` still gets the name as it came.
+`DENIED` still gets "OK, I won't", since a refusal needs no name. The `CONFIRMED`-only rule is unchanged, and Auto still doesn't check for
 confirmation.
 
 `SessionEndedRequest` gets an empty response, and its reason and error go to the log
 as `DEBUG SessionEnded`. That is where to look when Alexa reports an invalid response.
+
+## Screens
+
+Live since 2026-11-06 (`901e9c3`), on devices that report `Alexa.Presentation.APL`.
+Rendering was verified in the console simulator on Hub Landscape Medium and Hub Round
+Small on 2026-11-06 at 3:35 pm. Labels are Spanish when the locale is `es-*`.
+
+| Screen | Shown for | What's on it |
+|---|---|---|
+| Dashboard | Launch, help, battery, status, solar, generators | Battery, solar, each generator's state and thresholds, auto control |
+| Events | "What happened" | The last 5 events, newest first, or "No recent events." |
+| Agent answer | `AskAgentIntent` and every `Ask*` prefix intent | The question, the answer, then a status strip: battery %, volts, solar W, generator states |
+| Dashboard plus a line | An agent 202 | "Answer sent to your phone" / "Respuesta enviada a tu teléfono" |
+
+- **Round (Echo Spot):** APL `when` on `viewport.shape == 'round'` switches the dashboard
+  to one centered column with 15% padding: big battery %, volts, solar W, and two small
+  generator lines. Events and answers stay one screen, with the same padding when round.
+- **Thresholds:** "Start 52.0 V · Stop 57.0 V" / "Prende 52.0 V · Apaga 57.0 V" under each
+  generator, from a `GET /config` with no parameters, which writes nothing. That response
+  also holds the Telegram token, so the VPS takes only the two voltages and never logs it.
+  If `/config` can't be read, the line is left off.
+- **Session:** read answers leave `shouldEndSession` unset, which keeps the session open
+  without the mic, and the documents set `idleTimeout` to 60000 (60 s). Launch and help
+  keep the mic open, as they invite a reply. A read that has nothing to show ends the
+  session as before.
+- **No screen, and confirmations:** devices without a screen behave as they did, with no
+  extra calls to the Pi5. Confirmation dialogs get no screen and keep the mic open.
+- **Time limit:** Alexa allows about 8 s and the agent can use 5 to 7. The figures after an
+  agent answer use a short timeout and are skipped after 6.5 s, so an answer can appear
+  without its strip. If the Pi5 is out on a 202, the answer screen carries the line instead.
+- **Size:** Alexa's limit is 24 KB per response. Dashboards are about 5.5 KB. Agent text is
+  clipped to 2,000 characters on screen, and Alexa still speaks all of it.
+
+**The datasource key is `solar`, never `payload`.** APL reserves `payload` as a
+`mainTemplate` parameter: it binds the whole datasources object, so `${payload.batterySOC}`
+looks for `datasources.batterySOC` and every value renders blank, with no error. Cards
+and page backgrounds are `Frame`s with `backgroundColor` and `borderRadius`; CSS-style
+`"style"` strings aren't APL. `agent/tests/test_vps_screens.py` fails on either mistake,
+but no test renders APL, so a layout change needs the simulator.
 
 ## Deploying the backend
 
