@@ -71,6 +71,7 @@ def speech(response):
 
 
 GUARDED = ["StartGeneratorIntent", "StopGeneratorIntent", "SetGeneratorOffIntent"]
+ALL_FOUR_NAMES = GUARDED + ["SetGeneratorAutoIntent"]
 
 
 @pytest.mark.parametrize("intent", GUARDED)
@@ -131,9 +132,28 @@ def test_auto_is_left_as_it_was(alexa):
     assert alexa.calls == [f"{alexa.ESP8266_GEN_URL}?id=50&state=2"]
 
 
+@pytest.mark.parametrize("name,expected", [
+    ("kubota", 50), ("the kubota", 50), ("el kubota", 50), ("generador kubota", 50),
+    ("Kubota", 50), ("mep", 51), ("mep 803", 51), ("MEP-803A", 51), ("military", 51),
+    ("el militar", 51), ("all", "all"), ("both", "all"), ("todos", "all"), ("ambos", "all"),
+    ("los dos", "all"), ("todos los generadores", "all"), ("ambos generadores", "all"),
+    ("small generator", None), ("install", None), ("tall", None), ("wall", None),
+    ("dos", None), ("unknown", None), ("the blue one", None), ("", None),
+])
+def test_get_gen_id_matches_whole_words(alexa, name, expected):
+    assert alexa.get_gen_id(name) == expected
+
+
+@pytest.mark.parametrize("intent", ALL_FOUR_NAMES)
+def test_a_small_generator_asks_and_moves_nothing(alexa, intent):
+    response = say(alexa, intent, "CONFIRMED", "small generator")
+    assert alexa.calls == []
+    assert speech(response) == "Which generator, the Kubota or the MEP?"
+
+
 # --- which generator ---------------------------------------------------------------
 
-ALL_FOUR = GUARDED + ["SetGeneratorAutoIntent"]
+ALL_FOUR = ALL_FOUR_NAMES
 WHICH = {"en-US": "Which generator, the Kubota or the MEP?",
          "es-US": "¿Cuál generador, el Kubota o el MEP?",
          "es-MX": "¿Cuál generador, el Kubota o el MEP?"}

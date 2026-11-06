@@ -138,8 +138,8 @@ en-US and es-US), so voice start and stop work today. Alexa asks "Are you sure y
 to start/stop the {generator}?" / "¿Estás seguro que quieres prender/apagar el
 {generator}?" and sends the final status. The handler returns no dialog directive.
 
-**Off needs its prompt added in the console, in both locales, with the same delegation.**
-Until then a voice Off changes nothing and only gets "Please confirm: …".
+Off has its confirmation prompt in the console too, in en-US, es-US and es-MX (added
+2026-11-06).
 
 `SetGeneratorAutoIntent`, `EnableAutoGenIntent` and `DisableAutoGenIntent` don't check
 for confirmation.
@@ -158,9 +158,20 @@ Samples added at the same time:
 
 **Any change to the es-US model must also be copied to es-MX (Clone).**
 
+The `GeneratorType` slot type in the console:
+
+| Locale | Canonical values |
+|---|---|
+| en-US | `kubota`, `mep`, `all` |
+| es-US, es-MX | `kubota`, `mep`, `todos` |
+
+Spanish synonyms: los dos, ambos, todos los generadores, ambos generadores, el militar,
+mep 803, el kubota, generador kubota.
+
 The VPS has its own backstop in these four handlers. It takes the name from the slot's
 entity resolution when the status code is `ER_SUCCESS_MATCH`, otherwise the raw value.
-If neither maps to a generator, it says "Which generator, the Kubota or the MEP?" /
+`get_gen_id` matches whole words, so "small" isn't "all". If neither maps to a generator,
+it says "Which generator, the Kubota or the MEP?" /
 "¿Cuál generador, el Kubota o el MEP?", keeps the session open and moves nothing.
 "unknown" never reaches speech. `DENIED` still gets "OK, I won't", since a refusal needs
 no name. The `CONFIRMED`-only rule is unchanged, and Auto still doesn't check for

@@ -5,6 +5,7 @@ Alexa Solar Flask Backend V3
 - No more timing guesswork - ESP8266 handles entire stop→auto sequence
 - stop_and_auto() is now a simple single call with longer timeout
 """
+import re
 from flask import Flask, request, jsonify
 import requests
 import threading
@@ -209,12 +210,13 @@ def get_battery_color(soc):
         return "#FF6B6B"
 
 def get_gen_id(generator_name):
+    # Whole words only: "small" and "install" must not count as "all".
     name = generator_name.lower()
-    if 'kubota' in name:
+    if re.search(r'\bkubota\b', name):
         return 50
-    elif 'mep' in name or 'military' in name or 'militar' in name:
+    elif re.search(r'\b(mep|military|militar)\b', name):
         return 51
-    elif 'all' in name or 'both' in name or 'todos' in name or 'ambos' in name:
+    elif re.search(r'\b(all|both|todos|ambos|los dos)\b', name):
         return 'all'
     return None
 
