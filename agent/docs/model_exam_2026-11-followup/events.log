@@ -1,0 +1,52 @@
+2026-11-05 19:50:53 run start: 0 of 44 already done; snapshot /tmp/abexam-followup/history.sqlite; warning None
+2026-11-05 19:52:05 1/44 case:kubota_twice:1 71.3 s model_error FAIL
+2026-11-05 19:52:35 run end: the real agent logged: Nov 05 19:52:05 kamrui python[1748531]: 2026-11-05 19:52:05,477 ERROR __main__ model unavailable for question: llama-server unreachable at http://127.0.0.1:8080/v1/chat/completions: 500 Server Error: Internal Server Error for url: http://127.0.0.1:8080/v1/chat/completions; 1 of 44 done
+2026-11-05 19:54:48 run start: 0 of 44 already done; snapshot /tmp/abexam-followup/history.sqlite; warning None
+2026-11-05 19:56:03 1/44 case:kubota_twice:1 75.3 s model PASS
+2026-11-05 19:57:00 2/44 case:kubota_twice:2 26.2 s model PASS
+2026-11-05 19:57:50 3/44 case:kubota_twice:3 19.8 s model PASS
+2026-11-05 19:58:51 4/44 case:runtime_24h:1 30.8 s model PASS
+2026-11-05 19:59:52 5/44 case:runtime_24h:2 30.8 s model PASS
+2026-11-05 20:00:53 6/44 case:runtime_24h:3 30.9 s model PASS
+2026-11-05 20:01:23 7/44 case:tonight_plan:1 0.0 s python_plan PASS
+2026-11-05 20:01:53 8/44 case:tonight_plan:2 0.0 s python_plan PASS
+2026-11-05 20:02:23 9/44 case:tonight_plan:3 0.0 s python_plan PASS
+2026-11-05 20:03:58 10/44 case:voltage_at_247:1 64.3 s model PASS
+2026-11-05 20:04:43 11/44 case:voltage_at_247:2 15.1 s model PASS
+2026-11-05 20:05:28 12/44 case:voltage_at_247:3 14.6 s model PASS
+2026-11-05 20:06:10 13/44 case:last_night_low:1 11.1 s model PASS
+2026-11-05 20:06:58 14/44 case:last_night_low:2 18.5 s model PASS
+2026-11-05 20:07:47 15/44 case:last_night_low:3 18.6 s model PASS
+2026-11-05 20:08:42 16/44 case:tonight_shortfall:1 24.6 s model PASS
+2026-11-05 20:09:36 17/44 case:tonight_shortfall:2 22.8 s model PASS
+2026-11-05 20:10:29 18/44 case:tonight_shortfall:3 23.1 s model PASS
+2026-11-05 20:11:20 19/44 case:worst_month_this_year:1 20.7 s model PASS
+2026-11-05 20:12:19 20/44 case:worst_month_this_year:2 28.3 s model PASS
+2026-11-05 20:13:17 21/44 case:worst_month_this_year:3 28.3 s model PASS
+2026-11-05 20:14:07 22/44 case:solar_yesterday_kwh:1 19.5 s model FAIL
+2026-11-05 20:14:59 23/44 case:solar_yesterday_kwh:2 22.0 s model FAIL
+2026-11-05 20:15:48 24/44 case:solar_yesterday_kwh:3 18.5 s model FAIL
+2026-11-05 20:16:37 25/44 case:solar_yesterday_kwh_es:1 18.7 s model PASS
+2026-11-05 20:17:26 26/44 case:solar_yesterday_kwh_es:2 18.7 s model PASS
+2026-11-05 20:18:16 27/44 case:solar_yesterday_kwh_es:3 19.2 s model PASS
+2026-11-05 20:19:02 28/44 q:en:Is a generator running right now, and what is the house 16.1 s model
+2026-11-05 20:19:51 29/44 q:en:How much is each solar array making right now? 18.5 s model
+2026-11-05 20:20:40 30/44 q:en:What was the lowest battery voltage last night? 18.6 s model
+2026-11-05 20:21:54 31/44 q:en:How many hours have the generators run this week, and h 44.5 s model
+2026-11-05 20:22:49 32/44 q:en:Will a generator run tonight, and what's the shortfall? 24.1 s model
+2026-11-05 20:23:37 33/44 q:en:Why is the MEP start set where it is right now? 18.2 s model
+2026-11-05 20:24:33 34/44 q:en:Why did the MEP fail to start last night? 25.3 s model
+2026-11-05 20:25:20 35/44 q:en:What was the battery voltage at 3:15 am on January 5, 2 16.7 s model
+2026-11-05 20:26:00 36/44 q:en:How cloudy is it going to be tomorrow? 10.1 s model
+2026-11-05 20:27:15 37/44 q:en:How many more years will this battery pack last? 44.4 s model
+2026-11-05 20:28:14 38/44 q:en:Which month this year had the worst solar? 28.7 s model
+2026-11-05 20:29:00 39/44 q:es:¿Cuál es el voltaje de la batería ahora? 15.9 s model
+2026-11-05 20:29:49 40/44 q:es:¿Cuántos kWh de solar produjimos ayer? 18.7 s model
+2026-11-05 20:30:57 41/44 q:es:¿Qué inversores y generadores tenemos instalados? 37.1 s model
+2026-11-05 20:31:43 42/44 q:es:¿Cuántos amperios-hora le quedan a la batería? 16.5 s model
+2026-11-05 20:33:43 43/44 q:es:¿Cuál fue el último cambio de los umbrales del generado 89.4 s model_error
+2026-11-05 20:34:13 run end: the real agent logged: Nov 05 20:33:43 kamrui python[1748531]: 2026-11-05 20:33:43,487 ERROR __main__ model unavailable: llama-server unreachable at http://127.0.0.1:8080/v1/chat/completions: 500 Server Error: Internal Server Error for url: http://127.0.0.1:8080/v1/chat/completions; 43 of 44 done
+2026-11-05 23:03:15 run start: 42 of 44 already done; snapshot /tmp/abexam-followup/history.sqlite; warning None
+2026-11-05 23:06:35 43/44 q:es:¿Cuál fue el último cambio de los umbrales del generado 200.4 s model
+2026-11-05 23:07:25 44/44 q:es:¿Cómo están el voltaje y la frecuencia de CA en cada in 19.3 s model
+2026-11-05 23:07:25 run end: finished; 44 of 44 done

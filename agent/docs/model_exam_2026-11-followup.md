@@ -74,7 +74,7 @@ The two scores aren't like for like either. On the three cases both exams graded
 | 8 | Voltage in January 2024 | Right | No sample within 5 minutes | Right |
 | 9 | Cloud tomorrow | Right | 3% | Right, matches the tool |
 | 10 | Years left on the pack | Right | 28.2 years, cycling dominant, calendar 29.7 | Right, matches the tool |
-| 12 | Voltaje ahora | No answer | 56.2 V, "no sample exactly at 8:28 pm" | **Improved**, though the wording is awkward and it used the history tool |
+| 12 | Voltaje ahora | No answer | 56.2 V, "no sample exactly at 8:28 pm" | **Improved**, though the wording is awkward and it used `get_voltage_at` rather than `get_status` |
 | 14 | Inversores y generadores | Right | Lists both, plus the Magnum MS4048 | Right; the tool lists the Magnum under the Kubota |
 | 15 | Amperios-hora restantes | Right | 1706 Ah | Right; live value, not re-checked |
 | 16 | Último cambio de umbrales | Right | 31 Oct 9:14 pm, refused, owner had changed them | Right, same answer, 200.4 s alone |
@@ -95,7 +95,7 @@ The two scores aren't like for like either. On the three cases both exams graded
 
 **These were not read timeouts.** I checked, because a queued request running past `llm.py`'s 180 s was a reasonable explanation. Both log lines read `500 Server Error: Internal Server Error`. The requests were being processed at once, not queued, and the longest had run for 80 s. Since the switch, the only "timed out" lines in the agent's log are two unrelated Telegram polling timeouts.
 
-**The agent can't do this to itself.** Ticks and questions share `self.lock` (`agent.py:620`, `agent.py:1050`), so the agent never sends two model requests at once. The collision needs a second client: the exam, the unlocked prompt-cache warm-up at startup (`agent.py:1466`), or anything else calling port 8080. Outside an exam the warm-up is the only such client in the code.
+**The agent can't do this to itself.** Ticks and questions share `self.lock` (`agent.py:620`, `agent.py:1050`), so the agent never sends two model requests at once. The collision needs a second client: the exam, the unlocked prompt-cache warm-up at startup (`agent.py:1466`), or anything else calling port 8080. `llm_probe.py` is another, when someone runs it by hand.
 
 ### How close one question gets
 
