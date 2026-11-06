@@ -646,3 +646,10 @@ def test_no_new_case_is_a_plan_question():
         if case["id"] != "tonight_plan":
             assert not agentmod.is_plan_question(case["question"]), case["id"]
 
+
+
+def test_a_daylight_reply_in_spanish_can_carry_the_caveat():
+    truth = {"shortfall_wh": 4421, "needed_wh": 18574, "available_wh": 14153, "sun_up": True}
+    assert eval_cases.grade_shortfall(
+        "El déficit es de 4.4 kWh. No es definitivo: la regla de recarga decide a las 9:00 pm.",
+        truth)[0]

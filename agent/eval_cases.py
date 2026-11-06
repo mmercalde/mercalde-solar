@@ -244,11 +244,8 @@ NO_SHORTFALL_RE = re.compile(
     r"\b(?:shortfall|deficit)\b[^.]{0,30}\b(?:none|zero|0)\b", re.IGNORECASE)
 
 
-# The tool's "Not final" sentence, in the words a reply might put it in. A time
-# on its own is not enough: "a generator starts at 9 pm" is not that caveat.
-NOT_FINAL_RE = re.compile(
-    r"\bnot\s+(?:yet\s+)?(?:the\s+)?final\b|\bshrink|\bstill\s+to\s+come\b|"
-    r"\bdecid(?:es?|ed)\b[^.]{0,40}\b\d{1,2}(?::\d\d)?\s*[ap]\.?m\b", re.IGNORECASE)
+# The same test answer() uses to decide whether to add the sentence.
+NOT_FINAL_RE = toolsmod.NOT_FINAL_RE
 
 
 def _grade_shortfall_figure(reply, truth):

@@ -14,6 +14,7 @@ It never sends chargeRate, maxRuntime or cooldown, and it never calls
 
 import json
 import logging
+import re
 import time
 from datetime import datetime, timedelta
 
@@ -539,6 +540,47 @@ def _not_final(cfg, now, left, shortfall):
         return (" Not final: solar still to come will cover load and charge the "
                 f"pack, so this will likely shrink; {decides}")
     return f" Not final: {decides}"
+
+
+# Whether a reply already carries the verdict's "Not final" sentence, in the words
+# it might put it in. A time on its own is not enough: "a generator starts at 9 pm"
+# is not that caveat.
+NOT_FINAL_RE = re.compile(
+    r"\bnot\s+(?:yet\s+)?(?:the\s+)?final\b|\bshrink|\bstill\s+to\s+come\b|"
+    r"\bdecid(?:es?|ed)\b[^.]{0,40}\b\d{1,2}(?::\d\d)?\s*[ap]\.?m\b|"
+    r"\bno\s+es\s+(?:\w+\s+)?definitiv|\bprovisional|"
+    r"\bdecide\b[^.]{0,40}\b\d{1,2}(?::\d\d)?\s*[ap]\.?\s?m\b", re.IGNORECASE)
+NOT_FINAL_ES = "No es definitivo: la regla de recarga decide a las {when}."
+NOT_FINAL_SOLAR_ES = ("No es definitivo: la energía solar que aún falta cubrirá el "
+                      "consumo y cargará la batería, así que esto probablemente se "
+                      "reducirá; la regla de recarga decide a las {when}.")
+
+
+def _not_final_sentence(verdict, lang):
+    """The verdict's "Not final" sentence, in the language of the reply."""
+    sentence = verdict[verdict.index("Not final"):]
+    if lang != "es":
+        return sentence
+    when = re.search(r"decides at (.+?)\.?$", sentence).group(1)
+    template = NOT_FINAL_SOLAR_ES if "shrink" in sentence else NOT_FINAL_ES
+    return template.format(when=when)
+
+
+def with_not_final(reply, calls, lang=None):
+    """The reply, with the verdict's "Not final" sentence if it left that out.
+
+    Telling the model to quote the verdict in full did not work: on the morning
+    of 2026-11-06 it gave a 4.4 kWh shortfall as settled, with the sun up and the
+    sentence in the result it had just read. So the sentence is Python's to add.
+    The last forecast is the one the reply was written from.
+    """
+    forecasts = [r for name, _, r in calls if name == "get_load_forecast"]
+    night = forecasts[-1].get("tonight") if forecasts and isinstance(forecasts[-1], dict) else None
+    verdict = (night or {}).get("verdict") or ""
+    if "Not final" not in verdict or NOT_FINAL_RE.search(reply):
+        return reply
+    log.info("the reply left out the verdict's caveat; adding it")
+    return f"{reply} {_not_final_sentence(verdict, lang)}"
 
 
 def tonight_energy(model, cfg, now, floor_v=52.0):

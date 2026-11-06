@@ -1069,7 +1069,10 @@ class Agent:
             except LLMError as e:
                 log.error("model unavailable for question: %s", e)
                 return ask_server.FALLBACK.get(lang or "en")
-        return (reply or "").strip() or ask_server.FALLBACK.get(lang or "en")
+        reply = (reply or "").strip()
+        if not reply:
+            return ask_server.FALLBACK.get(lang or "en")
+        return toolsmod.with_not_final(reply, tools.calls, lang)
 
     # Ceiling for the injected plan block, in characters. It rides in the
     # uncacheable tail of every question, so it pays full prefill each time;

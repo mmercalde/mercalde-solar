@@ -1315,3 +1315,16 @@ def test_the_history_tool_claims_how_much_today_or_yesterday_first():
     opening = _description("get_history")[:120]
     for word in ("how much solar", "today or yesterday", "kWh", 'window="yesterday"'):
         assert word in opening
+
+
+def test_the_verdicts_tonight_energy_writes_become_the_spanish_sentences(conn, cfg, monkeypatch):
+    """with_not_final reads the time and the form out of the real sentence."""
+    def spanish(when, deficit):
+        night = tonight_at(conn, cfg, monkeypatch, when, deficit, left=12345)
+        return tools.with_not_final("Déficit.", [("get_load_forecast", {}, {"tonight": night})], "es")
+    assert spanish((2026, 11, 5, 12, 0), SHORT) == (
+        "Déficit. No es definitivo: la energía solar que aún falta cubrirá el consumo y "
+        "cargará la batería, así que esto probablemente se reducirá; la regla de recarga "
+        "decide a las 9:00 pm.")
+    assert spanish((2026, 11, 5, 12, 0), SPARE) == (
+        "Déficit. No es definitivo: la regla de recarga decide a las 9:00 pm.")

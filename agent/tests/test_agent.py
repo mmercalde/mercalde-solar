@@ -1073,3 +1073,85 @@ def test_the_guard_records_a_lowered_stop(a, cfg):
     a.guard.note_write({"mep_start": 52.0, "mep_stop": 56.0,
                         "kub_start": 52.0, "kub_stop": 56.0})
     assert a.guard.lowered_stops() == {}
+
+
+# --- The "Not final" sentence ------------------------------------------------
+#
+# 2026-11-06, 7:38 am: asked about tonight with the sun up, the model gave the
+# 4.4 kWh shortfall as settled, having read the sentence and been told to quote it.
+
+LONG = ("Not final: solar still to come will cover load and charge the pack, so this "
+        "will likely shrink; the top-up rule decides at 9:00 pm.")
+SHORT = "Not final: the top-up rule decides at 9:00 pm."
+LONG_ES = ("No es definitivo: la energía solar que aún falta cubrirá el consumo y cargará "
+           "la batería, así que esto probablemente se reducirá; la regla de recarga "
+           "decide a las 9:00 pm.")
+SHORT_ES = "No es definitivo: la regla de recarga decide a las 9:00 pm."
+
+
+def answering(a, monkeypatch, reply, *results):
+    """answer() with the model replying `reply` after these get_load_forecast results."""
+    def run_model(system, user, tools, **kw):
+        tools.calls.extend(("get_load_forecast", {"hours": 24}, r) for r in results)
+        return reply, None
+    monkeypatch.setattr(a, "run_model", run_model)
+    monkeypatch.setattr(a, "plan_context", lambda: None)
+
+
+def forecast(caveat=""):
+    return {"tonight": {"verdict": f"Shortfall of 4.4 kWh: the pack holds 14.2 kWh. {caveat}".strip()}}
+
+
+@pytest.mark.parametrize("lang,caveat,added", [("en", LONG, LONG), ("en", SHORT, SHORT),
+                                               (None, LONG, LONG),
+                                               ("es", LONG, LONG_ES), ("es", SHORT, SHORT_ES)])
+def test_a_reply_that_leaves_out_the_caveat_has_it_added(a, monkeypatch, lang, caveat, added):
+    answering(a, monkeypatch, "The shortfall is 4.4 kWh.", forecast(caveat))
+    assert a.answer("what's the shortfall?", lang) == f"The shortfall is 4.4 kWh. {added}"
+
+
+@pytest.mark.parametrize("lang,reply", [
+    ("en", f"The shortfall is 4.4 kWh. {LONG}"),
+    ("en", "The shortfall is 4.4 kWh, but that is not final."),
+    ("en", "The shortfall is 4.4 kWh for now, and the top-up rule decides at 9:00 pm."),
+    ("es", f"El déficit es de 4.4 kWh. {LONG_ES}"),
+    ("es", "El déficit es de 4.4 kWh, pero no es definitivo."),
+    ("es", "El déficit es de 4.4 kWh; la regla decide a las 9:00 pm."),
+])
+def test_a_reply_that_already_says_it_is_left_alone(a, monkeypatch, lang, reply):
+    answering(a, monkeypatch, reply, forecast(LONG))
+    assert a.answer("what's the shortfall?", lang) == reply
+
+
+def test_a_time_alone_is_not_the_caveat(a, monkeypatch):
+    answering(a, monkeypatch, "A generator starts at 3:04 am.", forecast(SHORT))
+    assert a.answer("will it run?", "en").endswith(SHORT)
+
+
+def test_a_verdict_with_no_caveat_adds_nothing(a, monkeypatch):
+    answering(a, monkeypatch, "The shortfall is 4.4 kWh.", forecast())
+    assert a.answer("what's the shortfall?", "en") == "The shortfall is 4.4 kWh."
+
+
+def test_an_answer_that_never_read_the_forecast_adds_nothing(a, monkeypatch):
+    def run_model(system, user, tools, **kw):
+        tools.calls.append(("get_history", {"window": "today"}, {"verdict": SHORT}))
+        return "We made 3 kWh.", None
+    monkeypatch.setattr(a, "run_model", run_model)
+    monkeypatch.setattr(a, "plan_context", lambda: None)
+    assert a.answer("how much solar?", "en") == "We made 3 kWh."
+
+
+def test_the_last_forecast_is_the_one_that_counts(a, monkeypatch):
+    answering(a, monkeypatch, "The shortfall is 4.4 kWh.", forecast(SHORT), forecast())
+    assert a.answer("what's the shortfall?", "en") == "The shortfall is 4.4 kWh."
+
+
+def test_a_forecast_that_failed_adds_nothing(a, monkeypatch):
+    answering(a, monkeypatch, "I could not get the forecast.", {"error": "result too large"})
+    assert a.answer("what's the shortfall?", "en") == "I could not get the forecast."
+
+
+def test_an_empty_reply_is_still_the_apology_alone(a, monkeypatch):
+    answering(a, monkeypatch, "", forecast(LONG))
+    assert a.answer("what's the shortfall?", "es") == agentmod.ask_server.FALLBACK["es"]
