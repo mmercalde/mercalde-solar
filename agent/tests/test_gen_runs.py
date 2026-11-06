@@ -3,6 +3,8 @@
 import json
 from datetime import datetime, timedelta
 
+import pytest
+
 import history
 
 
@@ -16,7 +18,7 @@ def ts_at(cfg, day, hhmm):
 
 def feed(conn, cfg, start_ts, minutes, gen="mep", mode=2, other_running=False,
          v_start=52.0, v_end=55.0, pre=2, post=2, amps=55.0, load_w=1200,
-         on_reason=None):
+         on_reason=None, start_origin=None):
     """Write a minute-resolution run: `pre` stopped samples, the run, `post` stopped."""
     total = pre + minutes + post
     for i in range(total):
@@ -41,6 +43,9 @@ def feed(conn, cfg, start_ts, minutes, gen="mep", mode=2, other_running=False,
             # old world: a sample taken before the register was read.
             "mepOnReason": on_reason if gen == "mep" else None,
             "kubotaOnReason": on_reason if gen == "kubota" else None,
+            # Who the Pi5 says asked. It holds this only while the run lasts.
+            "mep803aStartOrigin": start_origin if gen == "mep" and running else None,
+            "kubotaStartOrigin": start_origin if gen == "kubota" and running else None,
         }
         history.record_sample(conn, data, ts=ts)
     return start_ts
@@ -461,3 +466,68 @@ def test_current_run_is_none_once_it_has_stopped(conn, cfg):
     feed(conn, cfg, start, 20, gen="kubota", on_reason="exercise")
     assert history.current_run(conn, "kubota",
                               now=start + 25 * 60) is None
+
+
+# --- Mode=On reads manual_on whoever wrote it -----------------------------------
+
+def kind_of(conn, cfg, **kw):
+    start = ts_at(cfg, "2026-09-15", "20:00")
+    feed(conn, cfg, start, 45, on_reason=kw.pop("on_reason", "manual_on"), **kw)
+    history.derive_gen_runs(conn, cfg)
+    return conn.execute("SELECT kind, start_origin FROM gen_runs").fetchone()
+
+
+def test_the_voltage_loops_start_is_auto_not_manual(conn, cfg):
+    row = kind_of(conn, cfg, start_origin="auto")
+    assert (row["kind"], row["start_origin"]) == ("auto", "auto")
+
+
+def test_the_voltage_loops_start_after_the_agent_raised_the_threshold_is_agent(conn, cfg):
+    start = ts_at(cfg, "2026-09-15", "20:00")
+    history.record_action(conn, "set_gen_thresholds",
+                          {"mep_start": cfg["default_start"] + 1.5, "kub_start": 52.0},
+                          1, "permitted", 54.0, 80, "allowed", ts=start - 3600)
+    assert kind_of(conn, cfg, start_origin="auto")["kind"] == "agent"
+
+
+def test_the_same_threshold_does_not_claim_the_owners_start(conn, cfg):
+    start = ts_at(cfg, "2026-09-15", "20:00")
+    history.record_action(conn, "set_gen_thresholds",
+                          {"mep_start": cfg["default_start"] + 1.5, "kub_start": 52.0},
+                          1, "permitted", 54.0, 80, "allowed", ts=start - 3600)
+    assert kind_of(conn, cfg, start_origin="manual")["kind"] == "manual"
+
+
+def test_with_no_origin_manual_on_stays_manual(conn, cfg):
+    """Every run before the Pi5 recorded it, and any start it didn't make."""
+    row = kind_of(conn, cfg, start_origin=None)
+    assert (row["kind"], row["start_origin"]) == ("manual", None)
+
+
+@pytest.mark.parametrize("reason,kind", [("exercise", "exercise"), ("contact_closed", "contact_closed"),
+                                         ("battery_soc_low", "battery_soc_low")])
+def test_any_other_reason_is_not_touched_by_an_origin(conn, cfg, reason, kind):
+    assert kind_of(conn, cfg, on_reason=reason, start_origin="auto")["kind"] == kind
+
+
+def test_an_origin_lost_in_the_first_minute_is_still_found(conn, cfg):
+    start = ts_at(cfg, "2026-09-15", "20:00")
+    feed(conn, cfg, start, 45, on_reason="manual_on", start_origin="auto")
+    conn.execute("UPDATE samples SET mep_start_origin=NULL WHERE ts=?", (start,))
+    conn.commit()
+    history.derive_gen_runs(conn, cfg)
+    assert conn.execute("SELECT kind FROM gen_runs").fetchone()["kind"] == "auto"
+
+
+def test_an_existing_database_gains_the_columns(tmp_path):
+    import sqlite3
+    path = str(tmp_path / "old.sqlite")
+    old = sqlite3.connect(path)
+    old.execute("CREATE TABLE samples (ts INTEGER PRIMARY KEY, mep_action INTEGER)")
+    old.execute("CREATE TABLE gen_runs (id INTEGER PRIMARY KEY, gen TEXT, start_ts INTEGER)")
+    old.commit(); old.close()
+    conn = history.connect(path)
+    have = {r["name"] for r in conn.execute("PRAGMA table_info(samples)")}
+    assert {"mep_start_origin", "kub_start_origin"} <= have
+    assert "start_origin" in {r["name"] for r in conn.execute("PRAGMA table_info(gen_runs)")}
+    conn.close()

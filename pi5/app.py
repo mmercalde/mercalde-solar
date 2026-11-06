@@ -303,6 +303,8 @@ system_data = {
     # None, not "not_on": until the register has been read once, the reason
     # is unknown, and unknown is not the same as "nothing started it".
     "mepOnReason": None, "kubotaOnReason": None,
+    "mep803aStartOrigin": None, "kubotaStartOrigin": None,
+    "mep803aStartOriginAt": None, "kubotaStartOriginAt": None,
     "mepOffReason": None, "kubotaOffReason": None,
     "mepExercise": None, "kubotaExercise": None,
     "mepState": None, "kubotaState": None,
@@ -318,10 +320,14 @@ auto_gen_state = {
     "mep803a_cooldown_until": 0, "mep803a_low_voltage_since": None,
     "mep803a_stopping": False, "mep803a_starting": False,
     "mep803a_start_requested": None,
+    "mep803a_start_origin": None, "mep803a_start_origin_at": None,
+    "mep803a_origin_seen_running": False,
     "kubota_running": False, "kubota_start_time": None,
     "kubota_cooldown_until": 0, "kubota_low_voltage_since": None,
     "kubota_stopping": False, "kubota_starting": False,
     "kubota_start_requested": None,
+    "kubota_start_origin": None, "kubota_start_origin_at": None,
+    "kubota_origin_seen_running": False,
     "last_event": "", "events": []
 }
 auto_gen_lock = threading.Lock()
@@ -549,7 +555,36 @@ def restore_kubota_chargers():
     log_event(f"Kubota charger restored @ {rate}%")
 
 # --- Generator Control ---
-def start_generator(gen_type):
+# Who asked for a start. Both callers write Mode=On, so the AGS reports manual_on
+# for each and the agent could not tell them apart. Bookkeeping only: nothing here
+# decides anything or writes to Modbus. Both helpers need auto_gen_lock held.
+def _set_start_origin(state, key, origin, now):
+    """Record who started it. The first wins: pressing start during an automatic
+    run does not make it a manual one."""
+    if state[f"{key}_start_origin"] is None:
+        state[f"{key}_start_origin"] = origin
+        state[f"{key}_start_origin_at"] = now
+        state[f"{key}_origin_seen_running"] = False
+
+def _clear_ended_origin(state, key, action, now):
+    """Forget the origin once the run is over, however it ended, or if the start
+    never came to anything. It follows the AGS's Action, not stop_generator(),
+    because a run also ends by /setgen state=0 or 2, a fault, or the AGS itself."""
+    if state[f"{key}_start_origin"] is None:
+        return
+    if action == 9:
+        state[f"{key}_origin_seen_running"] = True
+    elif action is None or action == 255:
+        return                  # a failed read says nothing about the generator
+    elif action in (0, 1, 2, 3, 4, 11):
+        return                  # still in its start sequence
+    elif (state[f"{key}_origin_seen_running"]
+            or now - state[f"{key}_start_origin_at"] > GEN_START_TIMEOUT_S):
+        state[f"{key}_start_origin"] = None
+        state[f"{key}_start_origin_at"] = None
+        state[f"{key}_origin_seen_running"] = False
+
+def start_generator(gen_type, origin="manual"):
     if gen_type == "mep803a":
         with auto_gen_lock:
             if auto_gen_state["mep803a_starting"] or auto_gen_state["mep803a_stopping"]:
@@ -565,6 +600,7 @@ def start_generator(gen_type):
                 with auto_gen_lock:
                     auto_gen_state["mep803a_start_time"] = time.time()
                     auto_gen_state["mep803a_start_requested"] = time.time()
+                    _set_start_origin(auto_gen_state, "mep803a", origin, time.time())
                 log_event("MEP-803A start requested (Mode=On written)")
             return success
         finally:
@@ -586,6 +622,7 @@ def start_generator(gen_type):
                 with auto_gen_lock:
                     auto_gen_state["kubota_start_time"] = time.time()
                     auto_gen_state["kubota_start_requested"] = time.time()
+                    _set_start_origin(auto_gen_state, "kubota", origin, time.time())
                 log_event("Kubota start requested (Mode=On written)")
             return success
         finally:
@@ -723,7 +760,7 @@ def check_auto_generator():
                 elif current_time - auto_gen_state["mep803a_low_voltage_since"] >= 60:
                     if not auto_gen_state["mep803a_starting"] and not auto_gen_state["mep803a_stopping"]:
                         logger.info(f"AUTO: Starting MEP-803A (voltage {voltage}V <= {mep_cfg['startVoltage']}V)")
-                        threading.Thread(target=start_generator, args=("mep803a",), daemon=True).start()
+                        threading.Thread(target=start_generator, args=("mep803a", "auto"), daemon=True).start()
                         auto_gen_state["mep803a_low_voltage_since"] = None
                     else:
                         logger.info("AUTO: MEP-803A sequence in progress, skipping start trigger")
@@ -764,7 +801,7 @@ def check_auto_generator():
                 elif current_time - auto_gen_state["kubota_low_voltage_since"] >= 60:
                     if not auto_gen_state["kubota_starting"] and not auto_gen_state["kubota_stopping"]:
                         logger.info(f"AUTO: Starting Kubota (voltage {voltage}V <= {kub_cfg['startVoltage']}V)")
-                        threading.Thread(target=start_generator, args=("kubota",), daemon=True).start()
+                        threading.Thread(target=start_generator, args=("kubota", "auto"), daemon=True).start()
                         auto_gen_state["kubota_low_voltage_since"] = None
                     else:
                         logger.info("AUTO: Kubota sequence in progress, skipping start trigger")
@@ -1266,6 +1303,13 @@ def poll_modbus():
             new_data["lastUpdate"] = f"{(elapsed//3600)%24:02d}:{(elapsed//60)%60:02d}:{elapsed%60:02d}"
             new_data["clockTime"] = datetime.now().strftime("%H:%M:%S")
             new_data["pollErrors"] = errors
+
+            with auto_gen_lock:
+                for key in ("mep803a", "kubota"):
+                    _clear_ended_origin(auto_gen_state, key, new_data.get(f"{key}Action"),
+                                        time.time())
+                    new_data[f"{key}StartOrigin"] = auto_gen_state[f"{key}_start_origin"]
+                    new_data[f"{key}StartOriginAt"] = auto_gen_state[f"{key}_start_origin_at"]
 
             with data_lock:
                 system_data.update(new_data)
@@ -3992,7 +4036,7 @@ def set_gen_endpoint():
         return "Invalid state", 400
     if state == 1:
         gen = "mep803a" if slave_id == AGS_MEP803A_ID else "kubota"
-        threading.Thread(target=start_generator, args=(gen,), daemon=True).start()
+        threading.Thread(target=start_generator, args=(gen, "manual"), daemon=True).start()
         return f"{'MEP-803A' if slave_id == AGS_MEP803A_ID else 'Kubota'} start initiated", 200
     success = modbus.write_single_register_16(MODBUS_HOST, MODBUS_PORT, slave_id, REG_GENERATOR_MODE, state)
     if success:

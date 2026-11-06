@@ -65,6 +65,10 @@ SAMPLE_FIELDS = [
     # "voltage dropped below 52.0 V" about a 6:49 PM exercise at 59.4 V.
     ("mepOnReason", "mep_on_reason"),
     ("kubotaOnReason", "kub_on_reason"),
+    # Who the Pi5 says asked for the start, "auto" or "manual". Its two callers
+    # both write Mode=On, so the AGS says manual_on for both.
+    ("mep803aStartOrigin", "mep_start_origin"),
+    ("kubotaStartOrigin", "kub_start_origin"),
     ("autoGenEnabled", "auto_gen_enabled"),
     ("lastUpdate", "last_update"),
 ]
@@ -79,6 +83,7 @@ CREATE TABLE IF NOT EXISTS samples (
   mep_action INTEGER, kub_action INTEGER, mep_mode INTEGER, kub_mode INTEGER,
   mep_ags_online INTEGER, kub_ags_online INTEGER,
   mep_on_reason TEXT, kub_on_reason TEXT,
+  mep_start_origin TEXT, kub_start_origin TEXT,
   poll_errors INTEGER, auto_gen_enabled INTEGER, last_update TEXT
 );
 
@@ -141,6 +146,7 @@ CREATE TABLE IF NOT EXISTS gen_runs (
   -- rather than taken on faith. NULL for runs derived before the register
   -- was read, and for any minute the read failed.
   on_reason TEXT,
+  start_origin TEXT,
   solo INTEGER, kind TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS gen_runs_key ON gen_runs (gen, start_ts);
@@ -182,7 +188,10 @@ MIGRATIONS = [("gen_runs", "load_w", "REAL"),
               ("gen_runs", "gross_attr_w", "REAL"),
               ("gen_runs", "on_reason", "TEXT"),
               ("samples", "mep_on_reason", "TEXT"),
-              ("samples", "kub_on_reason", "TEXT")]
+              ("samples", "kub_on_reason", "TEXT"),
+              ("gen_runs", "start_origin", "TEXT"),
+              ("samples", "mep_start_origin", "TEXT"),
+              ("samples", "kub_start_origin", "TEXT")]
 
 
 def migrate(conn):
@@ -352,6 +361,7 @@ def purge_samples(conn, now=None):
 # on-reason column).
 GENS = {"mep": ("mep_action", "kub_action", "mep_mode", "mep_on_reason"),
         "kubota": ("kub_action", "mep_action", "kub_mode", "kub_on_reason")}
+ORIGIN_COL = {"mep": "mep_start_origin", "kubota": "kub_start_origin"}
 
 
 # The AGS's Generator On Reason, as pi5/app.py spells it in /data, mapped to
@@ -371,6 +381,8 @@ REASON_KIND = {
 }
 # The reason that still needs the threshold check to become agent-or-auto.
 REASON_VOLTAGE = "dc_voltage_low"
+# The reason the AGS gives for any Mode=On, which the Pi5's voltage loop writes too.
+REASON_MANUAL = "manual_on"
 # Read but carrying no information about a run: the register says the
 # generator is not on, which cannot be why it started.
 REASON_NONE = ("not_on",)
@@ -484,14 +496,20 @@ def _is_exercise(gen, start_ts, duration_min, cfg):
 
 
 def _classify(conn, gen, start_ts, duration_min, mode_at_start, cfg,
-              on_reason=None):
+              on_reason=None, start_origin=None):
     """What kind of run this was, from the AGS's reason where there is one.
 
     The reason is the AGS's own answer and beats every inference here. Before
     it was recorded, a run was classified by when it started and how long it
     lasted, which files any evening exercise as an ordinary auto-start and
     lets it into the charge-rate and fuel figures it should be out of.
+
+    Mode=On reads manual_on whoever wrote it, so there the Pi5's record of who
+    asked decides: its voltage loop is a low-voltage start like any other. With
+    no record, as for every run before it existed, manual_on stays manual.
     """
+    if on_reason == REASON_MANUAL and start_origin == "auto":
+        on_reason = REASON_VOLTAGE
     if on_reason and on_reason not in REASON_NONE:
         kind = REASON_KIND.get(on_reason)
         if kind:
@@ -541,7 +559,7 @@ def derive_gen_runs(conn, cfg, since=None):
             start_from = (row["t"] or 0) + 1
         rows = conn.execute(
             f"SELECT ts, {col} AS act, {other_col} AS other, {mode_col} AS mode, "
-            f"{reason_col} AS on_reason, "
+            f"{reason_col} AS on_reason, {ORIGIN_COL[gen]} AS start_origin, "
             "battery_v, batt_current, batt_power, ac_power1, ac_power2 "
             "FROM samples WHERE ts >= ? ORDER BY ts",
             (start_from,)).fetchall()
@@ -557,8 +575,13 @@ def derive_gen_runs(conn, cfg, since=None):
                                 # minute. It is a start reason, so a later
                                 # minute cannot improve on it.
                                 "on_reason": r["on_reason"],
+                                "start_origin": r["start_origin"],
                                 "currents": [], "loads": [], "gross": [],
                                 "gross_paired": []}
+                # The Pi5 holds it until the run ends, and a restart loses it,
+                # so the first minute that has one is the one to keep.
+                if open_run["start_origin"] is None:
+                    open_run["start_origin"] = r["start_origin"]
                 if r["other"] == GEN_RUNNING:
                     open_run["solo"] = False
                 # Only samples taken while this gen was running describe its charge rate.
@@ -603,7 +626,7 @@ def _close_run(conn, cfg, gen, run, stop_row):
     gross_w = sum(run["gross"]) / len(run["gross"]) if run["gross"] else None
     on_reason = run.get("on_reason")
     kind = _classify(conn, gen, run["start_ts"], duration_min, run["mode"], cfg,
-                     on_reason=on_reason)
+                     on_reason=on_reason, start_origin=run.get("start_origin"))
     # Priced at close, from this engine's share of the gross. Imported here
     # rather than at the top because fuel.py is about what a run cost and
     # history.py is about what happened; the dependency runs one way only.
@@ -617,11 +640,11 @@ def _close_run(conn, cfg, gen, run, stop_row):
     cur = conn.execute(
         "INSERT OR IGNORE INTO gen_runs "
         "(gen, start_ts, stop_ts, duration_min, start_v, stop_v, rate_v_per_h, "
-        "rate_a, load_w, gross_w, gross_attr_w, fuel_gal, on_reason, solo, kind) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "rate_a, load_w, gross_w, gross_attr_w, fuel_gal, on_reason, start_origin, "
+        "solo, kind) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (gen, run["start_ts"], stop_row["ts"], round(duration_min, 2), start_v, stop_v,
          rate_v_per_h, rate_a, load_w, gross_w, gross_attr_w, fuel_gal,
-         on_reason, int(run["solo"]), kind))
+         on_reason, run.get("start_origin"), int(run["solo"]), kind))
     return cur.rowcount
 
 
