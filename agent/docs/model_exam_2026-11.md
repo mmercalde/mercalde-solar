@@ -327,7 +327,7 @@ All of these were Michael's decisions except where marked as mine.
 5. **`solar_wh`:** both models reported it as kWh in Spanish. The number check can't see units.
 6. **`llama_gpu_check`:** its 1 GB GTT floor can't fail on this box, where idle GTT is 1.69 GB. It returned rc=0 at 18:53 with `llama-server` stopped. Only the journal warning can still trip it, so its comment about 89 MiB at idle is out of date.
 7. **Exam snapshot:** "now" questions that use `get_voltage_at` hit the end of the snapshot and get no sample.
-8. **`/data` clock:** `lastUpdate` read 17:02:37 at 19:48:30 on KAMRUI. It was advancing, so the data isn't stale, but that clock is about 2 h 46 min behind. Not investigated.
+8. **`/data` clock:** `lastUpdate` read 17:02:37 at 19:48:30 on KAMRUI. It was advancing, so the data isn't stale, but that clock is about 2 h 46 min behind. Not investigated. **Dropped on 2026-11-06, not a bug:** `lastUpdate` is uptime by design (`pi5/app.py`, in `poll_modbus`), and `clockTime` is the clock.
 
 ## Verdict
 
