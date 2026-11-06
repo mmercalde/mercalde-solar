@@ -56,8 +56,9 @@ Alexa only answers when asked; a late answer goes to Telegram, not to the Echo.
 
 ## Developer console changes
 
-The backend is deployed, but the skill has no `AskAgentIntent` until these steps
-are done. Do them for **both** en-US and es-US; the interaction model is per locale.
+Done by the owner on 2026-11-06: added in en-US and es-US and built at 9:36 am,
+then tested in the simulator. These are the steps, should the intent need redoing.
+The interaction model is per locale, so do them for **both**.
 
 Open the skill, listed as "solar system", at
 <https://developer.amazon.com/alexa/console/ask>.
@@ -83,13 +84,16 @@ each sample below starts with a verb phrase.
 
 ### 4. Sample utterances
 
+These are the ones the skill actually has. "tell me {query}", "dime {query}" and a
+bare "pregunta {query}" are left out on purpose, so they can't steal utterances from
+the existing intents. Don't add them back.
+
 English:
 
 ```
 ask the agent {query}
 ask agent {query}
 question for the agent {query}
-tell me {query}
 what does the agent say about {query}
 agent {query}
 ```
@@ -99,8 +103,7 @@ Spanish (add these under the `es-US` locale):
 ```
 pregunta al agente {query}
 preguntale al agente {query}
-pregunta {query}
-dime {query}
+pregúntale al agente {query}
 que dice el agente sobre {query}
 agente {query}
 ```
@@ -162,5 +165,5 @@ ssh root@45.32.131.224 "curl -s -X POST http://127.0.0.1:5000/alexa \
 
 ## Verified
 
-See `alexa_agent_2026-11-06.md`. Every case there used a fake request body sent to
-the VPS. No real Alexa request has reached the intent until the console steps are done.
+See `alexa_agent_2026-11-06.md`. The cases there used fake request bodies sent to
+the VPS. The owner then tested the built intent in the Alexa simulator.

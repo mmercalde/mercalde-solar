@@ -2,7 +2,7 @@
 
 2026-11-06. Brief: `claude-code-brief-alexa-agent.md`. How it works and how to run it: `alexa.md`.
 
-The backend is live on both machines: KAMRUI on `88dcb3c`, and the VPS file from `1e2b80d`. **Alexa can't reach it yet, because the skill has no `AskAgentIntent`;** that's the console step below, which is the owner's. Every test here used a fake request body sent to the VPS, not a real Alexa request. All 1,238 tests pass.
+The backend is live on both machines: KAMRUI on `88dcb3c`, and the VPS file from `1e2b80d`. **The owner added `AskAgentIntent` in the console, in en-US and es-US, built at 9:36 am, and tested it in the simulator.** The tests in this report used fake request bodies sent to the VPS and came before that. All 1,238 tests pass.
 
 ## Live file against the repo
 
@@ -12,7 +12,7 @@ The backend is live on both machines: KAMRUI on `88dcb3c`, and the VPS file from
 |---|---|
 | `AGENT_ASK_URL`, timeouts, fallback and later strings, `ask_agent()` | Yes |
 | The `AskAgentIntent` branch | Yes |
-| One extra sentence in `AMAZON.HelpIntent`, English and Spanish | **No: the only other change.** Until the console step is done, Help offers something that doesn't work yet. |
+| One extra sentence in `AMAZON.HelpIntent`, English and Spanish | **No: the only other change.** |
 
 Backup: `/var/www/alexa_solar.py.bak-2025-12-15`, same checksum. To roll back, restore it and run `systemctl restart alexa-solar`. Nothing needed rolling back.
 
@@ -84,34 +84,21 @@ It answers "Sorry, I couldn't get the events." / "Lo siento, no pude obtener los
 - **If the VPS times out at 7 s,** Alexa speaks the fallback, and a late answer can still arrive on Telegram.
 - **"No plan has been recorded yet"** is English only, in either language. It can only appear before the first tick, and it isn't new.
 
-## Console steps, for the owner
+## Console
 
-For **both** en-US and es-US, in the skill listed as "solar system":
+Done by the owner on 2026-11-06, for both en-US and es-US: intent `AskAgentIntent`, slot `query` of type `AMAZON.SearchQuery`, built at 9:36 am and tested in the simulator. The owner's test results aren't recorded here.
 
-1. Build → Interaction Model → Intents → **+ Add Intent** → custom intent named exactly `AskAgentIntent`.
-2. Add a slot named exactly `query`, type **`AMAZON.SearchQuery`**.
-3. Add the sample utterances.
+Utterances actually used:
 
-   en-US:
-   ```
-   ask the agent {query}
-   ask agent {query}
-   question for the agent {query}
-   tell me {query}
-   what does the agent say about {query}
-   agent {query}
-   ```
-   es-US:
-   ```
-   pregunta al agente {query}
-   preguntale al agente {query}
-   pregunta {query}
-   dime {query}
-   que dice el agente sobre {query}
-   agente {query}
-   ```
-4. Save Model → Build Model.
-5. Test: "Alexa, ask my solar to ask the agent what the plan is tonight" and "Alexa, pregúntale a casa solar al agente cuál es el plan de esta noche".
+| en-US | es-US |
+|---|---|
+| `ask the agent {query}` | `pregunta al agente {query}` |
+| `ask agent {query}` | `preguntale al agente {query}` |
+| `question for the agent {query}` | `pregúntale al agente {query}` |
+| `what does the agent say about {query}` | `que dice el agente sobre {query}` |
+| `agent {query}` | `agente {query}` |
+
+These differ from the list the brief and `alexa.md` first gave. "tell me {query}", "dime {query}" and bare "pregunta {query}" were left out on purpose, so they can't steal utterances from the existing intents. "pregúntale al agente {query}" with the accent was added.
 
 ## Docs
 
