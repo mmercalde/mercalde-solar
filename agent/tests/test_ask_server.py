@@ -221,3 +221,173 @@ def test_recent_actions_are_newest_first_and_capped(cfg, conn):
     rows = history.recent_actions(conn, limit=5)
     assert len(rows) == 5
     assert [r["reason"] for r in rows] == [f"reason {i}" for i in (7, 6, 5, 4, 3)]
+
+
+# --- deliver=telegram: Alexa gives up after 8 s, and Gemma takes 15 to 30 --------
+
+@pytest.fixture
+def sent(monkeypatch):
+    """What reached Telegram, with an event for tests to wait on."""
+    box = {"texts": [], "arrived": threading.Event()}
+
+    def send(cfg, text, **kw):
+        box["texts"].append(text)
+        box["arrived"].set()
+        return True
+    monkeypatch.setattr(ask_server.telegram, "send", send)
+    return box
+
+
+def serving(cfg, db, handler):
+    srv = ask_server.serve(cfg, handler, lambda c: {}, host="127.0.0.1", port=0, db_path=db)
+    assert srv is not None
+    return srv
+
+
+def deliver(srv, text="how much solar?", lang="en", wait_s=0.5):
+    return post(srv, "/ask", {"text": text, "lang": lang, "deliver": "telegram", "wait_s": wait_s})
+
+
+def test_answered_within_the_wait_is_a_200_and_nothing_goes_to_telegram(cfg, db, sent):
+    srv = serving(cfg, db, lambda t, l: "31.6 kWh.")
+    try:
+        assert deliver(srv, wait_s=5) == (200, "31.6 kWh.")
+        time.sleep(0.1)
+        assert sent["texts"] == []
+    finally:
+        srv.shutdown()
+
+
+def test_answered_late_is_a_202_and_then_telegram(cfg, db, sent):
+    release = threading.Event()
+
+    def slow(text, lang):
+        release.wait(5)
+        return "31.6 kWh <yesterday>."
+    srv = serving(cfg, db, slow)
+    try:
+        started = time.time()
+        assert deliver(srv, text="how much & when?", wait_s=0.1) == (202, ask_server.LATER["en"])
+        assert time.time() - started < 2, "the caller must not wait for the answer"
+        assert sent["texts"] == []
+        release.set()
+        assert sent["arrived"].wait(5)
+        assert sent["texts"] == ["🎙 how much &amp; when?\n31.6 kWh &lt;yesterday&gt;."]
+    finally:
+        srv.shutdown()
+
+
+def test_a_late_spanish_question_is_answered_in_spanish(cfg, db, sent):
+    release = threading.Event()
+    asked = []
+
+    def slow(text, lang):
+        asked.append(lang)
+        release.wait(5)
+        return "Ayer 31.6 kWh."
+    srv = serving(cfg, db, slow)
+    try:
+        status, body = deliver(srv, text="¿cuánto ayer?", lang="es", wait_s=0.1)
+        assert (status, body) == (202, ask_server.LATER["es"])
+        release.set()
+        assert sent["arrived"].wait(5)
+        assert asked == ["es"]
+        assert sent["texts"] == ["🎙 ¿cuánto ayer?\nAyer 31.6 kWh."]
+    finally:
+        srv.shutdown()
+
+
+@pytest.mark.parametrize("lang", ["en", "es"])
+def test_a_failure_after_the_wait_sends_the_fallback_and_hangs_nothing(cfg, db, sent, lang):
+    release = threading.Event()
+
+    def broken(text, lang):
+        release.wait(5)
+        raise RuntimeError("the model fell over")
+    srv = serving(cfg, db, broken)
+    try:
+        assert deliver(srv, lang=lang, wait_s=0.1)[0] == 202
+        release.set()
+        assert sent["arrived"].wait(5)
+        assert sent["texts"] == [f"🎙 how much solar?\n{ask_server.FALLBACK[lang]}"]
+        # and the server still answers
+        assert post(srv, "/ask", {"text": "again"})[0] == 200
+    finally:
+        srv.shutdown()
+
+
+def test_a_failure_within_the_wait_is_the_fallback_to_the_caller(cfg, db, sent):
+    def broken(text, lang):
+        raise RuntimeError("the model fell over")
+    srv = serving(cfg, db, broken)
+    try:
+        assert deliver(srv, wait_s=5) == (200, ask_server.FALLBACK["en"])
+        assert sent["texts"] == []
+    finally:
+        srv.shutdown()
+
+
+def test_an_empty_answer_is_the_fallback(cfg, db, sent):
+    srv = serving(cfg, db, lambda t, l: "")
+    try:
+        assert deliver(srv, wait_s=5) == (200, ask_server.FALLBACK["en"])
+    finally:
+        srv.shutdown()
+
+
+def test_a_telegram_that_fails_hangs_nothing(cfg, db, monkeypatch):
+    called = threading.Event()
+
+    def send(*a, **k):
+        called.set()
+        raise RuntimeError("no network")
+    monkeypatch.setattr(ask_server.telegram, "send", send)
+    srv = serving(cfg, db, lambda t, l: (time.sleep(0.3), "late")[1])
+    try:
+        assert deliver(srv, wait_s=0)[0] == 202
+        assert called.wait(5)
+        assert post(srv, "/ask", {"text": "again"})[0] == 200
+    finally:
+        srv.shutdown()
+
+
+def test_a_second_question_queues_behind_the_first_and_both_arrive(cfg, db, sent):
+    """Both go through the handler, which holds the agent's lock in real life."""
+    lock = threading.Lock()
+    done = []
+
+    def locked(text, lang):
+        with lock:
+            time.sleep(0.2)
+            done.append(text)
+            return f"answer to {text}"
+    srv = serving(cfg, db, locked)
+    try:
+        assert deliver(srv, text="one", wait_s=0)[0] == 202
+        assert deliver(srv, text="two", wait_s=0)[0] == 202
+        deadline = time.time() + 5
+        while len(sent["texts"]) < 2 and time.time() < deadline:
+            time.sleep(0.02)
+        assert sorted(sent["texts"]) == ["🎙 one\nanswer to one", "🎙 two\nanswer to two"]
+    finally:
+        srv.shutdown()
+
+
+@pytest.mark.parametrize("wait,expected", [(None, 0.0), ("soon", 0.0), (-3, 0.0), (2, 2.0), (500, 30)])
+def test_the_wait_is_bounded(wait, expected):
+    assert ask_server._wait_seconds(wait) == expected
+
+
+@pytest.mark.parametrize("extra", [{}, {"deliver": "sms", "wait_s": 0}, {"wait_s": 0}])
+def test_without_deliver_telegram_the_caller_waits_as_it_always_has(cfg, db, sent, extra):
+    def slow(text, lang):
+        time.sleep(0.3)
+        assert threading.current_thread().name != "ask-delivery"
+        return "the whole answer"
+    srv = serving(cfg, db, slow)
+    try:
+        assert post(srv, "/ask", {"text": "q", "lang": "en", **extra}) == (200, "the whole answer")
+        time.sleep(0.1)
+        assert sent["texts"] == []
+    finally:
+        srv.shutdown()
