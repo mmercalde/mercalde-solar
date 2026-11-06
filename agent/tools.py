@@ -304,7 +304,9 @@ SCHEMAS = [
                        "the projected time the pack reaches 52.0 V, and "
                        "`tonight`: what the pack holds against what the night "
                        "will take, with shortfall_wh and a plain verdict already "
-                       "worked out. Read a shortfall from there.",
+                       "worked out. Read a shortfall from there, and quote "
+                       "tonight.verdict in full, including any \"Not final\" "
+                       "sentence.",
         "parameters": {"type": "object", "properties": {
             "hours": {"type": "integer", "description": "How many hours ahead, 1 to 48."}},
             "required": ["hours"]}}},
@@ -513,12 +515,13 @@ def relabel_projection(projection):
     return out
 
 
-def _not_final(cfg, now, left):
+def _not_final(cfg, now, left, shortfall):
     """What the verdict adds while the top-up rule has yet to decide, or "".
 
     Before dawn tonight's window has been and gone, even though today's still
     lies ahead on the clock. `left` of None is a forecast or solar model that
-    cannot say, not an absence of sun.
+    cannot say, not an absence of sun. With no shortfall there is nothing for the
+    sun to shrink, so only the rule is left to mention.
     """
     st = sunmod.times(cfg, history.local_day(now, cfg))
     if not st or now < st[0]:
@@ -527,7 +530,7 @@ def _not_final(cfg, now, left):
     if not opens or now >= opens:
         return ""
     decides = f"the top-up rule decides at {history.clock(opens, cfg)}."
-    if now <= st[1] and left != 0:
+    if shortfall and now <= st[1] and left != 0:
         return (" Not final: solar still to come will cover load and charge the "
                 f"pack, so this will likely shrink; {decides}")
     return f" Not final: {decides}"
@@ -565,7 +568,7 @@ def tonight_energy(model, cfg, now, floor_v=52.0):
             "available_above_start_kwh": _kwh(available),
             "expected_draw_wh": draw, "expected_draw_kwh": _kwh(draw),
             "shortfall_wh": shortfall, "shortfall_kwh": _kwh(shortfall),
-            **solar, "verdict": verdict + _not_final(cfg, now, left)}
+            **solar, "verdict": verdict + _not_final(cfg, now, left, shortfall)}
 
 
 class Tools:

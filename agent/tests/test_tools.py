@@ -1017,19 +1017,31 @@ def tonight_at(conn, cfg, monkeypatch, when, deficit=SHORT, left=0):
     return night_tools(conn, cfg, deficit, left).get_load_forecast(24)["tonight"]
 
 
-@pytest.mark.parametrize("deficit,opening", [(SHORT, "Shortfall of 6.5 kWh"),
-                                             (SPARE, "No shortfall")])
-def test_at_midday_the_verdict_is_not_final_and_quotes_no_solar_figure(
-        conn, cfg, monkeypatch, deficit, opening):
+def test_sun_up_with_a_shortfall_says_it_will_likely_shrink(conn, cfg, monkeypatch):
     """A midday "shortfall" read as settled, while the plan held for the sun. The
     remaining solar is a field and not a sentence: expected_draw has already
     netted it against the load, so adding it to the pack counts it twice."""
-    night = tonight_at(conn, cfg, monkeypatch, (2026, 11, 5, 12, 0), deficit, left=12345)
+    night = tonight_at(conn, cfg, monkeypatch, (2026, 11, 5, 12, 0), SHORT, left=12345)
     assert night["remaining_solar_today_wh"] == 12345
     assert night["remaining_solar_today_kwh"] == 12.3
-    assert night["verdict"].startswith(opening)
+    assert night["verdict"].startswith("Shortfall of 6.5 kWh")
     assert night["verdict"].endswith(SUN_UP)
     assert "12.3" not in night["verdict"] and "12345" not in night["verdict"]
+
+
+def test_sun_up_with_no_shortfall_has_nothing_to_shrink(conn, cfg, monkeypatch):
+    night = tonight_at(conn, cfg, monkeypatch, (2026, 11, 5, 12, 0), SPARE, left=12345)
+    assert night["remaining_solar_today_wh"] == 12345
+    assert night["verdict"].startswith("No shortfall")
+    assert night["verdict"].endswith(SUN_DOWN)
+    assert "shrink" not in night["verdict"] and "solar" not in night["verdict"]
+
+
+def test_the_forecast_tells_the_model_to_quote_the_verdict_whole():
+    schema = next(s["function"] for s in tools.SCHEMAS
+                  if s["function"]["name"] == "get_load_forecast")
+    assert "quote tonight.verdict in full" in schema["description"]
+    assert "Not final" in schema["description"]
 
 
 def test_from_sunset_until_the_window_opens_only_the_rule_is_left(conn, cfg, monkeypatch):
