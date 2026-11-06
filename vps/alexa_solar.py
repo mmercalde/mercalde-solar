@@ -20,19 +20,31 @@ ESP8266_AUTOGEN_URL = "http://10.8.0.2:8080/autogen"
 
 # Solar agent on the KAMRUI, reached over WireGuard through the Pi5.
 AGENT_ASK_URL = "http://192.168.3.152:8090/ask"
-AGENT_TIMEOUT = 8
+# The agent answers within AGENT_WAIT_S or says it will use Telegram; Alexa gives
+# up after about 8 s, and Gemma takes 15 to 30.
+AGENT_WAIT_S = 5
+AGENT_TIMEOUT = 7
 
 AGENT_FALLBACK = {
     "en": "The solar agent is not answering right now.",
     "es": "El agente solar no responde en este momento.",
 }
 
+AGENT_LATER = {
+    "en": "I'm checking — I'll send the answer to your phone.",
+    "es": "Lo estoy revisando, te envío la respuesta al teléfono.",
+}
+
 
 def ask_agent(query, lang):
     """Put a free-form question to the solar agent. Returns speech text."""
     try:
-        resp = requests.post(AGENT_ASK_URL, json={"text": query, "lang": lang},
+        resp = requests.post(AGENT_ASK_URL,
+                             json={"text": query, "lang": lang, "deliver": "telegram",
+                                   "wait_s": AGENT_WAIT_S},
                              timeout=AGENT_TIMEOUT)
+        if resp.status_code == 202:
+            return AGENT_LATER[lang]
         if resp.status_code != 200:
             print(f"ERROR ask_agent: HTTP {resp.status_code}")
             return AGENT_FALLBACK[lang]
