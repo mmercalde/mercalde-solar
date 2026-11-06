@@ -3796,6 +3796,18 @@ def config_endpoint():
 
     return jsonify({"config": cfg_copy, "events": events})
 
+def _events_newest_first(state):
+    """log_event()'s list is oldest first. Caller holds auto_gen_lock."""
+    return list(reversed(state["events"]))
+
+# Alexa's "what happened" over WireGuard. Read-only. The list is in memory, so it
+# starts empty after a restart.
+@app.route('/events')
+def events_endpoint():
+    with auto_gen_lock:
+        events = _events_newest_first(auto_gen_state)
+    return jsonify({"events": events})
+
 # Solar agent on the KAMRUI. Read-only proxy so the dashboard can show an
 # agent status badge without the browser reaching across the LAN itself.
 AGENT_PLAN_URL = "http://192.168.3.152:8090/plan"
