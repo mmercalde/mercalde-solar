@@ -275,7 +275,9 @@ SCHEMAS = [
         "parameters": {"type": "object", "properties": {}, "required": []}}},
     {"type": "function", "function": {
         "name": "get_history",
-        "description": "Voltage, solar, load and battery energy out (each *_wh "
+        "description": "Answers how much solar or load today or yesterday, and "
+                       "how many kWh: get_history(window=\"yesterday\"). "
+                       "Voltage, solar, load and battery energy out (each *_wh "
                        "with a *_kwh beside it; quote the kWh) and generator "
                        "minutes over a span. For last night use "
                        "window=\"last_night\"; for tonight or since sunset use "
@@ -325,7 +327,10 @@ SCHEMAS = [
             "required": ["days"]}}},
     {"type": "function", "function": {
         "name": "get_monthly_summary",
-        "description": "Every calendar month of the record: solar kWh, load "
+        "description": "Whole calendar months only. Never for today, yesterday, "
+                       "last night or any single day, in kWh or otherwise: "
+                       "get_history answers those. Every calendar month of the "
+                       "record: solar kWh, load "
                        "kWh, net kWh, generator hours and gallons per "
                        "generator, minimum and maximum pack voltage, the best "
                        "and worst solar day, and how many days of data the "

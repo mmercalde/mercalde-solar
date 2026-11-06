@@ -1291,3 +1291,27 @@ def test_a_run_with_no_fuel_figure_is_owned_up_to(conn, cfg):
     assert "2 runs had no fuel figure" in out["summary"]
     assert "kubota 0.5 h / no fuel figure" in out["summary"]
 
+
+
+# --- Which tool answers "how many kWh yesterday" --------------------------------
+#
+# 2026-11-05 and 11-06: "kWh" drew the question to the monthly tool, and October's
+# 1,025 or the month so far was given as yesterday's. "How much solar", with no
+# kWh in it, went to get_history. The first thing each description says is the rule.
+
+def _description(name):
+    return next(s["function"]["description"] for s in tools.SCHEMAS
+                if s["function"]["name"] == name)
+
+
+def test_the_monthly_tool_rules_out_a_single_day_first():
+    opening = _description("get_monthly_summary")[:120]
+    assert "Whole calendar months only" in opening
+    for word in ("today", "yesterday", "last night", "single day", "get_history"):
+        assert word in opening
+
+
+def test_the_history_tool_claims_how_much_today_or_yesterday_first():
+    opening = _description("get_history")[:120]
+    for word in ("how much solar", "today or yesterday", "kWh", 'window="yesterday"'):
+        assert word in opening
