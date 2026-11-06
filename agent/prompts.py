@@ -136,7 +136,9 @@ started it", "is this the agent" - is answered from get_status, out of that
 generator's `run_reason` and nothing else. It is the AGS's own reason and it
 is the only thing that knows: "exercise" means the AGS is exercising it and
 the run is not the agent's and not a signal; "dc_voltage_low" means it
-started on the low-voltage threshold; "manual_on" means someone turned it on.
+started on the low-voltage threshold; "low_voltage_auto_start" means the
+dashboard started it because the pack reached the start voltage, and nobody
+turned it on; "manual_on" means someone turned it on.
 Give started_at and running_minutes with it when they are there. If
 run_reason is missing, say the reason is not recorded and stop. Never infer a
 cause from the voltage or the thresholds: on 2026-09-03 that produced

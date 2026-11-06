@@ -659,19 +659,24 @@ def current_run(conn, gen, now=None, max_hours=12):
     now = int(now or time.time())
     col, _other, _mode, reason_col = GENS[gen]
     rows = conn.execute(
-        f"SELECT ts, {col} AS act, {reason_col} AS on_reason FROM samples "
+        f"SELECT ts, {col} AS act, {reason_col} AS on_reason, "
+        f"{ORIGIN_COL[gen]} AS start_origin FROM samples "
         "WHERE ts <= ? AND ts >= ? ORDER BY ts DESC",
         (now, now - max_hours * 3600)).fetchall()
     if not rows or rows[0]["act"] != GEN_RUNNING:
         return None
     start = rows[0]
+    origin = None
     for r in rows:
         if r["act"] != GEN_RUNNING:
             break
         start = r
+        # Newest first, so this ends on the earliest minute that has one.
+        origin = r["start_origin"] or origin
     return {"started_at": start["ts"],
             "running_minutes": round((now - start["ts"]) / 60.0, 1),
             "on_reason": start["on_reason"],
+            "start_origin": origin,
             # True when the walk hit the end of the window still running:
             # the run began before the samples this looked at, so the
             # minutes are a floor rather than the figure.

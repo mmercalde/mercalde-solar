@@ -1328,3 +1328,49 @@ def test_the_verdicts_tonight_energy_writes_become_the_spanish_sentences(conn, c
         "decide a las 9:00 pm.")
     assert spanish((2026, 11, 5, 12, 0), SPARE) == (
         "Déficit. No es definitivo: la regla de recarga decide a las 9:00 pm.")
+
+
+# --- manual_on from the voltage loop is nobody turning it on ----------------------
+
+def status_of(conn, cfg, monkeypatch, reason, origin):
+    a_live_poll(monkeypatch, kubotaAction=history.GEN_RUNNING, kubotaOnReason=reason,
+                kubotaStartOrigin=origin)
+    return tools.Tools(conn, cfg).get_status()
+
+
+def test_an_auto_start_is_not_described_as_someone_turning_it_on(conn, cfg, monkeypatch):
+    k = status_of(conn, cfg, monkeypatch, "manual_on", "auto")["kubota"]
+    assert k["run_reason"] == "low_voltage_auto_start"
+    assert "Nobody turned it on" in k["run_reason_note"]
+    assert k["start_origin"] == "auto"
+
+
+@pytest.mark.parametrize("origin,shows", [("manual", "manual"), (None, None)])
+def test_a_real_manual_start_stays_manual_on(conn, cfg, monkeypatch, origin, shows):
+    k = status_of(conn, cfg, monkeypatch, "manual_on", origin)["kubota"]
+    assert k["run_reason"] == "manual_on"
+    assert k.get("start_origin") == shows
+
+
+@pytest.mark.parametrize("reason", ["exercise", "dc_voltage_low", "not_on"])
+def test_no_other_reason_is_touched(conn, cfg, monkeypatch, reason):
+    k = status_of(conn, cfg, monkeypatch, reason, "auto")["kubota"]
+    assert k["run_reason"] == reason
+
+
+def test_after_a_dashboard_restart_the_samples_still_know(conn, cfg, monkeypatch):
+    now = int(time.time())
+    history.record_sample(conn, {"kubotaAction": history.GEN_RUNNING,
+                                 "kubotaOnReason": "manual_on",
+                                 "kubotaStartOrigin": "auto"}, ts=now - 600)
+    history.record_sample(conn, {"kubotaAction": history.GEN_RUNNING,
+                                 "kubotaOnReason": "manual_on"}, ts=now - 60)
+    k = status_of(conn, cfg, monkeypatch, "manual_on", None)["kubota"]
+    assert k["run_reason"] == "low_voltage_auto_start"
+
+
+def test_the_prompt_tells_the_model_what_the_new_reason_means():
+    import prompts
+    p = prompts.ask_prompt()
+    assert "low_voltage_auto_start" in p and "nobody" in p.lower()
+    assert '"manual_on" means someone turned it on' in " ".join(p.split())

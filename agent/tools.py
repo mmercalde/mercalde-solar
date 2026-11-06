@@ -270,7 +270,8 @@ SCHEMAS = [
         "description": "Current battery, solar, load and generator state, plus "
                        "the live generator thresholds. Each generator carries "
                        "run_reason - the AGS's own reason it is running, e.g. "
-                       "\"exercise\", \"dc_voltage_low\", \"manual_on\" - and "
+                       "\"exercise\", \"dc_voltage_low\", "
+                       "\"low_voltage_auto_start\", \"manual_on\" - and "
                        "started_at and running_minutes while it runs. This is "
                        "the only source for why a generator started.",
         "parameters": {"type": "object", "properties": {}, "required": []}}},
@@ -500,6 +501,11 @@ RECENT_ACTIONS_MAX = 20
 THRESHOLD_FIELDS = ("mep_start", "mep_stop", "kub_start", "kub_stop")
 
 
+# What get_status calls a start by the Pi5's voltage loop, which the AGS itself
+# reports as manual_on.
+AUTO_START_REASON = "low_voltage_auto_start"
+
+
 def _kwh(wh):
     """Watt-hours as the kilowatt-hours a person says, to one decimal."""
     return None if wh is None else round(wh / 1000.0, 1)
@@ -682,9 +688,9 @@ class Tools:
                        or data.get("kubotaAction") == history.GEN_RUNNING)
         load_w, load_note = self._house_load(data, gen_running)
         gen_status = {}
-        for gen, act_key, reason_key in (
-                ("mep", "mep803aAction", "mepOnReason"),
-                ("kubota", "kubotaAction", "kubotaOnReason")):
+        for gen, act_key, reason_key, origin_key in (
+                ("mep", "mep803aAction", "mepOnReason", "mep803aStartOrigin"),
+                ("kubota", "kubotaAction", "kubotaOnReason", "kubotaStartOrigin")):
             running = data.get(act_key) == history.GEN_RUNNING
             # The AGS's answer, and the only answer. Where the register did
             # not reach /data the field says so rather than going quiet: a
@@ -712,6 +718,18 @@ class Tools:
                         gen_status[gen]["run_reason_note"] = (
                             "from the sample at the minute it started, not "
                             "from this poll")
+            # Mode=On reads manual_on whoever wrote it, and the Pi5's voltage
+            # loop writes it too. A dashboard restart loses /data's origin, so
+            # the samples from this run can still supply it.
+            origin = data.get(origin_key) or (run.get("start_origin") if running and run else None)
+            if origin:
+                gen_status[gen]["start_origin"] = origin
+            if origin == "auto" and gen_status[gen]["run_reason"] == history.REASON_MANUAL:
+                gen_status[gen]["run_reason"] = AUTO_START_REASON
+                gen_status[gen]["run_reason_note"] = (
+                    "the dashboard started it because the pack reached the start "
+                    "voltage. The AGS reports manual_on for this kind of start. "
+                    "Nobody turned it on.")
         return {
             "voltage": data.get("batteryVoltage"),
             "soc_pct_note": "not reported: the Battery Monitor's state of charge scale is unreliable and nothing may be quoted from it. What the pack holds is watt-hours between two voltages; how it is ageing is the battery_health tool.",
