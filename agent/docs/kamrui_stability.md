@@ -329,8 +329,8 @@ Michael approved the switch on 2026-11-04.
 
 **What to expect:**
 - GTT about 7.6 GB raw with the model up, against about 9.3 GB for Qwen3-8B.
-  Idle with the server stopped is 1.69 GB, so `llama_gpu_check`'s 1 GB floor can't
-  fail on this box. Check for at least 7 GB by hand.
+  Idle with the server stopped is 1.69 GB, so `llama_gpu_check`'s 1 GB floor couldn't
+  fail on this box. Since 2026-11-06 the floor is `gpu_check_min_gtt_mib`, default 5000.
 - Warm ticks about 10 s, a cold tick about 60 s.
 - Tctl can still touch 85 °C under sustained questions, as both models did in the
   exam.
@@ -342,3 +342,11 @@ sudo cp /etc/systemd/system/llama-server.service.qwen3-bak /etc/systemd/system/l
 ```
 
 Set `llm_model` back to `qwen3` in `agent/config.json` as well.
+
+## 2026-11-06: `llama-server` no longer waits for a device unit
+
+`agent/llama-server.service` had `dev-dri-renderD128.device` in `After=` and `Wants=`. That unit is `inactive` on this box and never appears, so every start waited out systemd's 90 s device timeout. The `ExecStartPre` poll already waits up to 30 s for `/dev/dri/renderD128`, so the unit now has only `After=network.target`. `ExecStartPre` is unchanged.
+
+Installed at 10:53 am. `systemctl restart` returned in 0.23 s, but `Type=simple` returns before the model loads. The journal has the real figure: started 10:53:48.5, model loaded and listening 10:53:53.5, **4.9 s**, against about 100 s before. Afterwards: `/health` ok, `llama_gpu_check` rc=0, GTT 7.12 GB. Previous unit: `/etc/systemd/system/llama-server.service.bak-devwait`.
+
+If a boot ever races the render node, `ExecStartPre` is now the only guard. Its 30 s poll failing makes the start fail, and `Restart=on-failure` retries it.
