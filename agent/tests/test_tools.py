@@ -640,7 +640,7 @@ def test_recent_actions_come_from_the_audit_trail(conn, cfg):
     assert out["count"] == 3
     assert [a["reason"] for a in out["actions"]] == \
         ["reason 5", "reason 4", "reason 3"]
-    assert out["actions"][0]["allowed"] is True
+    assert out["actions"][0]["result"] == "allowed"
     assert out["actions"][1]["result"] == "refused"
 
 
@@ -648,7 +648,7 @@ def test_recent_actions_is_bounded(conn, cfg):
     for i in range(80):
         history.record_action(conn, "x", {}, 1, "r", None, None, "allowed",
                               ts=1000 + i)
-    assert tools.Tools(conn, cfg).get_recent_actions(500)["count"] == 50
+    assert tools.Tools(conn, cfg).get_recent_actions(500)["count"] == 20
     assert tools.Tools(conn, cfg).get_recent_actions(0)["count"] == 1
 
 

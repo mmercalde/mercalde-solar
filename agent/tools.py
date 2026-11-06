@@ -424,7 +424,7 @@ SCHEMAS = [
         "description": "The last N entries from the audit log: every write "
                        "attempted, whether it was allowed or refused, and why.",
         "parameters": {"type": "object", "properties": {
-            "n": {"type": "integer", "description": "How many, 1 to 50."}},
+            "n": {"type": "integer", "description": "How many, 1 to 20."}},
             "required": ["n"]}}},
     {"type": "function", "function": {
         "name": "get_weather",
@@ -471,6 +471,25 @@ WRITE_TOOLS = {"set_gen_thresholds"}
 # 1,500 tokens: enough for any answer here, and well inside what the KAMRUI
 # can read and reason over inside the model timeout.
 TOOL_RESULT_WARN_CHARS = 6000
+
+# What a single result may be and still be sent. llama-server has 16,384 tokens
+# for the whole prompt and the reply. A question's prompt without a result is
+# about 5,800 of them and the reply allowance is 1,024, leaving about 9,500. The
+# densest JSON measured on Gemma's tokenizer is 1.74 characters a token, so
+# 15,000 characters is at most about 8,600 tokens, and usually under 7,000.
+# Results in one question add up, and this limits only each one.
+TOOL_RESULT_MAX_CHARS = 15000
+
+# Above this many runs get_gen_runtime gives period totals and the latest runs,
+# not every row: a run is about 160 tokens, and 81 of them took a 90-day answer
+# to 14,333. These keep the whole result near 3,000 for any span: eight rows with
+# the full `fuel`, or seven with the period totals, which cost more than it saves.
+RUN_ROW_BUDGET = 8
+RECENT_RUNS_KEPT = 7
+
+# 50 entries were 8,670 tokens; asked by the owner's "check the log" on 2026-11-05.
+RECENT_ACTIONS_MAX = 20
+THRESHOLD_FIELDS = ("mep_start", "mep_stop", "kub_start", "kub_stop")
 
 
 def _kwh(wh):
@@ -786,8 +805,9 @@ class Tools:
                 row[f"fuel_{label}_gal"] = (round(gal, 2)
                                             if gal is not None else None)
                 row[f"fuel_{label}_unpriced_runs"] = int(r["unpriced"] or 0)
-                row[f"exercise_hours_{label}"] = round(r["ex_mins"] / 60.0, 2)
-                row[f"exercise_fuel_{label}_gal"] = round(r["ex_gal"], 2)
+                if r["ex_mins"]:
+                    row[f"exercise_hours_{label}"] = round(r["ex_mins"] / 60.0, 2)
+                    row[f"exercise_fuel_{label}_gal"] = round(r["ex_gal"], 2)
                 c = fuelmod.cost(self.cfg, gal)
                 if c is not None:
                     row[f"fuel_{label}_cost"] = c
@@ -798,9 +818,9 @@ class Tools:
                        "the gross output the run actually delivered, with a "
                        "minute both engines were running split between them "
                        "by their learned solo rates. Hours and gallons count "
-                       "every run, exercise included, with the exercise share "
-                       "in the exercise_ fields. Quote the summary as it "
-                       "stands and say modelled.")
+                       "every run, exercise included; any exercise_ field is "
+                       "that share. Quote the summary as it stands and say "
+                       "modelled.")
         return out
 
     def fuel_window(self, runs, days):
@@ -876,6 +896,24 @@ class Tools:
         """Longevity, from what the pack has done. All computed in Python."""
         return healthmod.battery_health(self.conn, self.cfg)
 
+    def _run_periods(self, runs, monthly):
+        """Hours per generator and gallons for each week or month that had runs."""
+        periods = {}
+        for r in runs:
+            t = history.local(r["start_ts"], self.cfg)
+            label = (t.strftime("%Y-%m") if monthly
+                     else (t.date() - timedelta(days=t.weekday())).isoformat())
+            periods.setdefault(label, []).append(r)
+        out = []
+        for label, rows in periods.items():
+            row = {"period": label}
+            for gen in sorted(history.GENS):
+                row[f"{gen}_hours"] = round(sum(r["duration_min"] or 0 for r in rows
+                                                if r["gen"] == gen) / 60.0, 1)
+            row["gal"] = round(sum(r["fuel_gal"] or 0 for r in rows), 1)
+            out.append(row)
+        return out
+
     def get_gen_runtime(self, days):
         days = max(1, min(int(days), 365))
         runs = history.gen_runs(self.conn, days, include_exercise=True)
@@ -897,6 +935,45 @@ class Tools:
             return ("today" if day == today else
                     "yesterday" if day == yesterday else day)
 
+        def row(r):
+            return {"gen": r["gen"],
+                    "day": day_of(r["start_ts"]),
+                    "start": history.stamp(r["start_ts"], self.cfg),
+                    "minutes": r["duration_min"],
+                    "start_v": r["start_v"], "stop_v": r["stop_v"],
+                    "amps_into_pack": (round(r["rate_a"], 1)
+                                       if r["rate_a"] is not None else None),
+                    "house_load_w": (round(r["load_w"])
+                                     if r["load_w"] is not None else None),
+                    "fuel_gal": r["fuel_gal"],
+                    "gross_w": (round(r["gross_w"])
+                                if r["gross_w"] is not None else None),
+                    "gross_attributed_w": (round(r["gross_attr_w"])
+                                           if r["gross_attr_w"] is not None
+                                           else None),
+                    "observed_v_per_h": (round(r["rate_v_per_h"], 2)
+                                         if r["rate_v_per_h"] is not None
+                                         else None),
+                    "solo": bool(r["solo"]), "kind": r["kind"]}
+
+        fuel = self.fuel_totals(now=now)
+        listing = {"runs": [row(r) for r in runs]}
+        if len(runs) > RUN_ROW_BUDGET:
+            # The totals above cover every run whichever way the rows go. The
+            # per-generator fuel rows go too: their sentence says the same.
+            monthly = days > 90
+            kept = runs[-RECENT_RUNS_KEPT:]
+            listing = {
+                "runs": [row(r) for r in kept],
+                "runs_summarised": (
+                    f"Only the latest {len(kept)} of {len(runs)} runs are listed, "
+                    "because every row would not fit the model's context; an "
+                    "older day missing from them may still have had a run. "
+                    f"run_periods has hours and modelled gallons per "
+                    f"{'month' if monthly else 'week'}, for all the runs. Totals "
+                    "and fuel_window cover all the runs."),
+                "run_periods": self._run_periods(runs, monthly)}
+            fuel = {"summary": fuel["summary"]}
         return {
             "days": days,
             "as_of": history.stamp(now, self.cfg),
@@ -905,41 +982,19 @@ class Tools:
                            "exercise_minutes": round(t["exercise_minutes"], 1)}
                        for g, t in totals.items()},
             "fuel_window": self.fuel_window(runs, days),
-            "fuel": self.fuel_totals(now=now),
+            "fuel": fuel,
             "generators_with_no_runs": sorted(set(history.GENS) - set(totals)),
             "charge_rates": self.model.charge_rates(),
-            "runs": [{"gen": r["gen"],
-                      "day": day_of(r["start_ts"]),
-                      "start": history.stamp(r["start_ts"], self.cfg),
-                      "minutes": r["duration_min"],
-                      "start_v": r["start_v"], "stop_v": r["stop_v"],
-                      "amps_into_pack": (round(r["rate_a"], 1)
-                                         if r["rate_a"] is not None else None),
-                      "house_load_w": (round(r["load_w"])
-                                       if r["load_w"] is not None else None),
-                      "fuel_gal": r["fuel_gal"],
-                      "gross_w": (round(r["gross_w"])
-                                  if r["gross_w"] is not None else None),
-                      "gross_attributed_w": (round(r["gross_attr_w"])
-                                             if r["gross_attr_w"] is not None
-                                             else None),
-                      "observed_v_per_h": (round(r["rate_v_per_h"], 2)
-                                           if r["rate_v_per_h"] is not None
-                                           else None),
-                      "solo": bool(r["solo"]), "kind": r["kind"]}
-                     for r in runs],
+            **listing,
             "note": "Every run carries the day it began on. If the question "
-                    "assumes a run happened on a day these rows do not show "
-                    "one, say so and give the days the runs were actually on; "
-                    "do not answer as though the assumption were true. "
-                    "Exercise runs are included, with kind \"exercise\": "
-                    "`minutes`, `runs` and fuel count every run, and the "
-                    "exercise_ fields are the share of them that was exercise. "
-                    "charge_rates leave exercise out. A charge rate is amps into "
-                    "the pack and the state of charge per hour that gives; "
-                    "observed_v_per_h is what the terminal voltage did under "
-                    "whatever the house was drawing at the time, and is not a "
-                    "generator's rate. Do not plan from it.",
+                    "assumes a run on a day these rows do not show, say so and "
+                    "give the days the runs were on; do not answer as though "
+                    "the assumption were true. Exercise runs have kind "
+                    "\"exercise\": `minutes`, `runs` and fuel count them, the "
+                    "exercise_ fields are their share, and charge_rates leave "
+                    "them out. A charge rate is amps into the pack; "
+                    "observed_v_per_h is the terminal voltage under that house "
+                    "load, not a generator's rate. Do not plan from it.",
         }
 
     def get_voltage_at(self, timestamp):
@@ -1120,15 +1175,32 @@ class Tools:
 
     def get_recent_actions(self, n):
         """The audit log: every write attempted, and what the guard said."""
-        n = max(1, min(int(n), 50))
+        n = max(1, min(int(n), RECENT_ACTIONS_MAX))
         rows = history.recent_actions(self.conn, limit=n)
         return {"count": len(rows),
-                "actions": [{"at": history.stamp(r["ts"], self.cfg),
-                             "tool": r["tool"], "result": r["result"],
-                             "allowed": bool(r["allowed"]),
-                             "reason": r["reason"],
-                             "voltage": r["voltage"], "soc": r["soc"],
-                             "args": r["args"]} for r in rows]}
+                "actions": [self._action_entry(r) for r in rows]}
+
+    def _action_entry(self, r):
+        """One audit row, in what an answer needs.
+
+        `args` was half of every entry, as JSON inside JSON. Its reason stays:
+        the guard's on a permitted write is the one word "permitted", so the
+        proposal's is the only account of why. A policy miss files its values
+        under `proposal`, and its own reason already says what the rule was.
+        """
+        try:
+            args = json.loads(r["args"] or "{}")
+        except ValueError:
+            args = {}
+        source = args.get("proposal") or args
+        entry = {"at": history.stamp(r["ts"], self.cfg), "tool": r["tool"],
+                 "result": r["result"], "reason": r["reason"]}
+        values = {k: source[k] for k in THRESHOLD_FIELDS if k in source}
+        if values:
+            entry["values"] = values
+        if args.get("reason"):
+            entry["proposed_because"] = args["reason"]
+        return entry
 
     def get_ac_diag(self):
         r = requests.get(self.cfg["dashboard_url"] + "/acdiag", timeout=15)
@@ -1222,9 +1294,19 @@ class Tools:
         except Exception as e:                      # noqa: BLE001 - never kill the tick
             log.exception("tool %s failed", name)
             result = {"error": f"{name} failed: {e}"}
-        self.calls.append((name, args, result))
         payload = json.dumps(result, default=str)
         self._journal(name, args, len(payload))
+        if len(payload) > TOOL_RESULT_MAX_CHARS:
+            log.warning("tool %s(%r) -> %d chars, over the %d limit; not sent to "
+                        "the model", name, args, len(payload), TOOL_RESULT_MAX_CHARS)
+            result = {"error": f"result too large ({len(payload)} chars); ask for "
+                               "a shorter span or fewer entries",
+                      "hint": f"{name} would not fit the model's context. Call it "
+                              "again with narrower arguments, such as fewer days, "
+                              "fewer months, one named month, or no detail."}
+            payload = json.dumps(result)
+        # What the model was shown, so nothing it never saw can source a figure.
+        self.calls.append((name, args, result))
         return payload
 
     @staticmethod
