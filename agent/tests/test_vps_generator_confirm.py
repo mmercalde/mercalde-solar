@@ -151,6 +151,41 @@ def test_a_small_generator_asks_and_moves_nothing(alexa, intent):
     assert speech(response) == "Which generator, the Kubota or the MEP?"
 
 
+@pytest.mark.parametrize("intent,status,generator,locale,says", [
+    ("StartGeneratorIntent", "NONE", "the kubota", "en-US", "Please confirm: start the kubota?"),
+    ("StopGeneratorIntent", "NONE", "The MEP", "en-US", "Please confirm: stop the MEP?"),
+    ("SetGeneratorOffIntent", "NONE", "the kubota", "en-US", "Please confirm: set the kubota to off?"),
+    ("StartGeneratorIntent", "NONE", "el kubota", "es-US", "Confirma: prender el kubota?"),
+    ("StopGeneratorIntent", "NONE", "el militar", "es-MX", "Confirma: apagar el militar?"),
+    ("SetGeneratorOffIntent", "NONE", "El mep", "es-US", "Confirma: poner el mep en modo apagado?"),
+    ("StartGeneratorIntent", "CONFIRMED", "the kubota", "en-US", "Starting the kubota generator."),
+    ("StopGeneratorIntent", "CONFIRMED", "el kubota", "es-US",
+     "Apagando el generador kubota. Esto tomara unos minutos."),
+    ("SetGeneratorOffIntent", "CONFIRMED", "the mep", "en-US", "Setting the mep generator to off mode."),
+    ("SetGeneratorAutoIntent", "NONE", "the kubota", "en-US", "Setting the kubota generator to auto mode."),
+    ("SetGeneratorAutoIntent", "NONE", "el mep", "es-US", "Poniendo el generador mep en automatico."),
+])
+def test_speech_does_not_double_the_article(alexa, intent, status, generator, locale, says):
+    assert speech(say(alexa, intent, status, generator, locale)) == says
+
+
+@pytest.mark.parametrize("name,spoken", [
+    ("kubota", "kubota"), ("the kubota", "kubota"), ("el kubota", "kubota"), ("THE mep", "mep"),
+    ("thermal", "thermal"), ("elmep", "elmep"), ("los dos", "los dos"),
+])
+def test_only_a_leading_article_is_dropped(alexa, name, spoken):
+    assert alexa.spoken_generator(name) == spoken
+
+
+@pytest.mark.parametrize("intent", ALL_FOUR_NAMES)
+def test_get_gen_id_still_gets_the_name_as_it_came(alexa, monkeypatch, intent):
+    seen = []
+    real = alexa.get_gen_id
+    monkeypatch.setattr(alexa, "get_gen_id", lambda name: seen.append(name) or real(name))
+    say(alexa, intent, "CONFIRMED", "the kubota")
+    assert seen and set(seen) == {"the kubota"}
+
+
 # --- which generator ---------------------------------------------------------------
 
 ALL_FOUR = ALL_FOUR_NAMES

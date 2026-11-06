@@ -133,13 +133,11 @@ when `intent.confirmationStatus` is `CONFIRMED`:
 | `DENIED` | Nothing. "OK, I won't." / "Está bien, no lo haré." |
 | `NONE`, or anything else | Nothing. "Please confirm: …" with the session left open. |
 
-**Start and stop have confirmation on in the console** (delegationStrategy ALWAYS, in
-en-US and es-US), so voice start and stop work today. Alexa asks "Are you sure you want
-to start/stop the {generator}?" / "¿Estás seguro que quieres prender/apagar el
+**Start, Stop and Off require confirmation in the console, in en-US, es-US and es-MX.**
+es-MX was cloned from es-US on 2026-11-06, and its confirmation was verified in the es-MX
+simulator. For start and stop (delegationStrategy ALWAYS), Alexa asks "Are you sure you
+want to start/stop the {generator}?" / "¿Estás seguro que quieres prender/apagar el
 {generator}?" and sends the final status. The handler returns no dialog directive.
-
-Off has its confirmation prompt in the console too, in en-US, es-US and es-MX (added
-2026-11-06).
 
 `SetGeneratorAutoIntent`, `EnableAutoGenIntent` and `DisableAutoGenIntent` don't check
 for confirmation.
@@ -173,7 +171,8 @@ entity resolution when the status code is `ER_SUCCESS_MATCH`, otherwise the raw 
 `get_gen_id` matches whole words, so "small" isn't "all". If neither maps to a generator,
 it says "Which generator, the Kubota or the MEP?" /
 "¿Cuál generador, el Kubota o el MEP?", keeps the session open and moves nothing.
-"unknown" never reaches speech. `DENIED` still gets "OK, I won't", since a refusal needs
+"unknown" never reaches speech, and a leading "the " or "el " is dropped from the name
+before it's spoken ("start the kubota?"). `get_gen_id` still gets the name as it came. `DENIED` still gets "OK, I won't", since a refusal needs
 no name. The `CONFIRMED`-only rule is unchanged, and Auto still doesn't check for
 confirmation.
 

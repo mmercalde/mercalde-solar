@@ -241,6 +241,10 @@ def resolved_generator(data):
             return name
     return None
 
+def spoken_generator(name):
+    """The name for speech only: the sentences already say "the" or "el"."""
+    return re.sub(r'^\s*(the|el)\s+', '', name, flags=re.IGNORECASE)
+
 def ask_which_generator(spanish):
     speech = "¿Cuál generador, el Kubota o el MEP?" if spanish else "Which generator, the Kubota or the MEP?"
     return build_response(speech, end_session=False)
@@ -587,11 +591,11 @@ def alexa_handler():
                         speech = "Prendiendo ambos generadores." if spanish else "Starting both generators."
                     else:
                         set_generator(gen_id, 1)
-                        speech = f"Prendiendo el generador {generator}." if spanish else f"Starting the {generator} generator."
+                        speech = f"Prendiendo el generador {spoken_generator(generator)}." if spanish else f"Starting the {spoken_generator(generator)} generator."
                 elif confirmation == 'DENIED':
                     speech = "Está bien, no lo haré." if spanish else "OK, I won't."
                 else:
-                    speech = f"Confirma: prender el {generator}?" if spanish else f"Please confirm: start the {generator}?"
+                    speech = f"Confirma: prender el {spoken_generator(generator)}?" if spanish else f"Please confirm: start the {spoken_generator(generator)}?"
                     return build_response(speech, end_session=False)
                 return build_response(speech)
             
@@ -612,11 +616,11 @@ def alexa_handler():
                     else:
                         # Use robust stop
                         stop_and_auto(gen_id)
-                        speech = f"Apagando el generador {generator}. Esto tomara unos minutos." if spanish else f"Stopping the {generator} generator. This will take a few minutes."
+                        speech = f"Apagando el generador {spoken_generator(generator)}. Esto tomara unos minutos." if spanish else f"Stopping the {spoken_generator(generator)} generator. This will take a few minutes."
                 elif confirmation == 'DENIED':
                     speech = "Está bien, no lo haré." if spanish else "OK, I won't."
                 else:
-                    speech = f"Confirma: apagar el {generator}?" if spanish else f"Please confirm: stop the {generator}?"
+                    speech = f"Confirma: apagar el {spoken_generator(generator)}?" if spanish else f"Please confirm: stop the {spoken_generator(generator)}?"
                     return build_response(speech, end_session=False)
                 return build_response(speech)
             
@@ -632,7 +636,7 @@ def alexa_handler():
                     speech = "Poniendo ambos generadores en automatico." if spanish else "Setting both generators to auto mode."
                 else:
                     set_generator(gen_id, 2)
-                    speech = f"Poniendo el generador {generator} en automatico." if spanish else f"Setting the {generator} generator to auto mode."
+                    speech = f"Poniendo el generador {spoken_generator(generator)} en automatico." if spanish else f"Setting the {spoken_generator(generator)} generator to auto mode."
                 return build_response(speech)
             
             elif intent == 'SetGeneratorOffIntent':
@@ -651,11 +655,11 @@ def alexa_handler():
                         speech = "Poniendo ambos generadores en modo apagado." if spanish else "Setting both generators to off mode."
                     else:
                         set_generator(gen_id, 0)
-                        speech = f"Poniendo el generador {generator} en modo apagado." if spanish else f"Setting the {generator} generator to off mode."
+                        speech = f"Poniendo el generador {spoken_generator(generator)} en modo apagado." if spanish else f"Setting the {spoken_generator(generator)} generator to off mode."
                 elif confirmation == 'DENIED':
                     speech = "Está bien, no lo haré." if spanish else "OK, I won't."
                 else:
-                    speech = f"Confirma: poner el {generator} en modo apagado?" if spanish else f"Please confirm: set the {generator} to off?"
+                    speech = f"Confirma: poner el {spoken_generator(generator)} en modo apagado?" if spanish else f"Please confirm: set the {spoken_generator(generator)} to off?"
                     return build_response(speech, end_session=False)
                 return build_response(speech)
             
