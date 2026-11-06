@@ -314,57 +314,74 @@ def apl_screen(items):
         "version": "1.6",
         "theme": "dark",
         "settings": {"idleTimeout": 60000},
-        "mainTemplate": {"parameters": ["payload"], "items": items},
+        "mainTemplate": {"parameters": ["solar"], "items": items},
     }
+
+def page(content, when=None):
+    """The whole screen's background. A Frame holds one child, in "item"."""
+    frame = {"type": "Frame", "width": "100vw", "height": "100vh",
+             "backgroundColor": "#1a1a2e", "item": content}
+    if when:
+        frame["when"] = when
+    return frame
+
+def card(items):
+    return {"type": "Frame", "width": "48%", "height": "100%",
+            "backgroundColor": "#FFFFFF1A", "borderRadius": "20dp",
+            "item": {"type": "Container", "width": "100%", "height": "100%",
+                     "alignItems": "center", "justifyContent": "center", "items": items}}
+
+def card_row(height, cards):
+    return {"type": "Container", "direction": "row", "width": "100%", "height": height,
+            "marginTop": "3vh", "justifyContent": "spaceBetween", "items": cards}
 
 def round_text(text, color, size, **extra):
     return {"type": "Text", "text": text, "color": color, "fontSize": size,
             "width": "100%", "textAlign": "center", **extra}
 
 def round_dashboard():
-    return {
+    return page({
         "type": "Container",
-        "when": ROUND,
-        "width": "100vw",
-        "height": "100vh",
+        "width": "100%",
+        "height": "100%",
         "justifyContent": "center",
         "paddingLeft": "15vw",
         "paddingRight": "15vw",
         "paddingTop": "15vh",
         "paddingBottom": "15vh",
         "items": [
-            round_text("${payload.batterySOC}%", "${payload.batteryColor}", "16vh", fontWeight="bold"),
-            round_text("${payload.batteryVoltage} V", "#FFFFFF", "6vh"),
-            round_text("${payload.totalSolar} W", "#FFD93D", "6vh"),
-            round_text("MEP-803A: ${payload.mepStatus}", "${payload.mepColor}", "4vh"),
-            round_text("${payload.mepThresholds}", "#B0BEC5", "3vh", when="${payload.mepThresholds != ''}"),
-            round_text("KUBOTA: ${payload.kubotaStatus}", "${payload.kubotaColor}", "4vh"),
-            round_text("${payload.kubotaThresholds}", "#B0BEC5", "3vh", when="${payload.kubotaThresholds != ''}"),
-            round_text("${payload.notice}", "#BBDEFB", "3vh", when="${payload.notice != ''}"),
+            round_text("${solar.batterySOC}%", "${solar.batteryColor}", "16vh", fontWeight="bold"),
+            round_text("${solar.batteryVoltage} V", "#FFFFFF", "6vh"),
+            round_text("${solar.totalSolar} W", "#FFD93D", "6vh"),
+            round_text("MEP-803A: ${solar.mepStatus}", "${solar.mepColor}", "4vh"),
+            round_text("${solar.mepThresholds}", "#B0BEC5", "3vh", when="${solar.mepThresholds != ''}"),
+            round_text("KUBOTA: ${solar.kubotaStatus}", "${solar.kubotaColor}", "4vh"),
+            round_text("${solar.kubotaThresholds}", "#B0BEC5", "3vh", when="${solar.kubotaThresholds != ''}"),
+            round_text("${solar.notice}", "#BBDEFB", "3vh", when="${solar.notice != ''}"),
         ]
-    }
+    }, when=ROUND)
 
 def build_answer_document():
-    return apl_screen([{
+    return apl_screen([page({
         "type": "Container",
-        "width": "100vw",
-        "height": "100vh",
+        "width": "100%",
+        "height": "100%",
         **PADDING,
         "items": [
-            {"type": "Text", "text": "${payload.question}", "color": "#BBDEFB", "fontSize": "4vh",
+            {"type": "Text", "text": "${solar.question}", "color": "#BBDEFB", "fontSize": "4vh",
              "maxLines": 2, "textAlign": TEXT_ALIGN},
             {"type": "ScrollView", "grow": 1, "shrink": 1, "marginTop": "2vh", "item": {
-                "type": "Text", "text": "${payload.answer}", "color": "#FFFFFF",
+                "type": "Text", "text": "${solar.answer}", "color": "#FFFFFF",
                 "fontSize": "${viewport.shape == 'round' ? '4vh' : '5vh'}", "textAlign": TEXT_ALIGN}},
-            {"type": "Text", "when": "${payload.statusLine != ''}", "text": "${payload.statusLine}",
-             "color": "${payload.statusColor}", "fontSize": "3.5vh", "marginTop": "2vh", "textAlign": "center"},
-            {"type": "Text", "when": "${payload.genLine != ''}", "text": "${payload.genLine}",
+            {"type": "Text", "when": "${solar.statusLine != ''}", "text": "${solar.statusLine}",
+             "color": "${solar.statusColor}", "fontSize": "3.5vh", "marginTop": "2vh", "textAlign": "center"},
+            {"type": "Text", "when": "${solar.genLine != ''}", "text": "${solar.genLine}",
              "color": "#B0BEC5", "fontSize": "3vh", "textAlign": "center"},
         ]
-    }])
+    })])
 
 def build_answer_datasource(question, answer, solar, spanish):
-    payload = {"question": clip(question, SCREEN_QUESTION_CHARS),
+    screen = {"question": clip(question, SCREEN_QUESTION_CHARS),
                "answer": clip(answer, SCREEN_ANSWER_CHARS),
                "statusLine": "", "statusColor": "#FFFFFF", "genLine": ""}
     if solar:
@@ -374,153 +391,76 @@ def build_answer_datasource(question, answer, solar, spanish):
                  + solar.get('westArrayPVPower', 0))
         mep = get_gen_mode(solar.get('mep803aMode', 0), spanish).upper()
         kubota = get_gen_mode(solar.get('kubotaMode', 0), spanish).upper()
-        payload.update(statusLine=f"{soc}% · {voltage} V · {total} W",
+        screen.update(statusLine=f"{soc}% · {voltage} V · {total} W",
                        statusColor=get_battery_color(soc),
                        genLine=f"MEP-803A: {mep} · KUBOTA: {kubota}")
-    return payload
+    return screen
 
 def build_events_document():
-    return apl_screen([{
+    return apl_screen([page({
         "type": "Container",
-        "width": "100vw",
-        "height": "100vh",
+        "width": "100%",
+        "height": "100%",
         **PADDING,
         "items": [
-            {"type": "Text", "text": "${payload.title}", "color": "#FFD93D", "fontSize": "5vh",
+            {"type": "Text", "text": "${solar.title}", "color": "#FFD93D", "fontSize": "5vh",
              "fontWeight": "bold", "textAlign": "center"},
             {"type": "ScrollView", "grow": 1, "shrink": 1, "marginTop": "2vh", "item": {
                 "type": "Container", "width": "100%", "items": [{
-                    "type": "Text", "data": "${payload.events}", "text": "${data}", "color": "#FFFFFF",
+                    "type": "Text", "data": "${solar.events}", "text": "${data}", "color": "#FFFFFF",
                     "fontSize": "${viewport.shape == 'round' ? '3.5vh' : '4vh'}",
                     "paddingBottom": "2vh", "textAlign": TEXT_ALIGN}]}},
         ]
-    }])
+    })])
 
 def build_apl_document():
-    return {
-        "type": "APL",
-        "version": "1.6",
-        "theme": "dark",
-        "settings": {"idleTimeout": 60000},
-        "mainTemplate": {
-            "parameters": ["payload"],
-            "items": [
-                round_dashboard(),
-                {
-                    "type": "Container",
-                    "when": NOT_ROUND,
-                    "width": "100vw",
-                    "height": "100vh",
-                    "style": "background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%)",
-                    "items": [
-                        {
-                            "type": "Container",
-                            "width": "100%",
-                            "height": "100%",
-                            "paddingLeft": "5vw",
-                            "paddingRight": "5vw",
-                            "paddingTop": "3vh",
-                            "items": [
-                                {
-                                    "type": "Text",
-                                    "text": "☀️ ${payload.title}",
-                                    "style": "textStyleDisplay4",
-                                    "textAlign": "center",
-                                    "color": "#FFD93D",
-                                    "fontWeight": "bold",
-                                    "fontSize": "6vh"
-                                },
-                                {
-                                    "type": "Container",
-                                    "direction": "row",
-                                    "width": "100%",
-                                    "height": "35vh",
-                                    "marginTop": "3vh",
-                                    "justifyContent": "spaceBetween",
-                                    "items": [
-                                        {
-                                            "type": "Container",
-                                            "width": "48%",
-                                            "height": "100%",
-                                            "alignItems": "center",
-                                            "justifyContent": "center",
-                                            "style": "background: rgba(255,255,255,0.1); borderRadius: 20px",
-                                            "items": [
-                                                {"type": "Text", "text": "🔋 ${payload.batteryLabel}", "color": "#BBDEFB", "fontSize": "3vh"},
-                                                {"type": "Text", "text": "${payload.batterySOC}%", "color": "${payload.batteryColor}", "fontSize": "12vh", "fontWeight": "bold"},
-                                                {"type": "Text", "text": "${payload.batteryVoltage}V", "color": "#FFFFFF", "fontSize": "5vh"}
-                                            ]
-                                        },
-                                        {
-                                            "type": "Container",
-                                            "width": "48%",
-                                            "height": "100%",
-                                            "alignItems": "center",
-                                            "justifyContent": "center",
-                                            "style": "background: rgba(255,255,255,0.1); borderRadius: 20px",
-                                            "items": [
-                                                {"type": "Text", "text": "☀️ ${payload.solarLabel}", "color": "#BBDEFB", "fontSize": "3vh"},
-                                                {"type": "Text", "text": "${payload.totalSolar}W", "color": "#FFD93D", "fontSize": "12vh", "fontWeight": "bold"},
-                                                {"type": "Text", "text": "${payload.solarDetails}", "color": "#B0BEC5", "fontSize": "2.5vh", "textAlign": "center"}
-                                            ]
-                                        }
-                                    ]
-                                },
-                                {
-                                    "type": "Container",
-                                    "direction": "row",
-                                    "width": "100%",
-                                    "height": "25vh",
-                                    "marginTop": "3vh",
-                                    "justifyContent": "spaceBetween",
-                                    "items": [
-                                        {
-                                            "type": "Container",
-                                            "width": "48%",
-                                            "height": "100%",
-                                            "alignItems": "center",
-                                            "justifyContent": "center",
-                                            "style": "background: rgba(255,255,255,0.1); borderRadius: 20px",
-                                            "items": [
-                                                {"type": "Text", "text": "⚡ MEP-803A", "color": "#BBDEFB", "fontSize": "3vh"},
-                                                {"type": "Text", "text": "${payload.mepStatus}", "color": "${payload.mepColor}", "fontSize": "8vh", "fontWeight": "bold"},
-                                                {"type": "Text", "when": "${payload.mepThresholds != ''}", "text": "${payload.mepThresholds}", "color": "#B0BEC5", "fontSize": "3vh"}
-                                            ]
-                                        },
-                                        {
-                                            "type": "Container",
-                                            "width": "48%",
-                                            "height": "100%",
-                                            "alignItems": "center",
-                                            "justifyContent": "center",
-                                            "style": "background: rgba(255,255,255,0.1); borderRadius: 20px",
-                                            "items": [
-                                                {"type": "Text", "text": "⚡ KUBOTA", "color": "#BBDEFB", "fontSize": "3vh"},
-                                                {"type": "Text", "text": "${payload.kubotaStatus}", "color": "${payload.kubotaColor}", "fontSize": "8vh", "fontWeight": "bold"},
-                                                {"type": "Text", "when": "${payload.kubotaThresholds != ''}", "text": "${payload.kubotaThresholds}", "color": "#B0BEC5", "fontSize": "3vh"}
-                                            ]
-                                        }
-                                    ]
-                                },
-                                {
-                                    "type": "Container",
-                                    "width": "100%",
-                                    "height": "10vh",
-                                    "marginTop": "2vh",
-                                    "alignItems": "center",
-                                    "justifyContent": "center",
-                                    "items": [
-                                        {"type": "Text", "text": "🤖 ${payload.autoControlLabel}: ${payload.autoControl}", "color": "${payload.autoControlColor}", "fontSize": "3vh"},
-                                        {"type": "Text", "when": "${payload.notice != ''}", "text": "${payload.notice}", "color": "#BBDEFB", "fontSize": "3vh"}
-                                    ]
-                                }
-                            ]
-                        }
-                    ]
-                }
-            ]
-        }
-    }
+    return apl_screen([round_dashboard(), page({
+        "type": "Container",
+        "width": "100%",
+        "height": "100%",
+        "paddingLeft": "5vw",
+        "paddingRight": "5vw",
+        "paddingTop": "3vh",
+        "items": [
+            {"type": "Text", "text": "☀️ ${solar.title}", "textAlign": "center", "color": "#FFD93D", "fontWeight": "bold", "fontSize": "6vh"},
+            card_row("35vh", [
+                card([
+                    {"type": "Text", "text": "🔋 ${solar.batteryLabel}", "color": "#BBDEFB", "fontSize": "3vh"},
+                    {"type": "Text", "text": "${solar.batterySOC}%", "color": "${solar.batteryColor}", "fontSize": "12vh", "fontWeight": "bold"},
+                    {"type": "Text", "text": "${solar.batteryVoltage}V", "color": "#FFFFFF", "fontSize": "5vh"},
+                ]),
+                card([
+                    {"type": "Text", "text": "☀️ ${solar.solarLabel}", "color": "#BBDEFB", "fontSize": "3vh"},
+                    {"type": "Text", "text": "${solar.totalSolar}W", "color": "#FFD93D", "fontSize": "12vh", "fontWeight": "bold"},
+                    {"type": "Text", "text": "${solar.solarDetails}", "color": "#B0BEC5", "fontSize": "2.5vh", "textAlign": "center"},
+                ]),
+            ]),
+            card_row("25vh", [
+                card([
+                    {"type": "Text", "text": "⚡ MEP-803A", "color": "#BBDEFB", "fontSize": "3vh"},
+                    {"type": "Text", "text": "${solar.mepStatus}", "color": "${solar.mepColor}", "fontSize": "8vh", "fontWeight": "bold"},
+                    {"type": "Text", "when": "${solar.mepThresholds != ''}", "text": "${solar.mepThresholds}", "color": "#B0BEC5", "fontSize": "3vh"},
+                ]),
+                card([
+                    {"type": "Text", "text": "⚡ KUBOTA", "color": "#BBDEFB", "fontSize": "3vh"},
+                    {"type": "Text", "text": "${solar.kubotaStatus}", "color": "${solar.kubotaColor}", "fontSize": "8vh", "fontWeight": "bold"},
+                    {"type": "Text", "when": "${solar.kubotaThresholds != ''}", "text": "${solar.kubotaThresholds}", "color": "#B0BEC5", "fontSize": "3vh"},
+                ]),
+            ]),
+            {
+                "type": "Container",
+                "width": "100%",
+                "height": "10vh",
+                "marginTop": "2vh",
+                "alignItems": "center",
+                "justifyContent": "center",
+                "items": [
+                    {"type": "Text", "text": "🤖 ${solar.autoControlLabel}: ${solar.autoControl}", "color": "${solar.autoControlColor}", "fontSize": "3vh"},
+                    {"type": "Text", "when": "${solar.notice != ''}", "text": "${solar.notice}", "color": "#BBDEFB", "fontSize": "3vh"},
+                ],
+            },
+        ],
+    }, when=NOT_ROUND)])
 
 def build_apl_datasource(solar, spanish=False, thresholds=None, notice=""):
     soc = solar.get('batterySOC', 0)
@@ -596,7 +536,7 @@ def build_response(speech, end_session=True, apl_document=None, apl_datasource=N
                 "type": "Alexa.Presentation.APL.RenderDocument",
                 "token": "solarDashboard",
                 "document": apl_document,
-                "datasources": {"payload": apl_datasource}
+                "datasources": {"solar": apl_datasource}
             }
         ]
     

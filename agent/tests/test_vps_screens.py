@@ -5,6 +5,7 @@ for Flask, with every HTTP call answered here, so nothing reaches the Pi5 or the
 import importlib.util
 import json
 import os
+import re
 import sys
 import types
 
@@ -83,7 +84,7 @@ def directive(body):
 
 
 def payload(body):
-    return directive(body)["datasources"]["payload"]
+    return directive(body)["datasources"]["solar"]
 
 
 def walk(node):
@@ -180,16 +181,76 @@ def test_round_and_rectangle_are_each_chosen_by_when(alexa):
     items = directive(ask(alexa, "GetBatteryIntent"))["document"]["mainTemplate"]["items"]
     assert [i["when"] for i in items] == ["${viewport.shape == 'round'}",
                                           "${viewport.shape != 'round'}"]
-    assert items[0]["paddingLeft"] == "15vw" and items[0]["paddingTop"] == "15vh"
-    assert items[0].get("direction", "column") == "column"
+    column = items[0]["item"]
+    assert column["paddingLeft"] == "15vw" and column["paddingTop"] == "15vh"
+    assert column.get("direction", "column") == "column"
 
 
 def test_the_round_column_says_what_was_asked_for(alexa):
     items = directive(ask(alexa, "GetBatteryIntent"))["document"]["mainTemplate"]["items"]
-    text = [c["text"] for c in items[0]["items"]]
+    text = [c["text"] for c in items[0]["item"]["items"]]
     for field in ("batterySOC", "batteryVoltage", "totalSolar", "mepStatus", "kubotaStatus",
                   "mepThresholds", "kubotaThresholds"):
         assert any(field in t for t in text), field
+
+
+# --- what APL actually accepts ------------------------------------------------------------
+
+def every_screen(alexa):
+    """Each document with the datasource it gets, from the handler itself."""
+    alexa.routes["events"] = {"events": ["e1"]}
+    bodies = [ask(alexa, "GetBatteryIntent"), ask(alexa, "GetEventsIntent"),
+              ask(alexa, "AskAgentIntent", query="anything")]
+    alexa.agent = (202, "")
+    bodies.append(ask(alexa, "AskAgentIntent", query="anything"))
+    return [directive(b) for b in bodies]
+
+
+def test_no_document_binds_the_reserved_payload_parameter(alexa):
+    for d in every_screen(alexa):
+        assert "${payload." not in json.dumps(d["document"])
+        assert d["document"]["mainTemplate"]["parameters"] == ["solar"]
+        assert list(d["datasources"]) == ["solar"]
+
+
+def test_every_builder_is_free_of_payload_bindings(alexa):
+    for build in (alexa.build_apl_document, alexa.build_answer_document, alexa.build_events_document):
+        assert "${payload." not in json.dumps(build())
+
+
+def test_every_binding_has_a_value_to_show(alexa):
+    """A name missing from the datasource renders blank on the device, silently."""
+    for d in every_screen(alexa):
+        names = set(re.findall(r"\$\{solar\.(\w+)", json.dumps(d["document"])))
+        assert names, d["document"]
+        assert names <= set(d["datasources"]["solar"]), names - set(d["datasources"]["solar"])
+
+
+def test_no_style_keys_are_left(alexa):
+    for d in every_screen(alexa):
+        assert not [n for n in walk(d["document"]) if "style" in n]
+
+
+def test_frames_hold_one_child_and_a_real_colour(alexa):
+    for d in every_screen(alexa):
+        frames = [n for n in walk(d["document"]) if n.get("type") == "Frame"]
+        assert frames
+        for frame in frames:
+            assert "item" in frame and "items" not in frame
+            assert re.fullmatch(r"#[0-9A-Fa-f]{6}([0-9A-Fa-f]{2})?", frame["backgroundColor"])
+
+
+def test_every_page_has_the_background(alexa):
+    for d in every_screen(alexa):
+        for item in d["document"]["mainTemplate"]["items"]:
+            assert item["type"] == "Frame" and item["backgroundColor"] == "#1a1a2e"
+
+
+def test_the_dashboard_cards_are_rounded_frames(alexa):
+    doc = alexa.build_apl_document()
+    cards = [n for n in walk(doc) if n.get("borderRadius")]
+    assert len(cards) == 4
+    assert all(c["type"] == "Frame" and c["backgroundColor"] == "#FFFFFF1A" for c in cards)
 
 
 # --- events -------------------------------------------------------------------------------
