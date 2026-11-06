@@ -122,6 +122,27 @@ in both locales, then Build. Unknown `Ask*Intent` names get the existing "not su
 Left out on purpose in Spanish: `dime {query}` and bare `pregunta {query}`, so they
 can't take over existing intents.
 
+## Starting and stopping a generator by voice
+
+`StartGeneratorIntent` and `StopGeneratorIntent` act only when
+`intent.confirmationStatus` is `CONFIRMED`:
+
+| Status | What happens |
+|---|---|
+| `CONFIRMED` | Start: `/setgen?id=…&state=1`. Stop: the graceful `/stopgen?id=…`. |
+| `DENIED` | Nothing. "OK, I won't." / "Está bien, no lo haré." |
+| `NONE`, or anything else | Nothing. "Please confirm: start the kubota?" |
+
+Intent confirmation goes on in the console, in both locales, with auto-delegation on,
+so that Alexa asks the question itself and sends the final status. The handler returns
+no dialog directive.
+
+`SetGeneratorAutoIntent`, `SetGeneratorOffIntent`, `EnableAutoGenIntent` and
+`DisableAutoGenIntent` don't check for confirmation.
+
+`SessionEndedRequest` gets an empty response, and its reason and error go to the log
+as `DEBUG SessionEnded`. That is where to look when Alexa reports an invalid response.
+
 ## Deploying the backend
 
 ```bash
