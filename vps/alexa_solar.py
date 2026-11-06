@@ -36,6 +36,41 @@ AGENT_LATER = {
 }
 
 
+# Alexa drops the carrier word from a SearchQuery slot: with `why {query}`, "why did
+# the Kubota start" arrives as "did the Kubota start". So there is one intent per
+# leading question word, and this puts the word back.
+AGENT_PREFIX = {
+    "AskAgentIntent": "",
+    # English
+    "AskWhyIntent": "why",
+    "AskHowIntent": "how",
+    "AskWhatIntent": "what",
+    "AskWhatIsIntent": "what is",
+    "AskWhenIntent": "when",
+    "AskWhichIntent": "which",
+    "AskWillIntent": "will",
+    "AskIsIntent": "is",
+    "AskAreIntent": "are",
+    "AskDidIntent": "did",
+    "AskDoIntent": "do",
+    "AskDoesIntent": "does",
+    "AskWasIntent": "was",
+    "AskShouldIntent": "should",
+    # Spanish
+    "AskPorQueIntent": "por qué",
+    "AskComoIntent": "cómo",
+    "AskCuantoIntent": "cuánto",
+    "AskCuantaIntent": "cuánta",
+    "AskCuantosIntent": "cuántos",
+    "AskQueIntent": "qué",
+    "AskCualIntent": "cuál",
+    "AskCuandoIntent": "cuándo",
+    "AskHayIntent": "hay",
+    "AskVaIntent": "va a",
+    "AskEstaIntent": "está",
+}
+
+
 def ask_agent(query, lang):
     """Put a free-form question to the solar agent. Returns speech text."""
     try:
@@ -618,7 +653,7 @@ def alexa_handler():
                         speech = f"Failed to disable auto control. Current state: {actual_state or 'unknown'}."
                 return build_response(speech)
             
-            elif intent == 'AskAgentIntent':
+            elif intent in AGENT_PREFIX:
                 slots = data['request']['intent'].get('slots') or {}
                 query = (slots.get('query') or {}).get('value') or ''
                 query = query.strip()
@@ -626,8 +661,9 @@ def alexa_handler():
                     speech = ("No entendi la pregunta." if spanish
                               else "I didn't catch the question.")
                     return build_response(speech, end_session=False)
-                print(f"DEBUG AskAgentIntent: {query}")
-                speech = ask_agent(query, 'es' if spanish else 'en')
+                question = f"{AGENT_PREFIX[intent]} {query}".strip()
+                print(f"DEBUG {intent}: {question}")
+                speech = ask_agent(question, 'es' if spanish else 'en')
                 return build_response(speech)
 
             elif intent == 'AMAZON.HelpIntent':
