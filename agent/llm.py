@@ -26,6 +26,19 @@ class LLMError(RuntimeError):
     pass
 
 
+def _server_message(response):
+    """The reason llama-server gave, from its {"error": {"message": ...}} body."""
+    if response is None:
+        return None
+    try:
+        error = response.json().get("error")
+    except (ValueError, AttributeError):
+        return None
+    if isinstance(error, dict):
+        error = error.get("message")
+    return str(error) if error else None
+
+
 class LLM:
     def __init__(self, cfg, timeout=180):
         self.url = cfg["llm_url"]
@@ -47,10 +60,22 @@ class LLM:
             r = requests.post(self.url, json=payload, timeout=self.timeout)
             r.raise_for_status()
             body = r.json()
-        except requests.RequestException as e:
+        # Timeout first: a ConnectTimeout is a ConnectionError as well. ValueError
+        # before RequestException: requests' own JSON error is both. On 2026-11-05
+        # two 500s from a full context pool were logged as "unreachable".
+        except requests.Timeout as e:
+            raise LLMError(f"llama-server timed out after {self.timeout} s") from e
+        except requests.HTTPError as e:
+            code = e.response.status_code if e.response is not None else "?"
+            said = _server_message(e.response)
+            raise LLMError(f"llama-server returned HTTP {code}"
+                           + (f": {said}" if said else "")) from e
+        except requests.ConnectionError as e:
             raise LLMError(f"llama-server unreachable at {self.url}: {e}") from e
         except ValueError as e:
             raise LLMError(f"llama-server returned non-JSON: {e}") from e
+        except requests.RequestException as e:
+            raise LLMError(f"llama-server request failed: {e}") from e
         try:
             msg = body["choices"][0]["message"]
         except (KeyError, IndexError) as e:
