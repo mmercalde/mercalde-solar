@@ -19,6 +19,7 @@ import sqlite3
 import sys
 import threading
 import time
+import unicodedata
 from datetime import datetime, timedelta
 
 import requests
@@ -96,16 +97,38 @@ PLAN_QUESTION_RE = re.compile(
     r"(?:the\s+|your\s+|our\s+)?"
     r"(?:tonight'?s?\s+|today'?s?\s+|current\s+|latest\s+|last\s+)?"
     r"plan"
-    r"(?:\s+for\s+(?:tonight|today|the\s+night))?$"
+    r"(?:\s+for\s+(?:tonight|today|the\s+night)|\s+tonight|\s+today)?$"
+    # Alexa's slot hands over "what the plan is tonight".
+    r"|^what\s+(?:the\s+|your\s+|our\s+)?plan\s+is"
+    r"(?:\s+for\s+(?:tonight|today|the\s+night)|\s+tonight|\s+today)?$"
     r"|^/plan$"
-    r"|^(?:cual\s+es\s+)?(?:el\s+)?plan(?:\s+de\s+esta\s+noche|\s+de\s+hoy)?$",
+    r"|^(?:cual\s+es\s+)?(?:el\s+)?plan"
+    r"(?:\s+(?:de\s+|para\s+)?(?:esta\s+noche|hoy))?$",
     re.IGNORECASE)
 
 
 def is_plan_question(text):
-    """Is this a request for the plan record itself?"""
-    cleaned = " ".join(str(text or "").strip().strip("?!.¿ ").lower().split())
+    """Is this a request for the plan record itself? Accents don't matter."""
+    plain = "".join(c for c in unicodedata.normalize("NFD", str(text or ""))
+                    if not unicodedata.combining(c))
+    cleaned = " ".join(plain.strip().strip("?!.¿ ").lower().split())
     return bool(PLAN_QUESTION_RE.match(cleaned))
+
+
+# What Alexa says for the plan. The record runs to 180 words of shorthand, which
+# is for reading, so the phone gets that and the voice gets one sentence.
+PLAN_SPOKEN = {
+    "en": {"tonight": "The pack is projected to reach the {v:.1f} volt start at {when}",
+           "not_tonight": "The pack is not projected to reach the {v:.1f} volt start tonight",
+           "already": "The pack is already at or below the {v:.1f} volt start",
+           "unknown": "I can't say when the pack will reach the {v:.1f} volt start",
+           "phone": "; the full plan is on your phone."},
+    "es": {"tonight": "Se proyecta que la batería llegue al arranque de {v:.1f} voltios a las {when}",
+           "not_tonight": "No se proyecta que la batería llegue al arranque de {v:.1f} voltios esta noche",
+           "already": "La batería ya está en el arranque de {v:.1f} voltios o por debajo",
+           "unknown": "No puedo decir cuándo llegará la batería al arranque de {v:.1f} voltios",
+           "phone": "; el plan completo está en tu teléfono."},
+}
 
 
 def _fmt(v, places=1, dash="?"):
@@ -1032,6 +1055,35 @@ class Agent:
 
     # --- inbound questions --------------------------------------------------
 
+    def plan_brief(self, text, lang=None):
+        """(one spoken sentence, the full record) for a plan question, or None.
+
+        For a caller that speaks: POST /ask with deliver=telegram says the
+        sentence and sends the record. None for any other question, and before
+        the first plan, so answer() deals with those as it always has. Every
+        word is Python's, with figures from the plan the record is.
+        """
+        if not is_plan_question(text):
+            return None
+        snap = self.latest_plan_json()
+        if not (snap.get("ts") and snap.get("text")):
+            return None
+        words = PLAN_SPOKEN.get(lang) or PLAN_SPOKEN["en"]
+        proj = (snap.get("data") or {}).get("projection") or {}
+        start = (snap.get("intended") or {}).get("mep_start", self.cfg["default_start"])
+        now = int(time.time())
+        reached, reason = proj.get("reached"), proj.get("reason") or ""
+        when = ""
+        if reached and reason.startswith("already"):
+            kind = "already"
+        elif reached:
+            sunrise = sunmod.next_sunrise(self.cfg, now=now)
+            kind = "not_tonight" if sunrise and reached > sunrise else "tonight"
+            when = history.clock(reached, self.cfg)
+        else:
+            kind = "not_tonight" if reason.startswith("not reached") else "unknown"
+        return (words[kind].format(v=start, when=when) + words["phone"], snap["text"])
+
     def answer(self, text, lang=None):
         """Shared by Telegram inbound and POST /ask.
 
@@ -1444,7 +1496,8 @@ class Agent:
         sched.start()
 
         server = ask_server.serve(self.cfg, self.answer, self.latest_plan_json,
-                                  host=ask_host, db_path=self.db_path)
+                                  host=ask_host, db_path=self.db_path,
+                                  brief_handler=self.plan_brief)
         threading.Thread(target=self.telegram_loop, name="telegram",
                          daemon=True).start()
         # In the background: startup must not wait on the model, and the

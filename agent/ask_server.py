@@ -2,7 +2,8 @@
 
   POST /ask   {"text": "...", "lang": "en"|"es"}  -> plain text, 60 words max
               add "deliver": "telegram", "wait_s": N  -> the same 200 if the answer
-              comes within N seconds, otherwise 202, and the answer goes to Telegram
+              comes within N seconds, otherwise 202, and the answer goes to Telegram.
+              A plan question is one spoken sentence, with the record sent to Telegram.
   GET  /plan                                       -> the latest plan record as JSON
 
 Bound to the KAMRUI LAN address only, never 0.0.0.0: the VPS reaches it over
@@ -27,6 +28,17 @@ FALLBACK = {"en": "The solar agent is not answering right now.",
 LATER = {"en": "The answer will be sent by Telegram.",
          "es": "La respuesta se enviará por Telegram."}
 MAX_WAIT_S = 30
+
+
+def _to_telegram(cfg, question, reply):
+    """Send a voice question's answer to the phone. Never raises."""
+    try:
+        sent = telegram.send(cfg, telegram.escape(f"🎙 {question}\n{reply}"))
+    except Exception:                                # noqa: BLE001
+        log.exception("could not send an answer to Telegram")
+        return
+    if not sent:
+        log.warning("an answer did not reach Telegram: %s", question[:80])
 
 
 class _Delivery:
@@ -57,16 +69,7 @@ class _Delivery:
             late = self.gave_up
             self.done.set()
         if late:
-            self._send(reply)
-
-    def _send(self, reply):
-        try:
-            sent = telegram.send(self.cfg, telegram.escape(f"🎙 {self.text}\n{reply}"))
-        except Exception:                            # noqa: BLE001
-            log.exception("could not send a late answer to Telegram")
-            return
-        if not sent:
-            log.warning("a late answer did not reach Telegram: %s", self.text[:80])
+            _to_telegram(self.cfg, self.text, reply)
 
     def wait(self, seconds):
         """The answer if it came in time. Otherwise None, and Telegram gets it."""
@@ -153,6 +156,14 @@ class _Handler(BaseHTTPRequestHandler):
             return
 
         if body.get("deliver") == "telegram":
+            brief = self._brief(text, lang)
+            if brief:
+                spoken, full = brief
+                # Not on this thread: Telegram can take longer than Alexa will wait.
+                threading.Thread(target=_to_telegram, args=(self.server.cfg, text, full),
+                                 name="ask-delivery", daemon=True).start()
+                self._send(200, spoken)
+                return
             reply = _Delivery(self.server.cfg, self.server.ask_handler, text,
                               lang).wait(_wait_seconds(body.get("wait_s")))
             if reply is None:
@@ -170,19 +181,34 @@ class _Handler(BaseHTTPRequestHandler):
         self._send(200, reply or FALLBACK[lang])
 
 
+    def _brief(self, text, lang):
+        """The short spoken form, if this question has one. A failure is no form."""
+        handler = self.server.brief_handler
+        if not handler:
+            return None
+        try:
+            return handler(text, lang)
+        except Exception:                            # noqa: BLE001
+            log.exception("brief handler failed")
+            return None
+
+
 class AskServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
-    def __init__(self, addr, ask_handler, plan_provider, db_path=None, cfg=None):
+    def __init__(self, addr, ask_handler, plan_provider, db_path=None, cfg=None,
+                 brief_handler=None):
         super().__init__(addr, _Handler)
         self.cfg = cfg
+        self.brief_handler = brief_handler
         self.ask_handler = ask_handler
         self.plan_provider = plan_provider
         self.db_path = db_path
 
 
-def serve(cfg, ask_handler, plan_provider, host=None, port=None, db_path=None):
+def serve(cfg, ask_handler, plan_provider, host=None, port=None, db_path=None,
+          brief_handler=None):
     """Start the server on a daemon thread. Returns the server, or None.
 
     `plan_provider` is called with a read-only connection opened for that
@@ -192,7 +218,8 @@ def serve(cfg, ask_handler, plan_provider, host=None, port=None, db_path=None):
     # `or` would swallow port 0, which asks the OS for a free port.
     port = cfg["ask_port"] if port is None else port
     try:
-        server = AskServer((host, port), ask_handler, plan_provider, db_path, cfg)
+        server = AskServer((host, port), ask_handler, plan_provider, db_path, cfg,
+                           brief_handler)
     except OSError as e:
         log.error("cannot bind ask server to %s:%s (%s). Alexa and /plan will "
                   "be unavailable; the rest of the agent runs normally.",

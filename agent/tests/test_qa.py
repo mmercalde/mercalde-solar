@@ -97,6 +97,11 @@ def test_the_tool_is_offered_to_the_model():
     "plan", "/plan", "el plan", "the plan", "latest plan",
     "What is tonight's plan?", "whats the plan", "What's the plan?",
     "What is the plan for tonight?", "cual es el plan", "plan de esta noche",
+    "what is the plan tonight", "what's the plan tonight", "whats the plan today",
+    "what the plan is tonight", "what the plan is", "what the plan is for tonight",
+    "plan tonight", "cuál es el plan", "¿Cuál es el plan de esta noche?",
+    "cual es el plan de esta noche", "cuál es el plan para esta noche",
+    "el plan de hoy", "plan para hoy", "CUÁL ES EL PLAN",
 ])
 def test_a_plan_question_is_recognised(q):
     assert agentmod.is_plan_question(q)
@@ -106,6 +111,8 @@ def test_a_plan_question_is_recognised(q):
     "What should the plan be if it storms?", "how is the plan going to work",
     "planning permission", "what is the plan for the generator overhaul",
     "why did the plan change", "",
+    "what the plan is for the generator", "what is the plan b",
+    "cuál es el plan para el generador", "por qué cambió el plan", "cual es el plano",
 ])
 def test_a_question_merely_containing_plan_is_not(q):
     assert not agentmod.is_plan_question(q)
@@ -653,3 +660,71 @@ def test_a_daylight_reply_in_spanish_can_carry_the_caveat():
     assert eval_cases.grade_shortfall(
         "El déficit es de 4.4 kWh. No es definitivo: la regla de recarga decide a las 9:00 pm.",
         truth)[0]
+
+
+# --- the plan, spoken ------------------------------------------------------------
+
+def plan_with(a, conn, monkeypatch, projection, now=None):
+    now = now or int(toolsmod.time.time())
+    history.record_plan(conn, "the full record", {"projection": projection}, ts=now)
+    return now
+
+
+@pytest.mark.parametrize("lang,start,end", [
+    ("en", "The pack is projected to reach the 52.0 volt start at ",
+     "; the full plan is on your phone."),
+    ("es", "Se proyecta que la batería llegue al arranque de 52.0 voltios a las ",
+     "; el plan completo está en tu teléfono."),
+])
+def test_a_crossing_tonight_is_spoken_with_its_time(a, conn, cfg, monkeypatch, lang, start, end):
+    now = ts_at(cfg, "2026-11-06", 20, 0)
+    monkeypatch.setattr(agentmod.time, "time", lambda: now)
+    reached = ts_at(cfg, "2026-11-07", 5, 31)
+    plan_with(a, conn, monkeypatch, {"reached": reached}, now)
+    spoken, full = a.plan_brief("what is the plan tonight", lang)
+    assert spoken == f"{start}5:31 am{end}"
+    assert full == "the full record"
+    assert len(spoken.split()) < 30
+
+
+@pytest.mark.parametrize("lang,says", [("en", "not projected"), ("es", "No se proyecta")])
+def test_a_crossing_after_sunrise_is_not_tonight(a, conn, cfg, monkeypatch, lang, says):
+    now = ts_at(cfg, "2026-11-06", 20, 0)
+    monkeypatch.setattr(agentmod.time, "time", lambda: now)
+    plan_with(a, conn, monkeypatch, {"reached": ts_at(cfg, "2026-11-07", 21, 10)}, now)
+    spoken, _ = a.plan_brief("plan", lang)
+    assert says in spoken and "9:10" not in spoken
+
+
+@pytest.mark.parametrize("lang,says", [("en", "not projected"), ("es", "No se proyecta")])
+def test_a_crossing_outside_the_horizon_is_not_tonight(a, conn, monkeypatch, lang, says):
+    plan_with(a, conn, monkeypatch, {"reached": None, "reason": "not reached within 48 h"})
+    assert says in a.plan_brief("plan", lang)[0]
+
+
+@pytest.mark.parametrize("lang,says", [("en", "already at or below"), ("es", "ya está")])
+def test_already_below_says_so(a, conn, monkeypatch, lang, says):
+    now = int(toolsmod.time.time())
+    plan_with(a, conn, monkeypatch, {"reached": now, "reason": "already at or below target"}, now)
+    assert says in a.plan_brief("plan", lang)[0]
+
+
+@pytest.mark.parametrize("lang,says", [("en", "I can't say"), ("es", "No puedo decir")])
+def test_a_projection_that_cannot_say_is_not_called_no_run(a, conn, monkeypatch, lang, says):
+    plan_with(a, conn, monkeypatch, {"reached": None, "reason": "load profile not learned"})
+    spoken = a.plan_brief("plan", lang)[0]
+    assert says in spoken and "not projected" not in spoken
+
+
+def test_no_language_is_english(a, conn, monkeypatch):
+    plan_with(a, conn, monkeypatch, {"reached": None, "reason": "load profile not learned"})
+    assert a.plan_brief("plan", None)[0].startswith("I can't say")
+
+
+def test_only_a_plan_question_has_a_brief(a, conn, monkeypatch):
+    plan_with(a, conn, monkeypatch, {"reached": None, "reason": "x"})
+    assert a.plan_brief("how much solar did we make yesterday", "en") is None
+
+
+def test_before_the_first_plan_there_is_no_brief(a):
+    assert a.plan_brief("plan", "en") is None

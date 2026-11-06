@@ -391,3 +391,50 @@ def test_without_deliver_telegram_the_caller_waits_as_it_always_has(cfg, db, sen
         assert sent["texts"] == []
     finally:
         srv.shutdown()
+
+
+# --- a plan question, spoken: one sentence, and the record to the phone ----------
+
+def test_a_plan_question_is_spoken_short_and_the_record_goes_to_telegram(cfg, db, sent):
+    def never(text, lang):
+        raise AssertionError("the brief answers this, not the handler")
+    srv = ask_server.serve(cfg, never, lambda c: {}, host="127.0.0.1", port=0, db_path=db,
+                           brief_handler=lambda t, l: ("One sentence.", "the <full> record"))
+    try:
+        assert deliver(srv, text="the plan", wait_s=5) == (200, "One sentence.")
+        assert sent["arrived"].wait(5)
+        assert sent["texts"] == ["🎙 the plan\nthe &lt;full&gt; record"]
+    finally:
+        srv.shutdown()
+
+
+def test_a_question_with_no_brief_goes_the_usual_way(cfg, db, sent):
+    srv = ask_server.serve(cfg, lambda t, l: "answered", lambda c: {}, host="127.0.0.1", port=0,
+                           db_path=db, brief_handler=lambda t, l: None)
+    try:
+        assert deliver(srv, wait_s=5) == (200, "answered")
+        assert sent["texts"] == []
+    finally:
+        srv.shutdown()
+
+
+def test_a_brief_that_fails_falls_back_to_the_handler(cfg, db, sent):
+    def broken(text, lang):
+        raise RuntimeError("no plan for you")
+    srv = ask_server.serve(cfg, lambda t, l: "the record", lambda c: {}, host="127.0.0.1", port=0,
+                           db_path=db, brief_handler=broken)
+    try:
+        assert deliver(srv, text="plan", wait_s=5) == (200, "the record")
+    finally:
+        srv.shutdown()
+
+
+def test_plain_ask_gets_the_handler_even_with_a_brief_available(cfg, db, sent):
+    srv = ask_server.serve(cfg, lambda t, l: "the whole record", lambda c: {}, host="127.0.0.1",
+                           port=0, db_path=db, brief_handler=lambda t, l: ("short", "full"))
+    try:
+        assert post(srv, "/ask", {"text": "plan", "lang": "en"}) == (200, "the whole record")
+        time.sleep(0.1)
+        assert sent["texts"] == []
+    finally:
+        srv.shutdown()
