@@ -10,6 +10,7 @@
   "start_voltage_min": 52.0, "start_voltage_max": 56.0,
   "stop_voltage_min": 54.5,  "stop_voltage_max": 57.0,
   "default_start": 52.0, "default_stop": 56.0,
+  "gpu_check_min_gtt_mib": 5000,
   "solo_peak_threshold": 57.0,
   "storm_cloud_pct": 70, "clear_cloud_pct": 30, "predawn_hours": 2.0,
   "predawn_hysteresis_min": 20,

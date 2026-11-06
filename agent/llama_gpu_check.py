@@ -34,9 +34,11 @@ import telegram  # noqa: E402
 
 WARNING = "no usable GPU found"
 
-# The 8B at -c 16384 settles around 7.2 GB of GTT. Anything under a gigabyte
-# means the weights are not on the GPU: a CPU fallback parks at ~89 MiB.
-GTT_FLOOR_BYTES = 1 << 30
+# Gemma 4 E4B at -c 16384 reads about 7.6 GB of GTT raw. This box idles at about
+# 1.69 GB with no model loaded, so a floor of 1 GB passed with llama-server stopped
+# on 2026-11-04. Over 5 GB means the weights are on the GPU. Set
+# `gpu_check_min_gtt_mib` if a smaller model goes live.
+DEFAULT_MIN_GTT_MIB = 5000
 
 # Loading the model off disk takes a couple of seconds warm, longer cold.
 WAIT_SECONDS = 180
@@ -94,19 +96,25 @@ def journal_says_fallback():
     return WARNING in out.stdout
 
 
-def wait_for_model():
+def floor_bytes(cfg):
+    """The least GTT a loaded model can read, from the config."""
+    return int(cfg.get("gpu_check_min_gtt_mib", DEFAULT_MIN_GTT_MIB)) * (1 << 20)
+
+
+def wait_for_model(floor):
     """Give the server time to load before judging GTT. True if it got there."""
     deadline = time.monotonic() + WAIT_SECONDS
     while time.monotonic() < deadline:
         used = gtt_used_bytes()
-        if used is not None and used >= GTT_FLOOR_BYTES:
+        if used is not None and used >= floor:
             return True
         time.sleep(POLL_SECONDS)
     return False
 
 
 def main():
-    on_gpu = wait_for_model()
+    cfg = config.load()
+    on_gpu = wait_for_model(floor_bytes(cfg))
     used = gtt_used_bytes()
     fallback = journal_says_fallback()
 
@@ -134,7 +142,6 @@ def main():
     )
     print(text, file=sys.stderr)
 
-    cfg = config.load()
     if telegram.configured(cfg):
         telegram.send(cfg, telegram.escape(text))
     return 1
