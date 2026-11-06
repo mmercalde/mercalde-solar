@@ -611,19 +611,26 @@ def alexa_handler():
             
             elif intent == 'SetGeneratorOffIntent':
                 print("DEBUG: SetGeneratorOffIntent triggered")
+                confirmation = data['request'].get('intent', {}).get('confirmationStatus', '')
                 slots = data['request'].get('intent', {}).get('slots', {})
                 generator = slots.get('generator', {}).get('value', 'unknown')
                 
-                gen_id = get_gen_id(generator)
-                if gen_id == 'all':
-                    set_generator(50, 0)
-                    set_generator(51, 0)
-                    speech = "Poniendo ambos generadores en modo apagado." if spanish else "Setting both generators to off mode."
-                elif gen_id:
-                    set_generator(gen_id, 0)
-                    speech = f"Poniendo el generador {generator} en modo apagado." if spanish else f"Setting the {generator} generator to off mode."
+                if confirmation == 'CONFIRMED':
+                    gen_id = get_gen_id(generator)
+                    if gen_id == 'all':
+                        set_generator(50, 0)
+                        set_generator(51, 0)
+                        speech = "Poniendo ambos generadores en modo apagado." if spanish else "Setting both generators to off mode."
+                    elif gen_id:
+                        set_generator(gen_id, 0)
+                        speech = f"Poniendo el generador {generator} en modo apagado." if spanish else f"Setting the {generator} generator to off mode."
+                    else:
+                        speech = f"No reconozco el generador {generator}." if spanish else f"I don't recognize the generator {generator}."
+                elif confirmation == 'DENIED':
+                    speech = "Está bien, no lo haré." if spanish else "OK, I won't."
                 else:
-                    speech = f"No reconozco el generador {generator}." if spanish else f"I don't recognize the generator {generator}."
+                    speech = f"Confirma: poner el {generator} en modo apagado?" if spanish else f"Please confirm: set the {generator} to off?"
+                    return build_response(speech, end_session=False)
                 return build_response(speech)
             
             elif intent == 'EnableAutoGenIntent':

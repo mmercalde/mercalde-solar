@@ -124,21 +124,25 @@ can't take over existing intents.
 
 ## Starting and stopping a generator by voice
 
-`StartGeneratorIntent` and `StopGeneratorIntent` act only when
-`intent.confirmationStatus` is `CONFIRMED`:
+`StartGeneratorIntent`, `StopGeneratorIntent` and `SetGeneratorOffIntent` act only
+when `intent.confirmationStatus` is `CONFIRMED`:
 
 | Status | What happens |
 |---|---|
-| `CONFIRMED` | Start: `/setgen?id=…&state=1`. Stop: the graceful `/stopgen?id=…`. |
+| `CONFIRMED` | Start: `/setgen?id=…&state=1`. Stop: the graceful `/stopgen?id=…`. Off: `/setgen?id=…&state=0`. |
 | `DENIED` | Nothing. "OK, I won't." / "Está bien, no lo haré." |
-| `NONE`, or anything else | Nothing. "Please confirm: start the kubota?" |
+| `NONE`, or anything else | Nothing. "Please confirm: …" with the session left open. |
 
-Intent confirmation goes on in the console, in both locales, with auto-delegation on,
-so that Alexa asks the question itself and sends the final status. The handler returns
-no dialog directive.
+**Start and stop have confirmation on in the console** (delegationStrategy ALWAYS, in
+en-US and es-US), so voice start and stop work today. Alexa asks "Are you sure you want
+to start/stop the {generator}?" / "¿Estás seguro que quieres prender/apagar el
+{generator}?" and sends the final status. The handler returns no dialog directive.
 
-`SetGeneratorAutoIntent`, `SetGeneratorOffIntent`, `EnableAutoGenIntent` and
-`DisableAutoGenIntent` don't check for confirmation.
+**Off needs its prompt added in the console, in both locales, with the same delegation.**
+Until then a voice Off changes nothing and only gets "Please confirm: …".
+
+`SetGeneratorAutoIntent`, `EnableAutoGenIntent` and `DisableAutoGenIntent` don't check
+for confirmation.
 
 `SessionEndedRequest` gets an empty response, and its reason and error go to the log
 as `DEBUG SessionEnded`. That is where to look when Alexa reports an invalid response.

@@ -1,4 +1,4 @@
-"""Start and stop act only on a CONFIRMED intent, and no test here reaches a generator.
+"""Start, stop and off act only on a CONFIRMED intent, and no test here reaches a generator.
 
 The real vps/alexa_solar.py handler runs against a stand-in for Flask, with every
 HTTP call recorded instead of sent. Alexa's intent confirmation decides between
@@ -70,7 +70,10 @@ def speech(response):
     return response["outputSpeech"]["text"]
 
 
-@pytest.mark.parametrize("intent", ["StartGeneratorIntent", "StopGeneratorIntent"])
+GUARDED = ["StartGeneratorIntent", "StopGeneratorIntent", "SetGeneratorOffIntent"]
+
+
+@pytest.mark.parametrize("intent", GUARDED)
 @pytest.mark.parametrize("status", ["NONE", None, "", "SOMETHING_NEW"])
 @pytest.mark.parametrize("generator", ["kubota", "mep", "both"])
 def test_nothing_moves_without_confirmation(alexa, intent, status, generator):
@@ -78,7 +81,7 @@ def test_nothing_moves_without_confirmation(alexa, intent, status, generator):
     assert alexa.calls == []
 
 
-@pytest.mark.parametrize("intent", ["StartGeneratorIntent", "StopGeneratorIntent"])
+@pytest.mark.parametrize("intent", GUARDED)
 @pytest.mark.parametrize("generator", ["kubota", "mep", "both", "the blue one"])
 def test_denied_moves_nothing_and_says_so(alexa, intent, generator):
     response = say(alexa, intent, "DENIED", generator)
@@ -87,7 +90,7 @@ def test_denied_moves_nothing_and_says_so(alexa, intent, generator):
     assert response["shouldEndSession"] is True
 
 
-@pytest.mark.parametrize("intent", ["StartGeneratorIntent", "StopGeneratorIntent"])
+@pytest.mark.parametrize("intent", GUARDED)
 def test_denied_in_spanish(alexa, intent):
     response = say(alexa, intent, "DENIED", "kubota", "es-US")
     assert alexa.calls == []
@@ -108,7 +111,27 @@ def test_a_confirmed_stop_uses_the_graceful_stop(alexa, generator, ids):
     assert alexa.calls == [f"{alexa.ESP8266_STOPGEN_URL}?id={i}" for i in ids]
 
 
-@pytest.mark.parametrize("intent", ["StartGeneratorIntent", "StopGeneratorIntent"])
+@pytest.mark.parametrize("generator,ids", [("kubota", ["50"]), ("mep", ["51"]),
+                                           ("both", ["50", "51"])])
+def test_a_confirmed_off_writes_mode_off(alexa, generator, ids):
+    say(alexa, "SetGeneratorOffIntent", "CONFIRMED", generator)
+    assert alexa.calls == [f"{alexa.ESP8266_GEN_URL}?id={i}&state=0" for i in ids]
+
+
+@pytest.mark.parametrize("locale,asks", [("en-US", "Please confirm: set the kubota to off?"),
+                                         ("es-US", "Confirma: poner el kubota en modo apagado?")])
+def test_an_unconfirmed_off_asks_and_keeps_the_session_open(alexa, locale, asks):
+    response = say(alexa, "SetGeneratorOffIntent", "NONE", "kubota", locale)
+    assert speech(response) == asks and response["shouldEndSession"] is False
+
+
+def test_auto_is_left_as_it_was(alexa):
+    """Off was the one to guard. Auto hands the generator back to the AGS."""
+    say(alexa, "SetGeneratorAutoIntent", "NONE", "kubota")
+    assert alexa.calls == [f"{alexa.ESP8266_GEN_URL}?id=50&state=2"]
+
+
+@pytest.mark.parametrize("intent", GUARDED)
 def test_a_confirmed_generator_it_cannot_name_moves_nothing(alexa, intent):
     response = say(alexa, intent, "CONFIRMED", "the blue one")
     assert alexa.calls == []
