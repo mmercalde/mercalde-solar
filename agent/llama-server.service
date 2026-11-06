@@ -1,7 +1,6 @@
 [Unit]
 Description=llama.cpp server (Gemma 4 E4B, Vulkan)
-After=network.target dev-dri-renderD128.device
-Wants=dev-dri-renderD128.device
+After=network.target
 
 [Service]
 Type=simple
