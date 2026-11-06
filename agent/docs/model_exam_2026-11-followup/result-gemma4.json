@@ -1,0 +1,1286 @@
+[
+ {
+  "label": "gemma4 @ 127.0.0.1:8080",
+  "url": "http://127.0.0.1:8080/v1/chat/completions",
+  "model": "gemma4",
+  "snapshot": "/tmp/abexam-followup/history.sqlite",
+  "sandbox": "/tmp/abexam-followup/gemma4_127.0.0.1_8080",
+  "cases": [
+   {
+    "question": "Why did the Kubota start twice yesterday morning?",
+    "lang": "en",
+    "reply": "The history for yesterday, midnight to midnight, shows that the Kubota generator ran for 0.0 minutes, so it did not start twice yesterday morning.",
+    "asked_at": 1793937288,
+    "ended_at": 1793937363,
+    "wall_s": 75.3,
+    "answered_by": "model",
+    "tool_calls": [
+     {
+      "name": "get_history",
+      "args": {
+       "window": "yesterday"
+      }
+     }
+    ],
+    "invalid_calls": [],
+    "unsourced": [],
+    "ungrounded_retry": false,
+    "status_fallback": false,
+    "id": "kubota_twice",
+    "about": "a raised start threshold, and a false premise about the day",
+    "attempt": 1,
+    "passed": true,
+    "why": "says it did not start, and no start is on record",
+    "truth": {
+     "today": "2026-11-05",
+     "yesterday": "2026-11-04",
+     "starts_today": 0,
+     "starts_yesterday": 0,
+     "started_above_default": []
+    },
+    "key": "case:kubota_twice:1",
+    "kind": "case"
+   },
+   {
+    "question": "Why did the Kubota start twice yesterday morning?",
+    "lang": "en",
+    "reply": "The history for the last 24 hours shows the Kubota ran for 14 minutes, but the current status shows neither generator is running, and the history does not show two starts yesterday morning.",
+    "asked_at": 1793937394,
+    "ended_at": 1793937420,
+    "wall_s": 26.2,
+    "answered_by": "model",
+    "tool_calls": [
+     {
+      "name": "get_history",
+      "args": {
+       "hours": 24
+      }
+     },
+     {
+      "name": "get_status",
+      "args": {}
+     }
+    ],
+    "invalid_calls": [],
+    "unsourced": [],
+    "ungrounded_retry": false,
+    "status_fallback": false,
+    "id": "kubota_twice",
+    "about": "a raised start threshold, and a false premise about the day",
+    "attempt": 2,
+    "passed": true,
+    "why": "says it did not start, and no start is on record",
+    "truth": {
+     "today": "2026-11-05",
+     "yesterday": "2026-11-04",
+     "starts_today": 0,
+     "starts_yesterday": 0,
+     "started_above_default": []
+    },
+    "key": "case:kubota_twice:2",
+    "kind": "case"
+   },
+   {
+    "question": "Why did the Kubota start twice yesterday morning?",
+    "lang": "en",
+    "reply": "The history for yesterday, midnight to midnight, shows that the Kubota generator ran for 0.0 minutes, so it did not start twice yesterday morning.",
+    "asked_at": 1793937450,
+    "ended_at": 1793937470,
+    "wall_s": 19.8,
+    "answered_by": "model",
+    "tool_calls": [
+     {
+      "name": "get_history",
+      "args": {
+       "window": "yesterday"
+      }
+     }
+    ],
+    "invalid_calls": [],
+    "unsourced": [],
+    "ungrounded_retry": false,
+    "status_fallback": false,
+    "id": "kubota_twice",
+    "about": "a raised start threshold, and a false premise about the day",
+    "attempt": 3,
+    "passed": true,
+    "why": "says it did not start, and no start is on record",
+    "truth": {
+     "today": "2026-11-05",
+     "yesterday": "2026-11-04",
+     "starts_today": 0,
+     "starts_yesterday": 0,
+     "started_above_default": []
+    },
+    "key": "case:kubota_twice:3",
+    "kind": "case"
+   },
+   {
+    "question": "How long did each generator run in the last 24 hours?",
+    "lang": "en",
+    "reply": "Based on the data from the last 24 hours, neither the MEP nor the Kubota generator ran.",
+    "asked_at": 1793937500,
+    "ended_at": 1793937531,
+    "wall_s": 30.8,
+    "answered_by": "model",
+    "tool_calls": [
+     {
+      "name": "get_gen_runtime",
+      "args": {
+       "days": 1
+      }
+     }
+    ],
+    "invalid_calls": [],
+    "unsourced": [],
+    "ungrounded_retry": false,
+    "status_fallback": false,
+    "id": "runtime_24h",
+    "about": "figures that match gen_runs, and naming a generator that idled",
+    "attempt": 1,
+    "passed": true,
+    "why": "no generator ran, and the answer says so of both",
+    "truth": {
+     "mep": {
+      "runs": 0,
+      "minutes": 0
+     },
+     "kubota": {
+      "runs": 0,
+      "minutes": 0
+     }
+    },
+    "key": "case:runtime_24h:1",
+    "kind": "case"
+   },
+   {
+    "question": "How long did each generator run in the last 24 hours?",
+    "lang": "en",
+    "reply": "Based on the data from the last 24 hours, neither the Kubota nor the MEP generator ran.",
+    "asked_at": 1793937561,
+    "ended_at": 1793937592,
+    "wall_s": 30.8,
+    "answered_by": "model",
+    "tool_calls": [
+     {
+      "name": "get_gen_runtime",
+      "args": {
+       "days": 1
+      }
+     }
+    ],
+    "invalid_calls": [],
+    "unsourced": [],
+    "ungrounded_retry": false,
+    "status_fallback": false,
+    "id": "runtime_24h",
+    "about": "figures that match gen_runs, and naming a generator that idled",
+    "attempt": 2,
+    "passed": true,
+    "why": "no generator ran, and the answer says so of both",
+    "truth": {
+     "mep": {
+      "runs": 0,
+      "minutes": 0
+     },
+     "kubota": {
+      "runs": 0,
+      "minutes": 0
+     }
+    },
+    "key": "case:runtime_24h:2",
+    "kind": "case"
+   },
+   {
+    "question": "How long did each generator run in the last 24 hours?",
+    "lang": "en",
+    "reply": "Based on the data from the last 24 hours, neither the MEP nor the Kubota generator ran.",
+    "asked_at": 1793937622,
+    "ended_at": 1793937653,
+    "wall_s": 30.9,
+    "answered_by": "model",
+    "tool_calls": [
+     {
+      "name": "get_gen_runtime",
+      "args": {
+       "days": 1
+      }
+     }
+    ],
+    "invalid_calls": [],
+    "unsourced": [],
+    "ungrounded_retry": false,
+    "status_fallback": false,
+    "id": "runtime_24h",
+    "about": "figures that match gen_runs, and naming a generator that idled",
+    "attempt": 3,
+    "passed": true,
+    "why": "no generator ran, and the answer says so of both",
+    "truth": {
+     "mep": {
+      "runs": 0,
+      "minutes": 0
+     },
+     "kubota": {
+      "runs": 0,
+      "minutes": 0
+     }
+    },
+    "key": "case:runtime_24h:3",
+    "kind": "case"
+   },
+   {
+    "question": "What is tonight's plan?",
+    "lang": "en",
+    "reply": "2026-11-05 7:48 pm  V 56.2  SOC 96%  load 1.7 kW\npeak today: 56.4 V  (threshold 57.0 -> solar shortfall)\novernight Wh out of the pack: 17,754 — from last 14 nights (9 nights)\nsystem overhead: 1.034x (pack out ÷ house in, 1.027-1.038 over 14 nights, last 14 nights)\nprojected 52.0 V at: not projected (not reached within 24 h)   sunrise 6:09 am\nnext daylight (Fri Nov 6): 0% cloud, est. solar 33.3 kWh (Nov clear-day 33.3)\nkubota exercise: every 3 d at 19:00, last run 2026-11-05 7:02 pm, next 2026-11-09 7:00 pm (in 4 d)\nmep exercise: every 5 d at 09:00, last run 2026-11-01 8:36 pm, next 2026-11-07 9:00 am (in 2 d)\nPOLICY 3 storm stop 57.0: no (next daylight (Fri Nov 6) 0% daylight cloud < 70%)\nPOLICY 3 pre-dawn stop 54.5: no (52 V not projected (not reached within 24 h))\nPOLICY 4 top-up: held (deficit -8,931 Wh; held until 9:00 pm; remaining solar today 0.0 kWh)\nrecommend: no change - No policy rules fired, and the system is currently in a stable state.\napplied: no change",
+    "asked_at": 1793937683,
+    "ended_at": 1793937683,
+    "wall_s": 0.0,
+    "answered_by": "python_plan",
+    "tool_calls": [],
+    "invalid_calls": [],
+    "unsourced": [],
+    "ungrounded_retry": false,
+    "status_fallback": false,
+    "id": "tonight_plan",
+    "about": "the stored plan record rather than a paraphrase",
+    "attempt": 1,
+    "passed": true,
+    "why": "the stored plan record, verbatim",
+    "truth": {
+     "text": "2026-11-05 7:48 pm  V 56.2  SOC 96%  load 1.7 kW\npeak today: 56.4 V  (threshold 57.0 -> solar shortfall)\novernight Wh out of the pack: 17,754 — from last 14 nights (9 nights)\nsystem overhead: 1.034x (pack out ÷ house in, 1.027-1.038 over 14 nights, last 14 nights)\nprojected 52.0 V at: not projected (not reached within 24 h)   sunrise 6:09 am\nnext daylight (Fri Nov 6): 0% cloud, est. solar 33.3 kWh (Nov clear-day 33.3)\nkubota exercise: every 3 d at 19:00, last run 2026-11-05 7:02 pm, next 2026-11-09 7:00 pm (in 4 d)\nmep exercise: every 5 d at 09:00, last run 2026-11-01 8:36 pm, next 2026-11-07 9:00 am (in 2 d)\nPOLICY 3 storm stop 57.0: no (next daylight (Fri Nov 6) 0% daylight cloud < 70%)\nPOLICY 3 pre-dawn stop 54.5: no (52 V not projected (not reached within 24 h))\nPOLICY 4 top-up: held (deficit -8,931 Wh; held until 9:00 pm; remaining solar today 0.0 kWh)\nrecommend: no change - No policy rules fired, and the system is currently in a stable state.\napplied: no change"
+    },
+    "key": "case:tonight_plan:1",
+    "kind": "case"
+   },
+   {
+    "question": "What is tonight's plan?",
+    "lang": "en",
+    "reply": "2026-11-05 7:48 pm  V 56.2  SOC 96%  load 1.7 kW\npeak today: 56.4 V  (threshold 57.0 -> solar shortfall)\novernight Wh out of the pack: 17,754 — from last 14 nights (9 nights)\nsystem overhead: 1.034x (pack out ÷ house in, 1.027-1.038 over 14 nights, last 14 nights)\nprojected 52.0 V at: not projected (not reached within 24 h)   sunrise 6:09 am\nnext daylight (Fri Nov 6): 0% cloud, est. solar 33.3 kWh (Nov clear-day 33.3)\nkubota exercise: every 3 d at 19:00, last run 2026-11-05 7:02 pm, next 2026-11-09 7:00 pm (in 4 d)\nmep exercise: every 5 d at 09:00, last run 2026-11-01 8:36 pm, next 2026-11-07 9:00 am (in 2 d)\nPOLICY 3 storm stop 57.0: no (next daylight (Fri Nov 6) 0% daylight cloud < 70%)\nPOLICY 3 pre-dawn stop 54.5: no (52 V not projected (not reached within 24 h))\nPOLICY 4 top-up: held (deficit -8,931 Wh; held until 9:00 pm; remaining solar today 0.0 kWh)\nrecommend: no change - No policy rules fired, and the system is currently in a stable state.\napplied: no change",
+    "asked_at": 1793937713,
+    "ended_at": 1793937713,
+    "wall_s": 0.0,
+    "answered_by": "python_plan",
+    "tool_calls": [],
+    "invalid_calls": [],
+    "unsourced": [],
+    "ungrounded_retry": false,
+    "status_fallback": false,
+    "id": "tonight_plan",
+    "about": "the stored plan record rather than a paraphrase",
+    "attempt": 2,
+    "passed": true,
+    "why": "the stored plan record, verbatim",
+    "truth": {
+     "text": "2026-11-05 7:48 pm  V 56.2  SOC 96%  load 1.7 kW\npeak today: 56.4 V  (threshold 57.0 -> solar shortfall)\novernight Wh out of the pack: 17,754 — from last 14 nights (9 nights)\nsystem overhead: 1.034x (pack out ÷ house in, 1.027-1.038 over 14 nights, last 14 nights)\nprojected 52.0 V at: not projected (not reached within 24 h)   sunrise 6:09 am\nnext daylight (Fri Nov 6): 0% cloud, est. solar 33.3 kWh (Nov clear-day 33.3)\nkubota exercise: every 3 d at 19:00, last run 2026-11-05 7:02 pm, next 2026-11-09 7:00 pm (in 4 d)\nmep exercise: every 5 d at 09:00, last run 2026-11-01 8:36 pm, next 2026-11-07 9:00 am (in 2 d)\nPOLICY 3 storm stop 57.0: no (next daylight (Fri Nov 6) 0% daylight cloud < 70%)\nPOLICY 3 pre-dawn stop 54.5: no (52 V not projected (not reached within 24 h))\nPOLICY 4 top-up: held (deficit -8,931 Wh; held until 9:00 pm; remaining solar today 0.0 kWh)\nrecommend: no change - No policy rules fired, and the system is currently in a stable state.\napplied: no change"
+    },
+    "key": "case:tonight_plan:2",
+    "kind": "case"
+   },
+   {
+    "question": "What is tonight's plan?",
+    "lang": "en",
+    "reply": "2026-11-05 7:48 pm  V 56.2  SOC 96%  load 1.7 kW\npeak today: 56.4 V  (threshold 57.0 -> solar shortfall)\novernight Wh out of the pack: 17,754 — from last 14 nights (9 nights)\nsystem overhead: 1.034x (pack out ÷ house in, 1.027-1.038 over 14 nights, last 14 nights)\nprojected 52.0 V at: not projected (not reached within 24 h)   sunrise 6:09 am\nnext daylight (Fri Nov 6): 0% cloud, est. solar 33.3 kWh (Nov clear-day 33.3)\nkubota exercise: every 3 d at 19:00, last run 2026-11-05 7:02 pm, next 2026-11-09 7:00 pm (in 4 d)\nmep exercise: every 5 d at 09:00, last run 2026-11-01 8:36 pm, next 2026-11-07 9:00 am (in 2 d)\nPOLICY 3 storm stop 57.0: no (next daylight (Fri Nov 6) 0% daylight cloud < 70%)\nPOLICY 3 pre-dawn stop 54.5: no (52 V not projected (not reached within 24 h))\nPOLICY 4 top-up: held (deficit -8,931 Wh; held until 9:00 pm; remaining solar today 0.0 kWh)\nrecommend: no change - No policy rules fired, and the system is currently in a stable state.\napplied: no change",
+    "asked_at": 1793937743,
+    "ended_at": 1793937743,
+    "wall_s": 0.0,
+    "answered_by": "python_plan",
+    "tool_calls": [],
+    "invalid_calls": [],
+    "unsourced": [],
+    "ungrounded_retry": false,
+    "status_fallback": false,
+    "id": "tonight_plan",
+    "about": "the stored plan record rather than a paraphrase",
+    "attempt": 3,
+    "passed": true,
+    "why": "the stored plan record, verbatim",
+    "truth": {
+     "text": "2026-11-05 7:48 pm  V 56.2  SOC 96%  load 1.7 kW\npeak today: 56.4 V  (threshold 57.0 -> solar shortfall)\novernight Wh out of the pack: 17,754 — from last 14 nights (9 nights)\nsystem overhead: 1.034x (pack out ÷ house in, 1.027-1.038 over 14 nights, last 14 nights)\nprojected 52.0 V at: not projected (not reached within 24 h)   sunrise 6:09 am\nnext daylight (Fri Nov 6): 0% cloud, est. solar 33.3 kWh (Nov clear-day 33.3)\nkubota exercise: every 3 d at 19:00, last run 2026-11-05 7:02 pm, next 2026-11-09 7:00 pm (in 4 d)\nmep exercise: every 5 d at 09:00, last run 2026-11-01 8:36 pm, next 2026-11-07 9:00 am (in 2 d)\nPOLICY 3 storm stop 57.0: no (next daylight (Fri Nov 6) 0% daylight cloud < 70%)\nPOLICY 3 pre-dawn stop 54.5: no (52 V not projected (not reached within 24 h))\nPOLICY 4 top-up: held (deficit -8,931 Wh; held until 9:00 pm; remaining solar today 0.0 kWh)\nrecommend: no change - No policy rules fired, and the system is currently in a stable state.\napplied: no change"
+    },
+    "key": "case:tonight_plan:3",
+    "kind": "case"
+   },
+   {
+    "question": "What was the battery voltage at exactly 2:47 am last night?",
+    "lang": "en",
+    "reply": "The battery voltage at 2:47 am last night was 54.56 V.",
+    "asked_at": 1793937774,
+    "ended_at": 1793937838,
+    "wall_s": 64.3,
+    "answered_by": "model",
+    "tool_calls": [
+     {
+      "name": "get_voltage_at",
+      "args": {
+       "timestamp": "2:47 am"
+      }
+     }
+    ],
+    "invalid_calls": [],
+    "unsourced": [],
+    "ungrounded_retry": false,
+    "status_fallback": false,
+    "id": "voltage_at_247",
+    "about": "a point reading, or a refusal - never a window aggregate",
+    "attempt": 1,
+    "passed": true,
+    "why": "54.56 matches the sample at 2026-11-05 2:47 am",
+    "truth": {
+     "asked_for": "2026-11-05 2:47 am",
+     "voltage": 54.56,
+     "sample_at": "2026-11-05 2:47 am"
+    },
+    "key": "case:voltage_at_247:1",
+    "kind": "case"
+   },
+   {
+    "question": "What was the battery voltage at exactly 2:47 am last night?",
+    "lang": "en",
+    "reply": "The battery voltage at 2:47 am last night was 54.56 V.",
+    "asked_at": 1793937868,
+    "ended_at": 1793937883,
+    "wall_s": 15.1,
+    "answered_by": "model",
+    "tool_calls": [
+     {
+      "name": "get_voltage_at",
+      "args": {
+       "timestamp": "02:47 am"
+      }
+     }
+    ],
+    "invalid_calls": [],
+    "unsourced": [],
+    "ungrounded_retry": false,
+    "status_fallback": false,
+    "id": "voltage_at_247",
+    "about": "a point reading, or a refusal - never a window aggregate",
+    "attempt": 2,
+    "passed": true,
+    "why": "54.56 matches the sample at 2026-11-05 2:47 am",
+    "truth": {
+     "asked_for": "2026-11-05 2:47 am",
+     "voltage": 54.56,
+     "sample_at": "2026-11-05 2:47 am"
+    },
+    "key": "case:voltage_at_247:2",
+    "kind": "case"
+   },
+   {
+    "question": "What was the battery voltage at exactly 2:47 am last night?",
+    "lang": "en",
+    "reply": "The battery voltage at 2:47 am last night was 54.56 V.",
+    "asked_at": 1793937914,
+    "ended_at": 1793937928,
+    "wall_s": 14.6,
+    "answered_by": "model",
+    "tool_calls": [
+     {
+      "name": "get_voltage_at",
+      "args": {
+       "timestamp": "2:47 am"
+      }
+     }
+    ],
+    "invalid_calls": [],
+    "unsourced": [],
+    "ungrounded_retry": false,
+    "status_fallback": false,
+    "id": "voltage_at_247",
+    "about": "a point reading, or a refusal - never a window aggregate",
+    "attempt": 3,
+    "passed": true,
+    "why": "54.56 matches the sample at 2026-11-05 2:47 am",
+    "truth": {
+     "asked_for": "2026-11-05 2:47 am",
+     "voltage": 54.56,
+     "sample_at": "2026-11-05 2:47 am"
+    },
+    "key": "case:voltage_at_247:3",
+    "kind": "case"
+   },
+   {
+    "question": "What was the lowest battery voltage last night?",
+    "lang": "en",
+    "reply": "The lowest battery voltage last night, from sunset to sunrise, was 54.07 V.",
+    "asked_at": 1793937959,
+    "ended_at": 1793937970,
+    "wall_s": 11.1,
+    "answered_by": "model",
+    "tool_calls": [
+     {
+      "name": "get_history",
+      "args": {
+       "window": "last_night"
+      }
+     }
+    ],
+    "invalid_calls": [],
+    "unsourced": [],
+    "ungrounded_retry": false,
+    "status_fallback": false,
+    "id": "last_night_low",
+    "about": "the night that finished, even when asked in the evening",
+    "attempt": 1,
+    "passed": true,
+    "why": "54.07 V is the low from 2026-11-04 4:55 pm to 2026-11-05 6:09 am",
+    "truth": {
+     "from": "2026-11-04 4:55 pm",
+     "to": "2026-11-05 6:09 am",
+     "low_v": 54.07
+    },
+    "key": "case:last_night_low:1",
+    "kind": "case"
+   },
+   {
+    "question": "What was the lowest battery voltage last night?",
+    "lang": "en",
+    "reply": "The lowest battery voltage last night, from sunset to sunrise, was 54.07 V.",
+    "asked_at": 1793938000,
+    "ended_at": 1793938018,
+    "wall_s": 18.5,
+    "answered_by": "model",
+    "tool_calls": [
+     {
+      "name": "get_history",
+      "args": {
+       "window": "last_night"
+      }
+     }
+    ],
+    "invalid_calls": [],
+    "unsourced": [],
+    "ungrounded_retry": false,
+    "status_fallback": false,
+    "id": "last_night_low",
+    "about": "the night that finished, even when asked in the evening",
+    "attempt": 2,
+    "passed": true,
+    "why": "54.07 V is the low from 2026-11-04 4:55 pm to 2026-11-05 6:09 am",
+    "truth": {
+     "from": "2026-11-04 4:55 pm",
+     "to": "2026-11-05 6:09 am",
+     "low_v": 54.07
+    },
+    "key": "case:last_night_low:2",
+    "kind": "case"
+   },
+   {
+    "question": "What was the lowest battery voltage last night?",
+    "lang": "en",
+    "reply": "The lowest battery voltage last night, from sunset to sunrise, was 54.07 V.",
+    "asked_at": 1793938049,
+    "ended_at": 1793938067,
+    "wall_s": 18.6,
+    "answered_by": "model",
+    "tool_calls": [
+     {
+      "name": "get_history",
+      "args": {
+       "window": "last_night"
+      }
+     }
+    ],
+    "invalid_calls": [],
+    "unsourced": [],
+    "ungrounded_retry": false,
+    "status_fallback": false,
+    "id": "last_night_low",
+    "about": "the night that finished, even when asked in the evening",
+    "attempt": 3,
+    "passed": true,
+    "why": "54.07 V is the low from 2026-11-04 4:55 pm to 2026-11-05 6:09 am",
+    "truth": {
+     "from": "2026-11-04 4:55 pm",
+     "to": "2026-11-05 6:09 am",
+     "low_v": 54.07
+    },
+    "key": "case:last_night_low:3",
+    "kind": "case"
+   },
+   {
+    "question": "Will a generator run tonight, and what's the shortfall?",
+    "lang": "en",
+    "reply": "Based on the forecast, no generator run is expected tonight because the pack is not projected to reach the 52.0 V start threshold within 24 hours, and the expected shortfall until sunrise is 0.0 kWh.",
+    "asked_at": 1793938098,
+    "ended_at": 1793938122,
+    "wall_s": 24.6,
+    "answered_by": "model",
+    "tool_calls": [
+     {
+      "name": "get_load_forecast",
+      "args": {
+       "hours": 24
+      }
+     }
+    ],
+    "invalid_calls": [],
+    "unsourced": [],
+    "ungrounded_retry": false,
+    "status_fallback": false,
+    "id": "tonight_shortfall",
+    "about": "the shortfall itself, not the energy available",
+    "attempt": 1,
+    "passed": true,
+    "why": "no shortfall: 14120 Wh needed of 24735",
+    "truth": {
+     "shortfall_wh": 0,
+     "needed_wh": 14120,
+     "available_wh": 24735
+    },
+    "key": "case:tonight_shortfall:1",
+    "kind": "case"
+   },
+   {
+    "question": "Will a generator run tonight, and what's the shortfall?",
+    "lang": "en",
+    "reply": "No generator run is expected tonight because the pack is not projected to reach the 52.0 V start threshold within 24 hours, and the forecast shows no shortfall.",
+    "asked_at": 1793938153,
+    "ended_at": 1793938175,
+    "wall_s": 22.8,
+    "answered_by": "model",
+    "tool_calls": [
+     {
+      "name": "get_load_forecast",
+      "args": {
+       "hours": 24
+      }
+     }
+    ],
+    "invalid_calls": [],
+    "unsourced": [],
+    "ungrounded_retry": false,
+    "status_fallback": false,
+    "id": "tonight_shortfall",
+    "about": "the shortfall itself, not the energy available",
+    "attempt": 2,
+    "passed": true,
+    "why": "no shortfall: 14120 Wh needed of 24735",
+    "truth": {
+     "shortfall_wh": 0,
+     "needed_wh": 14120,
+     "available_wh": 24735
+    },
+    "key": "case:tonight_shortfall:2",
+    "kind": "case"
+   },
+   {
+    "question": "Will a generator run tonight, and what's the shortfall?",
+    "lang": "en",
+    "reply": "No generator run is expected tonight because the pack is not projected to reach the 52.0 V start threshold within 24 hours, and the forecast shows no shortfall to cover.",
+    "asked_at": 1793938206,
+    "ended_at": 1793938229,
+    "wall_s": 23.1,
+    "answered_by": "model",
+    "tool_calls": [
+     {
+      "name": "get_load_forecast",
+      "args": {
+       "hours": 24
+      }
+     }
+    ],
+    "invalid_calls": [],
+    "unsourced": [],
+    "ungrounded_retry": false,
+    "status_fallback": false,
+    "id": "tonight_shortfall",
+    "about": "the shortfall itself, not the energy available",
+    "attempt": 3,
+    "passed": true,
+    "why": "no shortfall: 14120 Wh needed of 24735",
+    "truth": {
+     "shortfall_wh": 0,
+     "needed_wh": 14120,
+     "available_wh": 24735
+    },
+    "key": "case:tonight_shortfall:3",
+    "kind": "case"
+   },
+   {
+    "question": "Which month this year had the worst solar?",
+    "lang": "en",
+    "reply": "The worst solar month this year was January 2026 with 613.1 kWh.",
+    "asked_at": 1793938259,
+    "ended_at": 1793938280,
+    "wall_s": 20.7,
+    "answered_by": "model",
+    "tool_calls": [
+     {
+      "name": "get_monthly_summary",
+      "args": {
+       "months": 12
+      }
+     }
+    ],
+    "invalid_calls": [],
+    "unsourced": [],
+    "ungrounded_retry": false,
+    "status_fallback": false,
+    "id": "worst_month_this_year",
+    "about": "this year's complete months, not the whole record",
+    "attempt": 1,
+    "passed": true,
+    "why": "2026-01, 613.1 kWh",
+    "truth": {
+     "month": "2026-01",
+     "kwh": 613.1
+    },
+    "key": "case:worst_month_this_year:1",
+    "kind": "case"
+   },
+   {
+    "question": "Which month this year had the worst solar?",
+    "lang": "en",
+    "reply": "The worst solar month this year was January 2026 with 613.1 kWh.",
+    "asked_at": 1793938310,
+    "ended_at": 1793938339,
+    "wall_s": 28.3,
+    "answered_by": "model",
+    "tool_calls": [
+     {
+      "name": "get_monthly_summary",
+      "args": {
+       "months": 12
+      }
+     }
+    ],
+    "invalid_calls": [],
+    "unsourced": [],
+    "ungrounded_retry": false,
+    "status_fallback": false,
+    "id": "worst_month_this_year",
+    "about": "this year's complete months, not the whole record",
+    "attempt": 2,
+    "passed": true,
+    "why": "2026-01, 613.1 kWh",
+    "truth": {
+     "month": "2026-01",
+     "kwh": 613.1
+    },
+    "key": "case:worst_month_this_year:2",
+    "kind": "case"
+   },
+   {
+    "question": "Which month this year had the worst solar?",
+    "lang": "en",
+    "reply": "The worst solar month this year was January 2026 with 613.1 kWh.",
+    "asked_at": 1793938369,
+    "ended_at": 1793938397,
+    "wall_s": 28.3,
+    "answered_by": "model",
+    "tool_calls": [
+     {
+      "name": "get_monthly_summary",
+      "args": {
+       "months": 12
+      }
+     }
+    ],
+    "invalid_calls": [],
+    "unsourced": [],
+    "ungrounded_retry": false,
+    "status_fallback": false,
+    "id": "worst_month_this_year",
+    "about": "this year's complete months, not the whole record",
+    "attempt": 3,
+    "passed": true,
+    "why": "2026-01, 613.1 kWh",
+    "truth": {
+     "month": "2026-01",
+     "kwh": 613.1
+    },
+    "key": "case:worst_month_this_year:3",
+    "kind": "case"
+   },
+   {
+    "question": "How many kWh of solar did we make yesterday?",
+    "lang": "en",
+    "reply": "The solar production for yesterday, 2026-10, was 1025 kWh.",
+    "asked_at": 1793938428,
+    "ended_at": 1793938447,
+    "wall_s": 19.5,
+    "answered_by": "model",
+    "tool_calls": [
+     {
+      "name": "get_monthly_summary",
+      "args": {
+       "month": "2026-10"
+      }
+     }
+    ],
+    "invalid_calls": [],
+    "unsourced": [],
+    "ungrounded_retry": false,
+    "status_fallback": false,
+    "id": "solar_yesterday_kwh",
+    "about": "Wh and kWh kept apart",
+    "attempt": 1,
+    "passed": false,
+    "why": "yesterday's solar was 31.3 kWh and no figure matches",
+    "truth": {
+     "wh": 31295,
+     "kwh": 31.3
+    },
+    "key": "case:solar_yesterday_kwh:1",
+    "kind": "case"
+   },
+   {
+    "question": "How many kWh of solar did we make yesterday?",
+    "lang": "en",
+    "reply": "Yesterday, you made 1025 kWh of solar energy, which was used to cover 1053 kWh of load, resulting in a shortfall of 28 kWh that was covered by 201 kWh from the generator.",
+    "asked_at": 1793938477,
+    "ended_at": 1793938499,
+    "wall_s": 22.0,
+    "answered_by": "model",
+    "tool_calls": [
+     {
+      "name": "get_monthly_summary",
+      "args": {
+       "month": "2026-10"
+      }
+     }
+    ],
+    "invalid_calls": [],
+    "unsourced": [],
+    "ungrounded_retry": false,
+    "status_fallback": false,
+    "id": "solar_yesterday_kwh",
+    "about": "Wh and kWh kept apart",
+    "attempt": 2,
+    "passed": false,
+    "why": "yesterday's solar was 31.3 kWh and no figure matches",
+    "truth": {
+     "wh": 31295,
+     "kwh": 31.3
+    },
+    "key": "case:solar_yesterday_kwh:2",
+    "kind": "case"
+   },
+   {
+    "question": "How many kWh of solar did we make yesterday?",
+    "lang": "en",
+    "reply": "Yesterday, you made 1025 kWh of solar.",
+    "asked_at": 1793938530,
+    "ended_at": 1793938548,
+    "wall_s": 18.5,
+    "answered_by": "model",
+    "tool_calls": [
+     {
+      "name": "get_monthly_summary",
+      "args": {
+       "month": "2026-10"
+      }
+     }
+    ],
+    "invalid_calls": [],
+    "unsourced": [],
+    "ungrounded_retry": false,
+    "status_fallback": false,
+    "id": "solar_yesterday_kwh",
+    "about": "Wh and kWh kept apart",
+    "attempt": 3,
+    "passed": false,
+    "why": "yesterday's solar was 31.3 kWh and no figure matches",
+    "truth": {
+     "wh": 31295,
+     "kwh": 31.3
+    },
+    "key": "case:solar_yesterday_kwh:3",
+    "kind": "case"
+   },
+   {
+    "question": "¿Cuántos kWh de solar produjimos ayer?",
+    "lang": "es",
+    "reply": "Según los datos, ayer entre medianoche y medianoche se produjeron 31.3 kWh de solar.",
+    "asked_at": 1793938578,
+    "ended_at": 1793938597,
+    "wall_s": 18.7,
+    "answered_by": "model",
+    "tool_calls": [
+     {
+      "name": "get_history",
+      "args": {
+       "window": "yesterday"
+      }
+     }
+    ],
+    "invalid_calls": [],
+    "unsourced": [],
+    "ungrounded_retry": false,
+    "status_fallback": false,
+    "id": "solar_yesterday_kwh_es",
+    "about": "the same in Spanish, where it went wrong",
+    "attempt": 1,
+    "passed": true,
+    "why": "31.3 kWh",
+    "truth": {
+     "wh": 31295,
+     "kwh": 31.3
+    },
+    "key": "case:solar_yesterday_kwh_es:1",
+    "kind": "case"
+   },
+   {
+    "question": "¿Cuántos kWh de solar produjimos ayer?",
+    "lang": "es",
+    "reply": "Según el registro, ayer entre medianoche y medianoche se produjeron 31.3 kWh de solar.",
+    "asked_at": 1793938627,
+    "ended_at": 1793938646,
+    "wall_s": 18.7,
+    "answered_by": "model",
+    "tool_calls": [
+     {
+      "name": "get_history",
+      "args": {
+       "window": "yesterday"
+      }
+     }
+    ],
+    "invalid_calls": [],
+    "unsourced": [],
+    "ungrounded_retry": false,
+    "status_fallback": false,
+    "id": "solar_yesterday_kwh_es",
+    "about": "the same in Spanish, where it went wrong",
+    "attempt": 2,
+    "passed": true,
+    "why": "31.3 kWh",
+    "truth": {
+     "wh": 31295,
+     "kwh": 31.3
+    },
+    "key": "case:solar_yesterday_kwh_es:2",
+    "kind": "case"
+   },
+   {
+    "question": "¿Cuántos kWh de solar produjimos ayer?",
+    "lang": "es",
+    "reply": "Según los datos de ayer, entre medianoche y medianoche, se produjeron 31.3 kWh de energía solar.",
+    "asked_at": 1793938676,
+    "ended_at": 1793938696,
+    "wall_s": 19.2,
+    "answered_by": "model",
+    "tool_calls": [
+     {
+      "name": "get_history",
+      "args": {
+       "window": "yesterday"
+      }
+     }
+    ],
+    "invalid_calls": [],
+    "unsourced": [],
+    "ungrounded_retry": false,
+    "status_fallback": false,
+    "id": "solar_yesterday_kwh_es",
+    "about": "the same in Spanish, where it went wrong",
+    "attempt": 3,
+    "passed": true,
+    "why": "31.3 kWh",
+    "truth": {
+     "wh": 31295,
+     "kwh": 31.3
+    },
+    "key": "case:solar_yesterday_kwh_es:3",
+    "kind": "case"
+   }
+  ],
+  "questions": [
+   {
+    "question": "Is a generator running right now, and what is the house drawing?",
+    "lang": "en",
+    "reply": "The generators are not running right now, and the house is drawing 1756 W.",
+    "asked_at": 1793938726,
+    "ended_at": 1793938742,
+    "wall_s": 16.1,
+    "answered_by": "model",
+    "tool_calls": [
+     {
+      "name": "get_status",
+      "args": {}
+     }
+    ],
+    "invalid_calls": [],
+    "unsourced": [],
+    "ungrounded_retry": false,
+    "status_fallback": false,
+    "key": "q:en:Is a generator running right now, and what is the house drawing?",
+    "kind": "question"
+   },
+   {
+    "question": "How much is each solar array making right now?",
+    "lang": "en",
+    "reply": "The solar arrays are currently making 0 watts, with the south array having a PV voltage of 0.16 and the west array having a PV voltage of 14.45.",
+    "asked_at": 1793938772,
+    "ended_at": 1793938791,
+    "wall_s": 18.5,
+    "answered_by": "model",
+    "tool_calls": [
+     {
+      "name": "get_mppt_detail",
+      "args": {}
+     }
+    ],
+    "invalid_calls": [],
+    "unsourced": [],
+    "ungrounded_retry": false,
+    "status_fallback": false,
+    "key": "q:en:How much is each solar array making right now?",
+    "kind": "question"
+   },
+   {
+    "question": "What was the lowest battery voltage last night?",
+    "lang": "en",
+    "reply": "The lowest battery voltage last night, from sunset to sunrise, was 54.07 V.",
+    "asked_at": 1793938821,
+    "ended_at": 1793938840,
+    "wall_s": 18.6,
+    "answered_by": "model",
+    "tool_calls": [
+     {
+      "name": "get_history",
+      "args": {
+       "window": "last_night"
+      }
+     }
+    ],
+    "invalid_calls": [],
+    "unsourced": [],
+    "ungrounded_retry": false,
+    "status_fallback": false,
+    "key": "q:en:What was the lowest battery voltage last night?",
+    "kind": "question"
+   },
+   {
+    "question": "How many hours have the generators run this week, and how much fuel did that use?",
+    "lang": "en",
+    "reply": "The generators ran for a total of 7.0 hours this week, using a modelled 4.54 gallons of fuel.",
+    "asked_at": 1793938870,
+    "ended_at": 1793938914,
+    "wall_s": 44.5,
+    "answered_by": "model",
+    "tool_calls": [
+     {
+      "name": "get_gen_runtime",
+      "args": {
+       "days": 7
+      }
+     }
+    ],
+    "invalid_calls": [],
+    "unsourced": [],
+    "ungrounded_retry": false,
+    "status_fallback": false,
+    "key": "q:en:How many hours have the generators run this week, and how much fuel did that use?",
+    "kind": "question"
+   },
+   {
+    "question": "Will a generator run tonight, and what's the shortfall?",
+    "lang": "en",
+    "reply": "Based on the forecast, no generator run is expected tonight because the pack is not projected to reach the 52.0 V start threshold within 24 hours, and the projected shortfall until sunrise is 0.0 kWh.",
+    "asked_at": 1793938945,
+    "ended_at": 1793938969,
+    "wall_s": 24.1,
+    "answered_by": "model",
+    "tool_calls": [
+     {
+      "name": "get_load_forecast",
+      "args": {
+       "hours": 24
+      }
+     }
+    ],
+    "invalid_calls": [],
+    "unsourced": [],
+    "ungrounded_retry": false,
+    "status_fallback": false,
+    "key": "q:en:Will a generator run tonight, and what's the shortfall?",
+    "kind": "question"
+   },
+   {
+    "question": "Why is the MEP start set where it is right now?",
+    "lang": "en",
+    "reply": "The MEP start voltage is set to 52.0 V because the owner set the baseline thresholds to MEP 52.0/57.0 V, and no policy rule has triggered a change from that baseline.",
+    "asked_at": 1793938999,
+    "ended_at": 1793939017,
+    "wall_s": 18.2,
+    "answered_by": "model",
+    "tool_calls": [
+     {
+      "name": "get_status",
+      "args": {}
+     }
+    ],
+    "invalid_calls": [],
+    "unsourced": [],
+    "ungrounded_retry": false,
+    "status_fallback": false,
+    "key": "q:en:Why is the MEP start set where it is right now?",
+    "kind": "question"
+   },
+   {
+    "question": "Why did the MEP fail to start last night?",
+    "lang": "en",
+    "reply": "The MEP did not start last night because the pack voltage never dropped to the 52.0 V start threshold during the period from sunset to sunrise.",
+    "asked_at": 1793939048,
+    "ended_at": 1793939073,
+    "wall_s": 25.3,
+    "answered_by": "model",
+    "tool_calls": [
+     {
+      "name": "get_status",
+      "args": {}
+     },
+     {
+      "name": "get_history",
+      "args": {
+       "window": "last_night"
+      }
+     }
+    ],
+    "invalid_calls": [],
+    "unsourced": [],
+    "ungrounded_retry": false,
+    "status_fallback": false,
+    "key": "q:en:Why did the MEP fail to start last night?",
+    "kind": "question"
+   },
+   {
+    "question": "What was the battery voltage at 3:15 am on January 5, 2024?",
+    "lang": "en",
+    "reply": "I cannot provide the battery voltage at 3:15 am on January 5, 2024, because there is no sample within 5 minutes of that time in the recorded data.",
+    "asked_at": 1793939103,
+    "ended_at": 1793939120,
+    "wall_s": 16.7,
+    "answered_by": "model",
+    "tool_calls": [
+     {
+      "name": "get_voltage_at",
+      "args": {
+       "timestamp": "2024-01-05 03:15 am"
+      }
+     }
+    ],
+    "invalid_calls": [],
+    "unsourced": [],
+    "ungrounded_retry": false,
+    "status_fallback": false,
+    "key": "q:en:What was the battery voltage at 3:15 am on January 5, 2024?",
+    "kind": "question"
+   },
+   {
+    "question": "How cloudy is it going to be tomorrow?",
+    "lang": "en",
+    "reply": "Tomorrow is forecast to have 3% cloud cover, which is very clear.",
+    "asked_at": 1793939150,
+    "ended_at": 1793939160,
+    "wall_s": 10.1,
+    "answered_by": "model",
+    "tool_calls": [
+     {
+      "name": "get_weather",
+      "args": {}
+     }
+    ],
+    "invalid_calls": [],
+    "unsourced": [],
+    "ungrounded_retry": false,
+    "status_fallback": false,
+    "key": "q:en:How cloudy is it going to be tomorrow?",
+    "kind": "question"
+   },
+   {
+    "question": "How many more years will this battery pack last?",
+    "lang": "en",
+    "reply": "The battery pack is projected to last 28.2 years based on the cycling mechanism, which is the dominant factor, while the calendar mechanism suggests 29.7 years.",
+    "asked_at": 1793939191,
+    "ended_at": 1793939235,
+    "wall_s": 44.4,
+    "answered_by": "model",
+    "tool_calls": [
+     {
+      "name": "battery_health",
+      "args": {}
+     }
+    ],
+    "invalid_calls": [],
+    "unsourced": [],
+    "ungrounded_retry": false,
+    "status_fallback": false,
+    "key": "q:en:How many more years will this battery pack last?",
+    "kind": "question"
+   },
+   {
+    "question": "Which month this year had the worst solar?",
+    "lang": "en",
+    "reply": "The worst solar month this year was January 2026 with 613.1 kWh.",
+    "asked_at": 1793939265,
+    "ended_at": 1793939294,
+    "wall_s": 28.7,
+    "answered_by": "model",
+    "tool_calls": [
+     {
+      "name": "get_monthly_summary",
+      "args": {
+       "months": 12
+      }
+     }
+    ],
+    "invalid_calls": [],
+    "unsourced": [],
+    "ungrounded_retry": false,
+    "status_fallback": false,
+    "key": "q:en:Which month this year had the worst solar?",
+    "kind": "question"
+   },
+   {
+    "question": "¿Cuál es el voltaje de la batería ahora?",
+    "lang": "es",
+    "reply": "El voltaje de la batería más cercano registrado es de 56.2 V, ya que no hay una muestra disponible exactamente a las 8:28 pm.",
+    "asked_at": 1793939324,
+    "ended_at": 1793939340,
+    "wall_s": 15.9,
+    "answered_by": "model",
+    "tool_calls": [
+     {
+      "name": "get_voltage_at",
+      "args": {
+       "timestamp": "2026-11-05 8:28 pm"
+      }
+     }
+    ],
+    "invalid_calls": [],
+    "unsourced": [],
+    "ungrounded_retry": false,
+    "status_fallback": false,
+    "key": "q:es:¿Cuál es el voltaje de la batería ahora?",
+    "kind": "question"
+   },
+   {
+    "question": "¿Cuántos kWh de solar produjimos ayer?",
+    "lang": "es",
+    "reply": "Según el registro, ayer entre medianoche y medianoche se produjeron 31.3 kWh de solar.",
+    "asked_at": 1793939370,
+    "ended_at": 1793939389,
+    "wall_s": 18.7,
+    "answered_by": "model",
+    "tool_calls": [
+     {
+      "name": "get_history",
+      "args": {
+       "window": "yesterday"
+      }
+     }
+    ],
+    "invalid_calls": [],
+    "unsourced": [],
+    "ungrounded_retry": false,
+    "status_fallback": false,
+    "key": "q:es:¿Cuántos kWh de solar produjimos ayer?",
+    "kind": "question"
+   },
+   {
+    "question": "¿Qué inversores y generadores tenemos instalados?",
+    "lang": "es",
+    "reply": "Los inversores instalados son el Schneider XW Pro 6848 (esclavos 10 y 12) y el Schneider XW+ 5548 (esclavo 11), mientras que los generadores son el MEP-803A y el Kubota, además de un Magnum MS4048.",
+    "asked_at": 1793939419,
+    "ended_at": 1793939457,
+    "wall_s": 37.1,
+    "answered_by": "model",
+    "tool_calls": [
+     {
+      "name": "get_system_specs",
+      "args": {}
+     }
+    ],
+    "invalid_calls": [],
+    "unsourced": [],
+    "ungrounded_retry": false,
+    "status_fallback": false,
+    "key": "q:es:¿Qué inversores y generadores tenemos instalados?",
+    "kind": "question"
+   },
+   {
+    "question": "¿Cuántos amperios-hora le quedan a la batería?",
+    "lang": "es",
+    "reply": "Según los datos de la herramienta, le quedan 1706 amperios-hora en la batería.",
+    "asked_at": 1793939487,
+    "ended_at": 1793939503,
+    "wall_s": 16.5,
+    "answered_by": "model",
+    "tool_calls": [
+     {
+      "name": "get_battery_detail",
+      "args": {}
+     }
+    ],
+    "invalid_calls": [],
+    "unsourced": [],
+    "ungrounded_retry": false,
+    "status_fallback": false,
+    "key": "q:es:¿Cuántos amperios-hora le quedan a la batería?",
+    "kind": "question"
+   },
+   {
+    "question": "¿Cuál fue el último cambio de los umbrales del generador y por qué se hizo?",
+    "lang": "es",
+    "reply": "El último cambio de umbrales fue el 31 de octubre de 2026 a las 9:14 pm, y fue rechazado porque el propietario cambió los umbrales en el panel de control a MEP 53.5/57.0 y Kubota 53.5/57.0.",
+    "asked_at": 1793948595,
+    "ended_at": 1793948795,
+    "wall_s": 200.4,
+    "answered_by": "model",
+    "tool_calls": [
+     {
+      "name": "get_recent_actions",
+      "args": {
+       "n": 50
+      }
+     }
+    ],
+    "invalid_calls": [],
+    "unsourced": [],
+    "ungrounded_retry": false,
+    "status_fallback": false,
+    "key": "q:es:¿Cuál fue el último cambio de los umbrales del generador y por qué se hizo?",
+    "kind": "question"
+   },
+   {
+    "question": "¿Cómo están el voltaje y la frecuencia de CA en cada inversor?",
+    "lang": "es",
+    "reply": "Los voltajes y frecuencias de CA son: el inversor maestro (ID 10) tiene 119.54 V y 60.0 Hz, mientras que el inversor esclavo (ID 12) tiene 119.53 V y 60.0 Hz.",
+    "asked_at": 1793948826,
+    "ended_at": 1793948845,
+    "wall_s": 19.3,
+    "answered_by": "model",
+    "tool_calls": [
+     {
+      "name": "get_ac_diag",
+      "args": {}
+     }
+    ],
+    "invalid_calls": [],
+    "unsourced": [],
+    "ungrounded_retry": false,
+    "status_fallback": false,
+    "key": "q:es:¿Cómo están el voltaje y la frecuencia de CA en cada inversor?",
+    "kind": "question"
+   }
+  ],
+  "summary": {
+   "graded": 24,
+   "passed": 21,
+   "python_answered": 3,
+   "ungrounded_retries": 0,
+   "status_fallbacks": 0,
+   "model_errors": 0,
+   "unsourced": 0,
+   "invalid_calls": 0,
+   "write_attempts": 0,
+   "avg_wall_s": 29.1,
+   "max_wall_s": 200.4,
+   "avg_tool_calls": 1.05
+  }
+ }
+]
