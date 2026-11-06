@@ -1,26 +1,28 @@
-# Alexa — AskAgentIntent
+# Alexa — questions to the agent
 
 Lets the owner put a free-form question to the solar agent by voice, in
-English or Spanish. Every existing intent is untouched.
+English or Spanish.
 
 ```
-"Alexa, ask my solar to ask the agent what the plan is tonight"
-"Alexa, pregúntale a casa solar al agente cuál es el plan de esta noche"
+"Alexa, ask solar agent why the Kubota started"
+"Alexa, ask solar agent how much solar we made yesterday"
+"Alexa, pregúntale a casa solar por qué arrancó el Kubota"
 ```
 
-The invocation names are **"my solar"** (en-US) and **"casa solar"** (es-US). The
-skill is only *listed* as "solar system". "Alexa, open my solar" collides with
-Alexa's built-in "solar" and gets "not supported on this device"; "Alexa, ask my
-solar for the battery status" works, so start with "ask".
+The invocation names are **"solar agent"** (English) and **"casa solar"** (Spanish).
+The skill is listed as "solar system".
+
+Alexa+ is turned off on the Echo, because its hand-off line says "Alexa exit" aloud.
 
 ## What happens
 
-1. Alexa sends an `IntentRequest` for `AskAgentIntent` to
+1. Alexa sends an `IntentRequest` for one of the agent intents below to
    `https://mercalde-solar.org/alexa`.
 2. nginx on the VPS proxies it to `alexa-solar.service`
    (`/var/www/alexa_solar.py`) on 127.0.0.1:5000.
-3. The handler reads the `query` slot and POSTs
-   `{"text": <query>, "lang": "es"|"en", "deliver": "telegram", "wait_s": 5}` to
+3. The handler reads the `query` slot, puts the intent's question word back in
+   front of it, and POSTs
+   `{"text": <question>, "lang": "es"|"en", "deliver": "telegram", "wait_s": 5}` to
    `http://192.168.3.152:8090/ask` on the KAMRUI, over WireGuard through the
    Pi5, with a 7 second timeout. Alexa gives up after about 8 s, and Gemma takes
    15 to 30 s.
@@ -54,78 +56,71 @@ speaks a fixed fallback in the right language rather than an error:
 
 Alexa only answers when asked; a late answer goes to Telegram, not to the Echo.
 
-## Developer console changes
+## The agent intents
 
-Done by the owner on 2026-11-06: added in en-US and es-US and built at 9:36 am,
-then tested in the simulator. These are the steps, should the intent need redoing.
-The interaction model is per locale, so do them for **both**.
+`AMAZON.SearchQuery` needs at least one carrier word before the slot, and **Alexa
+drops the carrier from the slot value**: with `why {query}`, "why did the Kubota
+start" arrives as "did the Kubota start". So there is one intent per leading
+question word, and `AGENT_PREFIX` in `vps/alexa_solar.py` puts the word back.
 
-Open the skill, listed as "solar system", at
-<https://developer.amazon.com/alexa/console/ask>.
+The existing intents (battery, status, solar, generator, start/stop/auto/off, events,
+auto-gen) keep their exact phrases and should still win their own sentences, such as
+"what's the battery level", "how's the battery", "is the generator on" and "que paso".
+The VPS checks them first, so a request naming one of them never reaches the agent.
+Which intent Alexa chooses for a sentence is decided in the console, and can only be
+tested once the intents are built.
 
-### 1. Don't change the invocation names
+Every intent below has a slot named `query` of type `AMAZON.SearchQuery`.
 
-Build → Invocation should show "my solar" (en-US) and "casa solar" (es-US). The
-utterances and test phrases below assume them.
+### English (invocation "solar agent")
 
-### 2. Add the intent
+| Intent | Sample utterances | VPS prefix |
+|---|---|---|
+| `AskWhyIntent` | `why {query}`, `how come {query}` | why |
+| `AskHowIntent` | `how {query}` | how |
+| `AskWhatIntent` | `what {query}` | what |
+| `AskWhatIsIntent` | `what's {query}`, `what is {query}` | what is |
+| `AskWhenIntent` | `when {query}` | when |
+| `AskWhichIntent` | `which {query}` | which |
+| `AskWillIntent` | `will {query}` | will |
+| `AskIsIntent` | `is {query}` | is |
+| `AskAreIntent` | `are {query}` | are |
+| `AskDidIntent` | `did {query}` | did |
+| `AskDoIntent` | `do {query}` | do |
+| `AskDoesIntent` | `does {query}` | does |
+| `AskWasIntent` | `was {query}`, `were {query}` | was |
+| `AskShouldIntent` | `should {query}` | should |
+| `AskAgentIntent` | `ask the agent {query}`, `ask agent {query}`, `question for the agent {query}`, `what does the agent say about {query}`, `agent {query}`, `to tell me {query}`, `tell me {query}`, `about {query}`, `if {query}`, `whether {query}`, `to explain {query}`, `to check {query}` | none |
 
-Build → Interaction Model → Intents → **+ Add Intent** → *Create custom
-intent* → name it exactly `AskAgentIntent`.
+### Spanish (invocation "casa solar": "pregúntale a casa solar …")
 
-### 3. Add the slot
+| Intent | Sample utterances | VPS prefix |
+|---|---|---|
+| `AskPorQueIntent` | `por qué {query}`, `por que {query}` | por qué |
+| `AskComoIntent` | `cómo {query}`, `como {query}` | cómo |
+| `AskCuantoIntent` | `cuánto {query}`, `cuanto {query}` | cuánto |
+| `AskCuantaIntent` | `cuánta {query}`, `cuanta {query}` | cuánta |
+| `AskCuantosIntent` | `cuántos {query}`, `cuantos {query}`, `cuántas {query}`, `cuantas {query}` | cuántos |
+| `AskQueIntent` | `qué {query}`, `que {query}` | qué |
+| `AskCualIntent` | `cuál {query}`, `cual {query}` | cuál |
+| `AskCuandoIntent` | `cuándo {query}`, `cuando {query}` | cuándo |
+| `AskHayIntent` | `hay {query}` | hay |
+| `AskVaIntent` | `va a {query}`, `van a {query}` | va a |
+| `AskEstaIntent` | `está {query}`, `esta {query}`, `están {query}` | está |
+| `AskAgentIntent` | `pregunta al agente {query}`, `preguntale al agente {query}`, `pregúntale al agente {query}`, `que dice el agente sobre {query}`, `agente {query}`, `si {query}`, `sobre {query}`, `acerca de {query}`, `que me diga {query}`, `que me explique {query}` | none |
 
-In that intent, add a slot named exactly `query` with slot type
-**`AMAZON.SearchQuery`**.
+`cuántas` goes through the `cuántos` intent, and `were` through `was`, because the
+agent reads either fine.
 
-`AMAZON.SearchQuery` may not be the only slot in an utterance and every
-utterance using it needs at least one carrier word before it — that is why
-each sample below starts with a verb phrase.
+### Status
 
-### 4. Sample utterances
+The VPS side went live on 2026-11-06 at 11:48 am (`d981329`). Only `AskAgentIntent`
+with its first five English and five Spanish utterances had been built in the console
+at that point. The other intents and utterances are added in the console afterwards,
+in both locales, then Build. Unknown `Ask*Intent` names get the existing "not sure" reply.
 
-These are the ones the skill actually has. "tell me {query}", "dime {query}" and a
-bare "pregunta {query}" are left out on purpose, so they can't steal utterances from
-the existing intents. Don't add them back.
-
-English:
-
-```
-ask the agent {query}
-ask agent {query}
-question for the agent {query}
-what does the agent say about {query}
-agent {query}
-```
-
-Spanish (add these under the `es-US` locale):
-
-```
-pregunta al agente {query}
-preguntale al agente {query}
-pregúntale al agente {query}
-que dice el agente sobre {query}
-agente {query}
-```
-
-### 5. Build and test
-
-Save Model → Build Model, in each locale. Then in the Test tab, en-US:
-
-```
-ask my solar to ask the agent what the plan is tonight
-ask my solar to ask the agent how much solar did we make yesterday
-```
-
-The first should speak one sentence and send the plan to Telegram. The second
-should say it's checking, then send the answer to Telegram. In es-US:
-
-```
-pregúntale a casa solar al agente cuál es el plan de esta noche
-```
-
-On a device: "Alexa, ask my solar to ask the agent what the plan is tonight" and
-"Alexa, pregúntale a casa solar al agente cuál es el plan de esta noche".
+Left out on purpose in Spanish: `dime {query}` and bare `pregunta {query}`, so they
+can't take over existing intents.
 
 ## Deploying the backend
 
@@ -165,5 +160,22 @@ ssh root@45.32.131.224 "curl -s -X POST http://127.0.0.1:5000/alexa \
 
 ## Verified
 
-See `alexa_agent_2026-11-06.md`. The cases there used fake request bodies sent to
-the VPS. The owner then tested the built intent in the Alexa simulator.
+`alexa_agent_2026-11-06.md` has the first deploy. For the question-word intents, on
+2026-11-06 at 11:48 am, using fake requests on the VPS:
+
+- **The 16 read-only responses** (launch, battery, status, solar, generator, events,
+  help, stop, in both languages) matched the ones from before the deploy, with live
+  numbers masked.
+- **All 26 intents in both languages, 52 requests,** through the real handler with
+  the call to the agent stubbed, so no model time or Telegram messages: each sent the
+  rebuilt question, the right language, `deliver=telegram`, `wait_s=5` and a 7 s
+  timeout. An empty slot gets "I didn't catch the question", and an unknown
+  `AskFooIntent` the "not sure" reply.
+- **Three through the real agent:** `AskWhatIsIntent` with "the plan tonight" spoke
+  the plan sentence in 0.36 s. `AskWhyIntent` with "did the kubota start this morning"
+  and `AskPorQueIntent` with "arrancó el kubota esta mañana" said the phone would get
+  it, at about 5.1 s. The VPS log showed the full questions, such as "why did the
+  kubota start this morning".
+
+No start, stop, set-generator or enable/disable-autogen intent was sent. No real Alexa
+request has reached the new intents, because they aren't in the console yet.

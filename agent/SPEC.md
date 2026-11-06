@@ -194,7 +194,7 @@ applied: no (learning phase)
 ## 10. Alexa
 
 - `vps/alexa_solar.py`: add `AskAgentIntent` with slot `query` (`AMAZON.SearchQuery`). Handler POSTs `{"text": query, "lang": "es" if is_spanish(data) else "en"}` plus `"deliver": "telegram", "wait_s": 5`, to `http://192.168.3.152:{ask_port}/ask`, 7 s timeout, speaks a 200, says the phone will get it on a 202; on failure speaks a fixed fallback in the right language. All existing intents untouched.
-- Document the console changes in `agent/docs/alexa.md`: add the intent with sample utterances in English and Spanish, invocation names "my solar" (en-US) and "casa solar" (es-US); the skill is only listed as "solar system", and "open my solar" collides with Alexa's built-in "solar", so use "ask my solar". Deploy: copy to `/var/www/alexa_solar.py` on the VPS, `systemctl restart alexa-solar`.
+- Document the console changes in `agent/docs/alexa.md`: add the intent with sample utterances in English and Spanish, invocation names "solar agent" (English) and "casa solar" (Spanish); the skill is only listed as "solar system". One intent per leading question word; see `alexa.md`. Deploy: copy to `/var/www/alexa_solar.py` on the VPS, `systemctl restart alexa-solar`.
 - No Alexa push notifications in v1.
 
 ## 11. System prompt (`agent/prompts.py`)
