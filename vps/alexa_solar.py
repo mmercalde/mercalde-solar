@@ -431,6 +431,13 @@ def alexa_handler():
         
         print(f"DEBUG: request_type={request_type}, spanish={spanish}, has_display={has_display}")
         
+        if request_type == 'SessionEndedRequest':
+            # A skill may not answer this one, and its body is the only place Alexa
+            # says why a session failed: reason ERROR with error.type and message.
+            ended = data.get('request', {})
+            print(f"DEBUG SessionEnded: reason={ended.get('reason')} error={ended.get('error')}")
+            return jsonify({"version": "1.0", "response": {}})
+
         if request_type == 'LaunchRequest':
             solar = get_solar_data()
             if spanish:
@@ -555,7 +562,7 @@ def alexa_handler():
                     else:
                         speech = f"No reconozco el generador {generator}." if spanish else f"I don't recognize the generator {generator}."
                 elif confirmation == 'DENIED':
-                    speech = "Okay, no prendo el generador." if spanish else "Okay, not starting the generator."
+                    speech = "Está bien, no lo haré." if spanish else "OK, I won't."
                 else:
                     speech = f"Confirma: prender el {generator}?" if spanish else f"Please confirm: start the {generator}?"
                     return build_response(speech, end_session=False)
@@ -580,7 +587,7 @@ def alexa_handler():
                     else:
                         speech = f"No reconozco el generador {generator}." if spanish else f"I don't recognize the generator {generator}."
                 elif confirmation == 'DENIED':
-                    speech = "Okay, no apago el generador." if spanish else "Okay, not stopping the generator."
+                    speech = "Está bien, no lo haré." if spanish else "OK, I won't."
                 else:
                     speech = f"Confirma: apagar el {generator}?" if spanish else f"Please confirm: stop the {generator}?"
                     return build_response(speech, end_session=False)
