@@ -192,6 +192,17 @@ Spanish samples without the article, for the same reason: "prende/arranca/encien
 generador {generator}" and "apaga/para generador {generator}". Verified in the es-MX
 simulator: it resolved to `kubota`, and the confirmation was denied.
 
+English synonyms, en-US (added 2026-11-07, 9:52 am):
+
+| Canonical | Synonyms |
+|---|---|
+| `mep` | m. e. p., m. e. p. eighty, m. e. p. eight oh three, m. e. p. generator, map, map generator, m e p, mep generator |
+
+**Alexa hears "MEP" as "m. e. p.", "map" or "m. e. p. eighty" in English** (seen in
+the voice history), which is why those synonyms are there. Like "cobalta", they live
+only in the console and work through entity resolution returning `mep`. Verified in
+the en-US simulator: it resolved to `mep`, and the confirmation was denied.
+
 The VPS has its own backstop in these four handlers. It takes the name from the slot's
 entity resolution when the status code is `ER_SUCCESS_MATCH`, otherwise the raw value.
 `get_gen_id` matches whole words, so "small" isn't "all". If neither maps to a generator,
