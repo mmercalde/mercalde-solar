@@ -71,7 +71,9 @@ def test_plan_record_matches_the_spec_shape(a, cfg):
                         "last 14 nights (12 nights)")
     assert lines[3] == ("system overhead: 1.180x (pack out ÷ house in, "
                         "1.090-1.340 over 12 nights, last 14 nights)")
-    assert lines[4] == "projected 52.0 V at: 4:10 am   sunrise 6:31 am"
+    # Four in the afternoon, sun still up: no crossing is printed.
+    assert lines[4] == ("projected 52.0 V at: too early to tell (today's sun "
+                        "still to come)   sunrise 6:31 am")
     # The day is named, not called "tomorrow": read at 4 pm and read again
     # after midnight, "tomorrow" is two different days.
     assert lines[5] == ("next daylight (Sat Aug 29): 20% cloud, "
@@ -132,6 +134,8 @@ def test_a_projection_already_at_the_target_reads_now_not_a_question_mark(a, cfg
 
 def test_a_projection_with_no_label_is_still_not_a_question_mark(a, cfg):
     f = base_facts(cfg)
+    # Nine at night: by day the plan line prints no crossing at all.
+    f["now"] += 5 * 3600
     f["projection"] = {"reached": f["now"] + 600}
     assert "≤ 15 min" in a.plan_record(f, "x", "y").splitlines()[4]
 

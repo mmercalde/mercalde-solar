@@ -313,3 +313,58 @@ def test_the_tool_hands_over_no_crossing_in_daylight(conn, cfg, monkeypatch):
 
 def test_a_spanish_question_is_answered_in_spanish_whatever_ask_says(a, nov6):
     assert a.answer("¿Va a arrancar el generador esta noche?", "en").startswith("No se espera")
+
+
+# --- the plan record line, by day and by night ---------------------------------
+
+import copy
+
+import policy as policymod
+from stubs import StubModel
+
+
+def _facts_at(cfg, day, hour, minute, reached, left=31200):
+    from test_agent import base_facts
+    f = base_facts(cfg)
+    f["now"] = ts_at(cfg, day, hour, minute)
+    f["today"] = day
+    f["sunrise_ts"] = toolsmod.sunmod.next_sunrise(cfg, now=f["now"])
+    f["remaining_solar_wh"] = left
+    f["projection"] = {"reached": reached, "at": history.clock(reached, cfg),
+                       "hours": round((reached - f["now"]) / 3600.0, 2)}
+    return f
+
+
+@pytest.mark.parametrize("hour,minute,crossing,line", [
+    # 9:00 am on 2026-11-07: the walk said 4:26 am off a day with 31 kWh to come.
+    (9, 0, ("2026-11-08", 4, 26),
+     "projected 52.0 V at: too early to tell (about 31.2 kWh of sun still to come today)"),
+    # After sunset the crossing is a prediction again.
+    (19, 0, ("2026-11-08", 4, 26), "projected 52.0 V at: 4:26 am"),
+])
+def test_the_plan_line_by_day_and_night_and_the_rules_do_not_move(
+        a, cfg, hour, minute, crossing, line):
+    f = _facts_at(cfg, "2026-11-07", hour, minute, ts_at(cfg, *crossing))
+    model = StubModel()
+    before = policymod.evaluate(cfg, f, model)
+    f["policy"] = before
+    kept = copy.deepcopy(f)
+    text = a.plan_record(f, "no change", "no change")
+    assert line in text
+    # Printing the line changed nothing the rules read, and they decide the same.
+    assert f == kept
+    assert policymod.evaluate(cfg, f, model) == before
+    assert policymod.lines(before) == [ln for ln in text.splitlines()
+                                       if ln.startswith("POLICY ")]
+
+
+def test_by_day_with_no_solar_figure_the_line_still_says_too_early(a, cfg):
+    f = _facts_at(cfg, "2026-11-07", 9, 0, ts_at(cfg, "2026-11-08", 4, 26), left=None)
+    assert ("projected 52.0 V at: too early to tell (today's sun still to come)"
+            in a.plan_record(f, "x", "y"))
+
+
+def test_by_day_a_walk_that_cannot_run_still_says_why(a, cfg):
+    f = _facts_at(cfg, "2026-11-07", 9, 0, ts_at(cfg, "2026-11-08", 4, 26))
+    f["projection"] = {"reached": None, "reason": "load profile not learned"}
+    assert "not projected (load profile not learned)" in a.plan_record(f, "x", "y")

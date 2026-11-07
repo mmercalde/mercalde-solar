@@ -470,7 +470,21 @@ class Agent:
         sunrise = (history.clock(facts["sunrise_ts"], self.cfg)
                    if facts["sunrise_ts"] else "?")
         crossing = toolsmod.tonight_crossing(self.cfg, proj, facts["now"])
-        if proj and proj.get("reached") and crossing["before_sunrise"]:
+        why = (proj or {}).get("reason") or ""
+        if crossing["daylight"] and not crossing["already"] and (
+                crossing["before_sunrise"] or crossing.get("after_sunrise_ts")
+                or why.startswith("not reached")):
+            # Display only. By day the walk credits none of the sun still to
+            # come, so the 9:00 am plan on 2026-11-07 printed "4:26 am" off a
+            # day that had 31 kWh of it left. facts["projection"] is untouched:
+            # POLICY 3 and 4 read it, and decide exactly as before. A reason
+            # the walk could not run at all is still printed below.
+            left = facts.get("remaining_solar_wh")
+            sun_left = (f"about {_kwh(left)} kWh of sun still to come today"
+                        if left is not None else "today's sun still to come")
+            lines.append(f"projected 52.0 V at: too early to tell ({sun_left})"
+                         f"   sunrise {sunrise}")
+        elif proj and proj.get("reached") and crossing["before_sunrise"]:
             lines.append(f"projected 52.0 V at: "
                          f"{self.model.projection_label(proj, facts['now'])}   "
                          f"sunrise {sunrise}")
