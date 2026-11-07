@@ -353,6 +353,81 @@ def test_solar_noon_is_within_a_minute_of_the_top_of_the_arc(alexa):
     assert abs((sunrise + sunset) / 2 - noon) < 60
 
 
+SWEEP = [i / 40.0 for i in range(41)]
+
+
+def label_for(alexa, layout, fraction):
+    sun = alexa.sun_xy(layout, fraction)
+    box = alexa.solar_label_box(layout, sun)
+    start, ctrl, end = alexa.solar_curve(layout, sun)
+    return sun, box, alexa.curve_points(start, ctrl, end, 400), alexa.curve_points(start, ctrl, end, 2)[1]
+
+
+@pytest.mark.parametrize("name", ["SHOW", "SPOT"])
+@pytest.mark.parametrize("fraction", [0, 0.5, 1], ids=["sunrise", "noon", "sunset"])
+def test_the_solar_label_clears_the_line_and_the_glow(alexa, name, fraction):
+    layout = getattr(alexa, name)
+    sun, box, line, mid = label_for(alexa, layout, fraction)
+    assert min(alexa.box_distance(box, p) for p in line) >= 7.9
+    assert alexa.box_distance(box, sun) - layout["glow_r"] >= 16
+    assert box[3] <= mid[1] - 7.9  # above the midpoint
+
+
+@pytest.mark.parametrize("name", ["SHOW", "SPOT"])
+@pytest.mark.parametrize("fraction", SWEEP)
+def test_the_solar_label_is_clear_all_day(alexa, name, fraction):
+    layout = getattr(alexa, name)
+    sun, box, line, mid = label_for(alexa, layout, fraction)
+    assert min(alexa.box_distance(box, p) for p in line) >= 7.9, box
+    assert alexa.box_distance(box, sun) - layout["glow_r"] >= 16, box
+    assert box[3] <= mid[1] - 7.9
+    assert box[3] <= layout["horizon"]
+    assert not [z for z in layout["keep_out"] if alexa.boxes_touch(box, z)]
+    # text stays on the screen, and on the Spot inside the circle
+    assert box[0] >= 0 and box[2] <= layout["w"] and box[1] >= 0
+    if name == "SPOT":
+        assert all(((x - 240) ** 2 + (y - 240) ** 2) ** 0.5 <= 232 for x in box[::2] for y in box[1::2])
+
+
+@pytest.mark.parametrize("fraction", SWEEP)
+def test_the_spot_sun_stays_well_inside_the_circle(alexa, fraction):
+    x, y = alexa.sun_xy(alexa.SPOT, fraction)
+    glow_edge = ((x - 240) ** 2 + (y - 240) ** 2) ** 0.5 + alexa.SPOT["glow_r"]
+    assert 240 - glow_edge >= 40
+
+
+def test_the_spot_arc_ends_are_40_inside_the_rim(alexa):
+    for fraction in (0, 1):
+        x, y = alexa.sun_xy(alexa.SPOT, fraction)
+        assert 240 - ((x - 240) ** 2 + (y - 240) ** 2) ** 0.5 >= 40
+
+
+def test_the_label_goes_where_the_box_says(alexa):
+    sunrise, sunset = alexa.sun_times(DAY)
+    data = alexa.build_apl_datasource(SOLAR, now=(sunrise + sunset) / 2)
+    box = alexa.solar_label_box(alexa.SPOT, alexa.sun_xy(alexa.SPOT, 0.5))
+    assert data["spotSolarLabelY"] == f"{round(100.0 * box[1] / 480, 1)}vh"
+    left = (box[0] + box[2] - alexa.SPOT["label_slot"]) / 2.0
+    assert data["spotSolarLabelX"] == f"{round(100.0 * left / 480, 1)}vw"
+
+
+def test_the_spot_battery_and_percent_grew(alexa):
+    x, y, w, h = alexa.SPOT["battery"]
+    assert w == 84 and h == 31  # 40% over 60 x 22
+    assert x + w / 2 == 240 and y + h <= alexa.SPOT["horizon"]
+    items = alexa.build_apl_document()["mainTemplate"]["items"][0]["item"]["items"]
+    percent = [i for i in items if i.get("text") == "${solar.batterySOC}%"][0]
+    volts = [i for i in items if i.get("text") == "${solar.batteryVoltage}"][0]
+    assert percent["fontSize"] == "10vh"  # 48dp on 480
+    assert float(volts["top"][:-2]) > float(percent["top"][:-2]) + 10
+
+
+def test_the_night_flow_needs_no_label_place(alexa):
+    _, sunset = alexa.sun_times(DAY)
+    data = alexa.build_apl_datasource(SOLAR, now=sunset + 3600)
+    assert data["solarFlow"] is False and data["spotSolarLabelX"]
+
+
 def test_day_shows_the_sun_and_night_the_moon(alexa):
     sunrise, sunset = alexa.sun_times(DAY)
     day = alexa.build_apl_datasource(SOLAR, now=sunrise + 3600)

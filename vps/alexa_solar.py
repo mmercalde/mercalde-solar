@@ -407,20 +407,24 @@ SHOW = {
     "gen_label": {"mep": (394, 382), "kubota": (356, 470)},
     # The sun's flow bends out to here, so it doesn't cross the big numbers or the icon.
     "hero": (300, 500),
+    "label_box": (70, 23), "label_slot": 115.2,
+    "keep_out": [(0, 12, 300, 50), (672, 12, 960, 50), (335, 231, 456, 372)],
     "moon": (112, 118), "moon_r": 20,
     "stars": [(200, 70), (330, 150), (455, 60), (610, 130), (720, 62), (820, 170), (905, 96)],
     "stroke": 3.5, "dash": [2, 7], "dot_r": 7, "sun_r": 13, "glow_r": 24,
 }
 SPOT = {
-    "key": "spot", "w": 480, "h": 480, "horizon": 278, "arc_cx": 240, "arc_r": 185,
-    "battery": (210, 252, 60, 22), "house": (366, 298, 36),
-    "house_from": (276, 262), "house_ctrl": (350, 268), "house_to": (376, 304),
+    "key": "spot", "w": 480, "h": 480, "horizon": 278, "arc_cx": 240, "arc_r": 160,
+    "battery": (198, 243, 84, 31), "house": (366, 298, 36),
+    "house_from": (288, 258), "house_ctrl": (350, 268), "house_to": (376, 304),
     "gen_from": {"mep": (184, 310), "kubota": (184, 338)},
-    "gen_to": {"mep": (218, 274), "kubota": (212, 274)},
-    "gen_ctrl": {"mep": (192, 282), "kubota": (174, 290)},
+    "gen_to": {"mep": (208, 274), "kubota": (202, 274)},
+    "gen_ctrl": {"mep": (186, 284), "kubota": (172, 292)},
     "gen_dot": {"mep": (78, 310), "kubota": (78, 338)},
     "gen_label": {"mep": (140, 303), "kubota": (140, 331)},
-    "hero": (190, 290),
+    "hero": (186, 296),
+    # What the solar label has to stay out of, as (left, top, right, bottom).
+    "label_box": (56, 18), "label_slot": 105.6, "keep_out": [(140, 22, 340, 58), (194, 239, 290, 278)],
     "moon": (140, 112), "moon_r": 16,
     "stars": [(95, 170), (205, 62), (250, 130), (300, 72), (345, 140), (400, 185), (170, 205)],
     "stroke": 3, "dash": [2, 6], "dot_r": 5, "sun_r": 10, "glow_r": 18,
@@ -445,16 +449,67 @@ def battery_fill_path(layout, soc):
     x, y, w, h = layout["battery"]
     return f"M{x + 3} {y + 3}h{battery_fill_width(soc, w - 6)}v{h - 6}h{-battery_fill_width(soc, w - 6)}z"
 
-def solar_flow(layout, sun):
+def solar_curve(layout, sun):
     """A slight curve from the sun into the near side of the battery, under the big numbers."""
     x, y, w, h = layout["battery"]
     end = (x + w + 5, y + h / 2) if sun[0] >= x + w / 2 else (x - 1, y + h / 2)
-    ctrl_x = sun[0]
-    if layout.get("hero"):
-        ctrl_x = max(sun[0], layout["hero"][1]) if end[0] > x else min(sun[0], layout["hero"][0])
-    ctrl = (ctrl_x, end[1])
-    mid = ((sun[0] + 2 * ctrl[0] + end[0]) / 4, (sun[1] + 2 * ctrl[1] + end[1]) / 4)
-    return quad(sun, ctrl, end), mid
+    ctrl_x = max(sun[0], layout["hero"][1]) if end[0] > x else min(sun[0], layout["hero"][0])
+    return (sun, (ctrl_x, end[1]), end)
+
+def curve_points(start, ctrl, end, count=120):
+    points = []
+    for i in range(count + 1):
+        t = i / float(count)
+        points.append(((1 - t) ** 2 * start[0] + 2 * t * (1 - t) * ctrl[0] + t ** 2 * end[0],
+                       (1 - t) ** 2 * start[1] + 2 * t * (1 - t) * ctrl[1] + t ** 2 * end[1]))
+    return points
+
+def box_distance(box, point):
+    left, top, right, bottom = box
+    return math.hypot(max(left - point[0], 0, point[0] - right), max(top - point[1], 0, point[1] - bottom))
+
+def boxes_touch(a, b):
+    return a[0] < b[2] and b[0] < a[2] and a[1] < b[3] and b[1] < a[3]
+
+LABEL_LINE_CLEARANCE = 8
+LABEL_GLOW_CLEARANCE = 16
+LABEL_ARC_CLEARANCE = 4
+LABEL_EDGE_CLEARANCE = 8
+# Nearest first, sideways or further up, never below the first try.
+LABEL_OFFSETS = sorted(((dx, -dy) for dx in range(-160, 161, 4) for dy in range(0, 161, 4)),
+                       key=lambda o: o[0] ** 2 + o[1] ** 2)
+
+def label_fits(layout, box, sun, line, arc):
+    if box[3] > layout["horizon"] - 4 or box[1] < 0 or box[0] < 0 or box[2] > layout["w"]:
+        return False
+    if layout["key"] == "spot":
+        centre, rim = layout["w"] / 2.0, layout["w"] / 2.0 - LABEL_EDGE_CLEARANCE
+        if any(math.hypot(x - centre, y - centre) > rim for x in box[::2] for y in box[1::2]):
+            return False
+    if any(boxes_touch(box, zone) for zone in layout["keep_out"]):
+        return False
+    if box_distance(box, sun) < layout["glow_r"] + LABEL_GLOW_CLEARANCE:
+        return False
+    if any(box_distance(box, p) < LABEL_LINE_CLEARANCE for p in line):
+        return False
+    return all(box_distance(box, p) >= LABEL_ARC_CLEARANCE for p in arc)
+
+def solar_label_box(layout, sun):
+    """The nearest place above the flow's midpoint that's clear of the line, glow and text."""
+    start, ctrl, end = solar_curve(layout, sun)
+    line = curve_points(start, ctrl, end)
+    mid = curve_points(start, ctrl, end, 2)[1]
+    w, h = layout["label_box"]
+    cx, r, horizon = layout["arc_cx"], layout["arc_r"], layout["horizon"]
+    arc = [(cx - r * math.cos(math.pi * i / 60.0), horizon - r * math.sin(math.pi * i / 60.0)) for i in range(61)]
+    for avoiding_arc in (arc, []):
+        for dx, dy in LABEL_OFFSETS:
+            bottom = mid[1] - LABEL_LINE_CLEARANCE + dy
+            box = (mid[0] + dx - w / 2.0, bottom - h, mid[0] + dx + w / 2.0, bottom)
+            if label_fits(layout, box, sun, line, avoiding_arc):
+                return box
+    bottom = mid[1] - LABEL_LINE_CLEARANCE
+    return (mid[0] - w / 2.0, bottom - h, mid[0] + w / 2.0, bottom)
 
 def flow_path(colour, opacity, path, dash, layout):
     return {"type": "path", "pathData": path, "stroke": colour, "strokeOpacity": opacity,
@@ -584,9 +639,9 @@ def spot_scene():
         scene_component(SPOT),
         scene_text("${solar.nowText}", "25vw", "5.5vh", "50vw", "4vh", align="center"),
         *flow_labels(SPOT),
-        scene_text("${solar.batterySOC}%", "30vw", "59vh", "40vw", "7.5vh", "${solar.batteryColor}",
+        scene_text("${solar.batterySOC}%", "30vw", "58.6vh", "40vw", "10vh", "${solar.batteryColor}",
                    "center", fontWeight="300"),
-        scene_text("${solar.batteryVoltage}", "30vw", "69.6vh", "40vw", "3vh", "#E3E8EF", "center"),
+        scene_text("${solar.batteryVoltage}", "30vw", "71.5vh", "40vw", "3vh", "#E3E8EF", "center"),
         scene_text("MEP", "18.2vw", "62.8vh", "12vw", "3vh", "#E3E8EF"),
         scene_text("Kubota", "18.2vw", "68.6vh", "12vw", "3vh", "#E3E8EF"),
         scene_text("${solar.houseKw}", "70vw", "71vh", "20vw", "2.8vh", BLUE, "center", when="${solar.houseFlow}"),
@@ -698,11 +753,11 @@ def scene_geometry(layout, state, soc):
     vw = lambda x: f"{round(100.0 * x / layout['w'], 1)}vw"
     vh = lambda y: f"{round(100.0 * y / layout['h'], 1)}vh"
     sun = sun_xy(layout, state["fraction"]) if state["day"] else (layout["arc_cx"], layout["horizon"])
-    path, mid = solar_flow(layout, sun)
-    half = 0.5 * (0.12 * layout["w"] if key == "show" else 0.22 * layout["w"])
-    data = {f"{key}SunX": sun[0], f"{key}SunY": sun[1], f"{key}SolarPath": path,
-            f"{key}SolarLabelX": vw(mid[0] - half + (46 if sun[0] >= layout["battery"][0] + layout["battery"][2] / 2 else -46)),
-            f"{key}SolarLabelY": vh(mid[1] - 12),
+    # The flow is hidden at night, so its label needs no place then.
+    box = solar_label_box(layout, sun) if state["day"] else (0, 0, 0, 0)
+    data = {f"{key}SunX": sun[0], f"{key}SunY": sun[1], f"{key}SolarPath": quad(*solar_curve(layout, sun)),
+            f"{key}SolarLabelX": vw((box[0] + box[2] - layout["label_slot"]) / 2.0),
+            f"{key}SolarLabelY": vh(box[1]),
             f"{key}FillPath": battery_fill_path(layout, soc)}
     for gen, name in (("mep", "Mep"), ("kubota", "Kubota")):
         data[f"{key}{name}Path"] = quad(layout["gen_from"][gen], layout["gen_ctrl"][gen], layout["gen_to"][gen])
