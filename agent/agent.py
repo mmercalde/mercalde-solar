@@ -1289,23 +1289,31 @@ class Agent:
                     "Yes: the pack is already at or below the 52.0 V start")
         elif c["daylight"] and not decided and not active:
             # The same discipline POLICY 3 and 4 keep: with the sun still up
-            # neither the crossing nor the deficit is settled, and the walk
-            # credits none of the surplus still to come.
+            # neither the crossing nor the deficit is settled. No shortfall is
+            # quoted either: it counts tonight's drain and none of today's
+            # charging, and at 7:16 am on 2026-11-07 it said "16.4 kWh short"
+            # on a clear 33 kWh day. The figure is the sun still to come today,
+            # which before dawn's first hour is the whole day's forecast.
             try:
                 left = self.model.remaining_solar_wh(now=now)
             except Exception:                        # noqa: BLE001
                 left = None
-            shortfall = max(0, deficit or 0)
-            caveat = toolsmod._not_final(self.cfg, now, left, shortfall).strip()
-            if caveat and es:
-                caveat = toolsmod._not_final_sentence(caveat, "es")
-            lead = ("Aún no está decidido: con el sol de hoy todavía por venir "
-                    "no hay una hora proyectada para el arranque de 52.0 V" if es
-                    else "Not decided yet: with today's sun still to come there "
-                    "is no projected time for the 52.0 V start")
-            if energy:
-                lead += (", y por ahora " if es else ", and as of now ") + energy
-            text = lead + "." + (" " + caveat if caveat else "")
+            if left is not None:
+                sun_part = (f"el pronóstico de hoy es de unos {_kwh(left)} kWh "
+                            f"de sol, que entran primero a la batería" if es else
+                            f"today's forecast is about {_kwh(left)} kWh of sun, "
+                            f"which goes into the pack first")
+            else:
+                sun_part = ("el sol de hoy entra primero a la batería" if es
+                            else "today's sun goes into the pack first")
+            decides = ""
+            if opens:
+                decides = (f"; la regla de recarga decide a las "
+                           f"{history.clock(opens, self.cfg)}" if es else
+                           f"; the top-up rule decides at "
+                           f"{history.clock(opens, self.cfg)}")
+            text = (("Es muy pronto para saberlo: " if es else
+                     "Too early to tell: ") + sun_part + decides + ".")
             plan_at = history.clock(snap["ts"], self.cfg)
             return text + (f" (Del plan de las {plan_at}.)" if es else
                            f" (From the {plan_at} plan.)")

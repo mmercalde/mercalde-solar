@@ -260,13 +260,37 @@ def test_in_daylight_a_crossing_tonight_is_not_a_yes(a, conn, cfg, monkeypatch):
     record(conn, ts_at(cfg, "2026-11-07", 7, 9), ts_at(cfg, "2026-11-07", 19, 3),
            deficit=MORNING_SHORT)
     reply = a.answer("is the generator going to run tonight?")
-    assert reply.startswith("Not decided yet")
+    assert reply.startswith("Too early to tell: today's forecast is about 9.0 kWh "
+                            "of sun, which goes into the pack first; the top-up "
+                            "rule decides at 9:00 pm.")
     assert "Yes" not in reply and "7:03" not in reply and "likely tonight" not in reply
-    assert "16.1 kWh short" in reply
-    assert "Not final: solar still to come" in reply and "decides at 9:00 pm" in reply
+    # The shortfall counts tonight's drain and none of today's charging.
+    assert "16.1" not in reply and "short" not in reply
     es = a.answer("¿Va a arrancar el generador esta noche?")
-    assert es.startswith("Aún no está decidido") and "7:03" not in es
-    assert "No es definitivo" in es and "decide a las 9:00 pm" in es
+    assert es.startswith("Es muy pronto para saberlo: el pronóstico de hoy es de "
+                         "unos 9.0 kWh de sol, que entran primero a la batería; "
+                         "la regla de recarga decide a las 9:00 pm.")
+    assert "7:03" not in es and "16.1" not in es
+
+
+def test_in_daylight_without_a_solar_figure_it_still_says_too_early(a, conn, cfg,
+                                                                     monkeypatch):
+    monkeypatch.setattr(a.model, "remaining_solar_wh", lambda now=None: None)
+    record(conn, ts_at(cfg, "2026-11-07", 13, 0), None, deficit=MORNING_SHORT)
+    reply = a.gen_tonight_answer("en", now=ts_at(cfg, "2026-11-07", 13, 2))
+    assert reply.startswith("Too early to tell: today's sun goes into the pack "
+                            "first; the top-up rule decides at 9:00 pm.")
+    assert "16.1" not in reply
+
+
+def test_after_sunset_the_shortfall_is_quoted(a, conn, cfg):
+    """Sunset is about 4:53 pm here; by 7:00 pm the day's charging is in."""
+    record(conn, ts_at(cfg, "2026-11-07", 19, 0), None, deficit=MORNING_SHORT)
+    reply = a.gen_tonight_answer("en", now=ts_at(cfg, "2026-11-07", 19, 2))
+    assert "16.1 kWh short of reaching sunrise above 52.0 V" in reply
+    assert "Too early" not in reply and "decides at 9:00 pm" in reply
+    es = a.gen_tonight_answer("es", now=ts_at(cfg, "2026-11-07", 19, 2))
+    assert "le faltan 16.1 kWh" in es and "Es muy pronto" not in es
 
 
 def test_before_dawn_a_crossing_is_still_a_run(a, conn, cfg):
