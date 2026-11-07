@@ -550,8 +550,14 @@ def tonight_crossing(cfg, projection, ref_ts):
     p = projection or {}
     reached, reason = p.get("reached"), p.get("reason") or ""
     sunrise = sunmod.next_sunrise(cfg, now=ref_ts)
+    # Made in daylight, the walk runs over the rest of today's sun without
+    # crediting its surplus, so even a crossing before the next sunrise is
+    # not a prediction. Kept apart from before_sunrise: the overnight report
+    # scores a 7:00 pm plan from late summer, made before sunset, and that
+    # is a different question.
     out = {"sunrise_ts": sunrise,
-           "sunrise": dated_clock(sunrise, cfg) if sunrise else None}
+           "sunrise": dated_clock(sunrise, cfg) if sunrise else None,
+           "daylight": bool(sunmod.daylight(cfg, ref_ts))}
     if not reached:
         return dict(out, reached=None, before_sunrise=False, already=False,
                     at=None, reason=reason or "unknown")
@@ -572,7 +578,9 @@ def tonight_projection(cfg, projection, ref_ts):
     """What the model is handed as `projected_52v`: tonight's crossing only.
 
     The walk's own fields, relabelled, with `reached`/`at` replaced by the
-    sunrise-bounded answer and `before_sunrise` saying which it was.
+    sunrise-bounded answer and `before_sunrise` saying which it was. In
+    daylight there is no crossing to hand over at all (`before_sunrise` None),
+    unless the pack is already at the target.
     """
     out = relabel_projection(projection or {})
     c = tonight_crossing(cfg, projection, ref_ts)
@@ -580,7 +588,12 @@ def tonight_projection(cfg, projection, ref_ts):
         out.pop(key, None)
     out["before_sunrise"] = c["before_sunrise"]
     out["next_sunrise"] = c["sunrise"]
-    if c["before_sunrise"]:
+    if c["daylight"] and not c["already"]:
+        out["before_sunrise"] = None
+        out["reason"] = ("not projected in daylight: the walk credits no solar "
+                         "surplus, so it cannot say where today's sun leaves "
+                         "the pack; see tonight.verdict")
+    elif c["before_sunrise"]:
         out["reached"] = c["reached"]
         out["at"] = c["at"]
         out["hours"] = round(max(0, c["reached"] - ref_ts) / 3600.0, 2)

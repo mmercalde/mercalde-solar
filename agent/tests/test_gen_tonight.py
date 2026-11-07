@@ -242,3 +242,50 @@ def test_other_questions_are_not(q):
 def test_no_exam_case_is_answered_by_this(cfg):
     for case in eval_cases.CASES:
         assert not agentmod.is_gen_tonight_question(case["question"]), case["id"]
+
+
+# --- in daylight there is no crossing to quote --------------------------------
+
+MORNING_SHORT = {"deficit_wh": 16100, "needed_wh": 30000, "available_wh": 13900,
+                 "floor_v": 52.0}
+
+
+def test_in_daylight_a_crossing_tonight_is_not_a_yes(a, conn, cfg, monkeypatch):
+    """7:09 am on 2026-11-07, the first answer after the fix: the walk reached
+    7:03 pm without crediting a single hour of the day's sun, and the reply
+    said "Yes, a generator run is expected tonight"."""
+    now = ts_at(cfg, "2026-11-07", 7, 10)
+    monkeypatch.setattr(agentmod.time, "time", lambda: now)
+    monkeypatch.setattr(a.model, "remaining_solar_wh", lambda now=None: 9000)
+    record(conn, ts_at(cfg, "2026-11-07", 7, 9), ts_at(cfg, "2026-11-07", 19, 3),
+           deficit=MORNING_SHORT)
+    reply = a.answer("is the generator going to run tonight?")
+    assert reply.startswith("Not decided yet")
+    assert "Yes" not in reply and "7:03" not in reply and "likely tonight" not in reply
+    assert "16.1 kWh short" in reply
+    assert "Not final: solar still to come" in reply and "decides at 9:00 pm" in reply
+    es = a.answer("¿Va a arrancar el generador esta noche?")
+    assert es.startswith("Aún no está decidido") and "7:03" not in es
+    assert "No es definitivo" in es and "decide a las 9:00 pm" in es
+
+
+def test_before_dawn_a_crossing_is_still_a_run(a, conn, cfg):
+    record(conn, ts_at(cfg, "2026-11-07", 5, 0), ts_at(cfg, "2026-11-07", 5, 45))
+    reply = a.gen_tonight_answer("en", now=ts_at(cfg, "2026-11-07", 5, 2))
+    assert reply.startswith("Yes, a generator run is expected tonight")
+    assert "5:45 am" in reply
+
+
+def test_the_tool_hands_over_no_crossing_in_daylight(conn, cfg, monkeypatch):
+    now = ts_at(cfg, "2026-11-07", 7, 10)
+    monkeypatch.setattr(toolsmod.time, "time", lambda: now)
+    t = toolsmod.Tools(conn, cfg)
+    t.model = Walk(ts_at(cfg, "2026-11-07", 19, 3))
+    p = t.get_load_forecast(24)["projected_52v"]
+    assert p["before_sunrise"] is None and "reached" not in p and "at" not in p
+    assert p["reason"].startswith("not projected in daylight")
+    assert "7:03" not in json.dumps(p)
+
+
+def test_a_spanish_question_is_answered_in_spanish_whatever_ask_says(a, nov6):
+    assert a.answer("¿Va a arrancar el generador esta noche?", "en").startswith("No se espera")

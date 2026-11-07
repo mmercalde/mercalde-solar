@@ -1287,6 +1287,28 @@ class Agent:
             lead = ("Sí: la batería ya está en el arranque de 52.0 V o por "
                     "debajo" if es else
                     "Yes: the pack is already at or below the 52.0 V start")
+        elif c["daylight"] and not decided and not active:
+            # The same discipline POLICY 3 and 4 keep: with the sun still up
+            # neither the crossing nor the deficit is settled, and the walk
+            # credits none of the surplus still to come.
+            try:
+                left = self.model.remaining_solar_wh(now=now)
+            except Exception:                        # noqa: BLE001
+                left = None
+            shortfall = max(0, deficit or 0)
+            caveat = toolsmod._not_final(self.cfg, now, left, shortfall).strip()
+            if caveat and es:
+                caveat = toolsmod._not_final_sentence(caveat, "es")
+            lead = ("Aún no está decidido: con el sol de hoy todavía por venir "
+                    "no hay una hora proyectada para el arranque de 52.0 V" if es
+                    else "Not decided yet: with today's sun still to come there "
+                    "is no projected time for the 52.0 V start")
+            if energy:
+                lead += (", y por ahora " if es else ", and as of now ") + energy
+            text = lead + "." + (" " + caveat if caveat else "")
+            plan_at = history.clock(snap["ts"], self.cfg)
+            return text + (f" (Del plan de las {plan_at}.)" if es else
+                           f" (From the {plan_at} plan.)")
         elif c["before_sunrise"]:
             lead = (f"Sí, se espera que funcione un generador esta noche: se "
                     f"proyecta que la batería llegue al arranque de 52.0 V a "
@@ -1372,7 +1394,8 @@ class Agent:
             return plan["text"] if plan else "No plan has been recorded yet."
         gen_lang = gen_tonight_language(text)
         if gen_lang:
-            return self.gen_tonight_answer(lang or gen_lang)
+            # The question's own language: /ask says "en" when it is not told.
+            return self.gen_tonight_answer(gen_lang)
         with self.lock:
             tools = self.tools()
             try:
@@ -1447,7 +1470,8 @@ class Agent:
         if verdict:
             lines.append("In plain terms: " + verdict)
             proj = (snap.get("data") or {}).get("projection")
-            if toolsmod.tonight_crossing(self.cfg, proj, snap["ts"])["before_sunrise"]:
+            c = toolsmod.tonight_crossing(self.cfg, proj, snap["ts"])
+            if c["before_sunrise"] and not c["daylight"]:
                 lines.append(
                     "A policy shown as 'held' is waiting for its window, not "
                     "cancelled; 'recommend: no change' means the thresholds "
