@@ -334,7 +334,7 @@ def test_a_crossing_past_sunrise_is_not_printed_as_a_bare_time(
     monkeypatch.setattr(a, "gather", lambda *x, **k: f)
     text = a.digest(evening=False)
     assert ("predicted 52.0 V not before sunrise "
-            "(next crossing 9:10 pm Aug 28)  (from the 7:00 pm plan)") in text
+            "(next crossing 9:10 pm Fri Aug 28)  (from the 7:00 pm plan)") in text
     assert "at 9:10 pm" not in text
 
 

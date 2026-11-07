@@ -115,6 +115,59 @@ def is_plan_question(text):
     return bool(PLAN_QUESTION_RE.match(cleaned))
 
 
+
+# "Will a generator run tonight?" on its own, answered by Python from the plan's
+# POLICY 4 deficit and its before-sunrise projection. On 2026-11-06 the model
+# answered it twice with a crossing the walk had found the next evening. Anchored
+# at both ends: "Will a generator run tonight, and what's the shortfall?" asks
+# for more than this answers and stays the model's, as an exam case.
+_GEN = r"(?:generators?|gen|genny|mep|kubota)"
+_WHO = r"(?:a|the|any|either|our)\s+"
+_TONIGHT = r"(?:\s+tonight|\s+tonite|\s+overnight|\s+this\s+evening)"
+_ES_GEN = r"(?:el|algun|un|ningun)\s+generador"
+_ES_VERB = r"(?:arrancar|encender(?:se)?|prender(?:se)?|funcionar|correr|trabajar)"
+_ES_FUT = r"(?:arrancara|se\s+encendera|se\s+prendera|funcionara|correra|trabajara)"
+_ES_NOCHE = r"(?:\s+esta\s+noche|\s+hoy\s+en\s+la\s+noche)"
+GEN_TONIGHT_EN_RE = re.compile(
+    rf"^(?:will|does|is|are)\s+{_WHO}{_GEN}\s+"
+    rf"(?:(?:be\s+)?(?:going\s+to|gonna)\s+|(?:need\s+to|have\s+to)\s+)?"
+    rf"(?:run|start|come\s+on|kick\s+on){_TONIGHT}?$"
+    rf"|^(?:is|are)\s+{_WHO}{_GEN}\s+(?:running|starting){_TONIGHT}$"
+    rf"|^(?:will|is)\s+there\s+(?:be\s+)?(?:a|any)\s+{_GEN}\s+run"
+    rf"(?:\s+expected)?{_TONIGHT}?$"
+    rf"|^(?:is|are)\s+(?:a|any)\s+{_GEN}\s+runs?\s+expected{_TONIGHT}?$"
+    rf"|^(?:will|do)\s+(?:we|i)\s+need\s+{_WHO}{_GEN}{_TONIGHT}$",
+    re.IGNORECASE)
+GEN_TONIGHT_ES_RE = re.compile(
+    rf"^(?:se\s+)?va\s+a\s+{_ES_VERB}\s+{_ES_GEN}{_ES_NOCHE}?$"
+    rf"|^{_ES_GEN}\s+(?:se\s+)?va\s+a\s+{_ES_VERB}{_ES_NOCHE}?$"
+    rf"|^{_ES_FUT}\s+{_ES_GEN}{_ES_NOCHE}?$"
+    rf"|^{_ES_GEN}\s+{_ES_FUT}{_ES_NOCHE}?$"
+    rf"|^(?:hay|habra)\s+que\s+(?:arrancar|prender|encender)\s+"
+    rf"(?:el\s+)?generador{_ES_NOCHE}$",
+    re.IGNORECASE)
+
+
+def _plain(text):
+    plain = "".join(c for c in unicodedata.normalize("NFD", str(text or ""))
+                    if not unicodedata.combining(c))
+    return " ".join(plain.strip().strip("?!.¿¡ ").lower().split())
+
+
+def gen_tonight_language(text):
+    """"en" or "es" if this is "will a generator run tonight?", else None."""
+    cleaned = _plain(text)
+    if GEN_TONIGHT_EN_RE.match(cleaned):
+        return "en"
+    if GEN_TONIGHT_ES_RE.match(cleaned):
+        return "es"
+    return None
+
+
+def is_gen_tonight_question(text):
+    return gen_tonight_language(text) is not None
+
+
 # What Alexa says for the plan. The record runs to 180 words of shorthand, which
 # is for reading, so the phone gets that and the voice gets one sentence.
 PLAN_SPOKEN = {
@@ -416,9 +469,16 @@ class Agent:
         proj = facts["projection"]
         sunrise = (history.clock(facts["sunrise_ts"], self.cfg)
                    if facts["sunrise_ts"] else "?")
-        if proj and proj.get("reached"):
+        crossing = toolsmod.tonight_crossing(self.cfg, proj, facts["now"])
+        if proj and proj.get("reached") and crossing["before_sunrise"]:
             lines.append(f"projected 52.0 V at: "
                          f"{self.model.projection_label(proj, facts['now'])}   "
+                         f"sunrise {sunrise}")
+        elif proj and proj.get("reached"):
+            # The walk credits no solar surplus, so a crossing it finds past
+            # sunrise ignores the day's recharge and is not a prediction.
+            # facts["projection"] itself is untouched; POLICY 3 reads it.
+            lines.append(f"projected 52.0 V at: not before sunrise   "
                          f"sunrise {sunrise}")
         else:
             why = (proj or {}).get("reason", "unknown")
@@ -716,6 +776,9 @@ class Agent:
             "thresholds": facts["thresholds"],
             "gate_open": facts["gate"]["open"],
             "projection": facts["projection"],
+            # POLICY 4's deficit to sunrise, so "will a generator run
+            # tonight?" is answered from the number the rule decided on.
+            "deficit": facts.get("deficit"),
             "soc_curve": facts["soc_curve"],
             "policy": facts["policy"],
             "policy_misses": [r["rule"] for r in missed],
@@ -1007,14 +1070,11 @@ class Agent:
         crossed at all. Past the sunrise, say so, and carry the date so the
         time cannot be read as the wrong night.
         """
-        label = self.model.projection_label(projection, source_ts)
-        sunrise = sunmod.next_sunrise(self.cfg, now=source_ts)
-        reached = (projection or {}).get("reached")
-        if not sunrise or not reached or reached <= sunrise:
-            return f"at {label}"
-        t = history.local(reached, self.cfg)
+        c = toolsmod.tonight_crossing(self.cfg, projection, source_ts)
+        if c["before_sunrise"] or not c.get("after_sunrise_ts"):
+            return f"at {self.model.projection_label(projection, source_ts)}"
         return (f"not before sunrise (next crossing "
-                f"{history.fmt_clock(t)} {t.strftime('%b')} {t.day})")
+                f"{toolsmod.dated_clock(c['after_sunrise_ts'], self.cfg)})")
 
     def reference_projection(self, now):
         """(tick ts, projection) the overnight report is scored against.
@@ -1055,6 +1115,217 @@ class Agent:
 
     # --- inbound questions --------------------------------------------------
 
+    # --- "will a generator run tonight?" -------------------------------------
+
+    def _topup_window(self, now):
+        """(when the night's top-up window opens, whether it has opened).
+
+        After midnight the night in progress opened the evening before, and
+        so did its window: the decision was made then.
+        """
+        today = history.local_day(now, self.cfg)
+        st = sunmod.times(self.cfg, today)
+        ref = now
+        if st and now < st[0]:
+            ref = now - 86400
+            st = sunmod.times(self.cfg, history.local_day(ref, self.cfg))
+        opens = policymod.window_opens(
+            self.cfg, {"now": ref, "sunset_ts": st[1] if st else None})
+        return opens, bool(opens and now >= opens)
+
+    def _topup_decision(self, opens, now, lang):
+        """(clause, a run is under way or asked for) for a window that has opened.
+
+        The state machine first: it is what the rule did. With every generator
+        still idle, the rule-4 line of the last plan made in the window says
+        why it did nothing.
+        """
+        es = lang == "es"
+        at = history.clock(opens, self.cfg)
+        snap = self.topup.snapshot()
+        gens = (snap.get("gens") or {}) if (
+            snap.get("night") == self.topup.night_key(now)) else {}
+        clauses, active = [], False
+        for gen in topupmod.GENS:
+            e = gens.get(gen) or {}
+            state, name = e.get("state", topupmod.IDLE), topupmod._pretty(gen)
+            if state == topupmod.IDLE:
+                continue
+            when = history.clock(e.get("requested_at") or e.get("since") or now,
+                                 self.cfg)
+            stop = f"{e['stop']:.1f} V" if e.get("stop") is not None else "?"
+            if state == topupmod.REQUESTED:
+                active = True
+                clauses.append(
+                    f"la regla de recarga subió el arranque del {name} a las "
+                    f"{when} para cargar hasta {stop}" if es else
+                    f"the top-up rule raised the {name}'s start at {when} for a "
+                    f"run to {stop}")
+            elif state == topupmod.RUNNING:
+                active = True
+                clauses.append(
+                    f"el {name} está funcionando en la recarga de esta noche, "
+                    f"hasta {stop}" if es else
+                    f"the {name} is running on tonight's top-up, to {stop}")
+            elif state == topupmod.DONE:
+                clauses.append(
+                    f"la regla de recarga ya hizo funcionar el {name} esta "
+                    f"noche y terminó a las "
+                    f"{history.clock(e.get('since') or now, self.cfg)}" if es else
+                    f"the top-up rule already ran the {name} tonight: "
+                    f"{e.get('why', 'it finished')}")
+            elif state == topupmod.STOPPED_BY_OWNER:
+                clauses.append(
+                    f"la recarga de esta noche con el {name} quedó en manos del "
+                    f"dueño" if es else
+                    f"tonight's top-up with the {name} ended as the owner's: "
+                    f"{e.get('why', '')}".rstrip(": "))
+            elif state == topupmod.FAILED_TO_START:
+                clauses.append(
+                    f"la regla de recarga pidió arrancar el {name} a las {when} "
+                    f"y no arrancó" if es else
+                    f"the top-up rule asked the {name} to start at {when} and "
+                    f"it did not start")
+        if clauses:
+            return "; ".join(clauses), active
+
+        rows = self.conn.execute(
+            "SELECT ts, text, data FROM plans WHERE ts >= ? AND ts <= ? "
+            "ORDER BY ts DESC", (opens, now)).fetchall()
+        for row in rows:
+            try:
+                d = json.loads(row["data"] or "{}")
+            except json.JSONDecodeError:
+                continue
+            r4 = next((r for r in d.get("policy") or [] if r.get("rule") == 4),
+                      None)
+            if not r4 or (r4.get("held") and "held until" in r4.get("detail", "")):
+                continue
+            t = history.clock(row["ts"], self.cfg)
+            if r4.get("fires"):
+                applied = next((ln[len("applied: "):] for ln in
+                                (row["text"] or "").splitlines()
+                                if ln.startswith("applied: ")), "?")
+                return ((f"a las {t} la regla de recarga pidió una recarga, "
+                         f"pero no se aplicó ({applied})" if es else
+                         f"at {t} the top-up rule called for a run, but it was "
+                         f"not applied ({applied})"), False)
+            deficit = (d.get("deficit") or {}).get("deficit_wh")
+            if not es:
+                return (f"at {t} the top-up rule decided no run: "
+                        f"{r4.get('detail', 'no reason recorded')}"), False
+            if deficit is not None and deficit <= 0:
+                why = (f": a la batería le sobran {_kwh(-deficit)} kWh para "
+                       f"la noche")
+            elif deficit is not None:
+                why = (f": el déficit de {_kwh(deficit)} kWh es menor que los "
+                       f"{_kwh(self.cfg['min_topup_wh'])} kWh que justifican "
+                       f"una recarga")
+            else:
+                why = ""
+            return f"a las {t} la regla de recarga decidió no arrancar{why}", False
+        return ((f"la regla de recarga no se ha evaluado desde las {at}" if es
+                 else f"the top-up rule has not been evaluated since {at}"),
+                False)
+
+    def gen_tonight_answer(self, lang=None, now=None):
+        """"Will a generator run tonight?", answered by Python.
+
+        From the latest plan: its before-sunrise 52.0 V projection, its POLICY
+        4 deficit to sunrise, and, once the window has opened, what the top-up
+        rule did with them. No model call; every figure is one the plan holds.
+        """
+        es = lang == "es"
+        now = int(now or time.time())
+        snap = self.latest_plan_json()
+        if not snap.get("ts"):
+            return ("Aún no hay un plan, así que no puedo decirlo." if es else
+                    "No plan has been recorded yet, so I can't say.")
+        data = snap.get("data") or {}
+        c = toolsmod.tonight_crossing(self.cfg, data.get("projection"),
+                                      snap["ts"])
+        d = data.get("deficit")
+        if not d:
+            # A plan written before the deficit was stored with it: the same
+            # call POLICY 4 makes, asked now.
+            d = self.model.overnight_deficit(
+                sunmod.next_sunrise(self.cfg, now=now), now=now)
+        deficit = d.get("deficit_wh")
+        floor_v = d.get("floor_v", 52.0)
+        sunrise = (history.clock(c["sunrise_ts"], self.cfg)
+                   if c["sunrise_ts"] else "?")
+        opens, decided = self._topup_window(now)
+        if decided:
+            decision, active = self._topup_decision(opens, now, lang)
+        else:
+            active = False
+            decision = (f"la regla de recarga decide a las "
+                        f"{history.clock(opens, self.cfg)}" if es else
+                        f"the top-up rule decides at "
+                        f"{history.clock(opens, self.cfg)}") if opens else ""
+
+        if deficit is None:
+            energy = ""
+        elif deficit <= 0:
+            energy = (f"guarda {_kwh(d.get('available_wh'))} kWh por encima de "
+                      f"{floor_v:.1f} V y se espera que salgan unos "
+                      f"{_kwh(d.get('needed_wh'))} kWh antes del amanecer, así "
+                      f"que aguanta hasta el amanecer con {_kwh(-deficit)} kWh "
+                      f"de sobra" if es else
+                      f"it holds {_kwh(d.get('available_wh'))} kWh above "
+                      f"{floor_v:.1f} V against about {_kwh(d.get('needed_wh'))} "
+                      f"kWh expected out of it by sunrise, so the pack holds "
+                      f"through sunrise with {_kwh(-deficit)} kWh to spare")
+        else:
+            energy = (f"le faltan {_kwh(deficit)} kWh por encima de "
+                      f"{floor_v:.1f} V para llegar al amanecer" if es else
+                      f"it is {_kwh(deficit)} kWh short of reaching sunrise "
+                      f"above {floor_v:.1f} V")
+        short = deficit is not None and deficit >= self.cfg["min_topup_wh"]
+
+        if c["already"]:
+            lead = ("Sí: la batería ya está en el arranque de 52.0 V o por "
+                    "debajo" if es else
+                    "Yes: the pack is already at or below the 52.0 V start")
+        elif c["before_sunrise"]:
+            lead = (f"Sí, se espera que funcione un generador esta noche: se "
+                    f"proyecta que la batería llegue al arranque de 52.0 V a "
+                    f"las {c['at']}, antes del amanecer a las {sunrise}" if es else
+                    f"Yes, a generator run is expected tonight: the pack is "
+                    f"projected to reach the 52.0 V start at {c['at']}, before "
+                    f"sunrise at {sunrise}")
+        elif active:
+            lead = ("Sí, hay una recarga con generador esta noche" if es else
+                    "Yes, a generator run is on tonight for the top-up")
+        elif not c["reason"].startswith("not reached"):
+            lead = (f"No puedo decir si funcionará un generador esta noche: no "
+                    f"se sabe cuándo llegará la batería a 52.0 V "
+                    f"({c['reason']})" if es else
+                    f"I can't say whether a generator will run tonight: when "
+                    f"the pack reaches 52.0 V is not known ({c['reason']})")
+        elif short and not decided:
+            lead = (f"Es probable una recarga esta noche: no se proyecta que la "
+                    f"batería llegue al arranque de 52.0 V antes del amanecer a "
+                    f"las {sunrise}, pero" if es else
+                    f"A top-up run is likely tonight: the pack is not projected "
+                    f"to reach the 52.0 V start before sunrise at {sunrise}, but")
+        else:
+            lead = (f"No se espera que funcione ningún generador esta noche: no "
+                    f"se proyecta que la batería llegue al arranque de 52.0 V "
+                    f"antes del amanecer a las {sunrise}" if es else
+                    f"No generator run is expected tonight: the pack is not "
+                    f"projected to reach the 52.0 V start before sunrise at "
+                    f"{sunrise}")
+        sep = " " if lead.endswith("but") or lead.endswith("pero") else ", y " \
+            if es else ", and "
+        text = lead + (sep + energy if energy else "") + "."
+        if decision:
+            text += " " + decision[0].upper() + decision[1:] + "."
+        plan_at = history.clock(snap["ts"], self.cfg)
+        text += (f" (Del plan de las {plan_at}.)" if es else
+                 f" (From the {plan_at} plan.)")
+        return text
+
     def plan_brief(self, text, lang=None):
         """(one spoken sentence, the full record) for a plan question, or None.
 
@@ -1071,17 +1342,17 @@ class Agent:
         words = PLAN_SPOKEN.get(lang) or PLAN_SPOKEN["en"]
         proj = (snap.get("data") or {}).get("projection") or {}
         start = (snap.get("intended") or {}).get("mep_start", self.cfg["default_start"])
-        now = int(time.time())
-        reached, reason = proj.get("reached"), proj.get("reason") or ""
-        when = ""
-        if reached and reason.startswith("already"):
+        # Judged against the sunrise after the plan was made, the same check
+        # the Q&A and the overnight report use.
+        c = toolsmod.tonight_crossing(self.cfg, proj, snap["ts"])
+        when = c["at"] if c["before_sunrise"] else ""
+        if c["already"]:
             kind = "already"
-        elif reached:
-            sunrise = sunmod.next_sunrise(self.cfg, now=now)
-            kind = "not_tonight" if sunrise and reached > sunrise else "tonight"
-            when = history.clock(reached, self.cfg)
+        elif c["before_sunrise"]:
+            kind = "tonight"
         else:
-            kind = "not_tonight" if reason.startswith("not reached") else "unknown"
+            kind = ("not_tonight" if c["reason"].startswith("not reached")
+                    else "unknown")
         return (words[kind].format(v=start, when=when) + words["phone"], snap["text"])
 
     def answer(self, text, lang=None):
@@ -1099,6 +1370,9 @@ class Agent:
         if is_plan_question(text):
             plan = history.latest_plan(self.conn)
             return plan["text"] if plan else "No plan has been recorded yet."
+        gen_lang = gen_tonight_language(text)
+        if gen_lang:
+            return self.gen_tonight_answer(lang or gen_lang)
         with self.lock:
             tools = self.tools()
             try:
@@ -1158,23 +1432,26 @@ class Agent:
         # shortfall tonight - while "projected 52.0 V at 10:13 pm" sat two
         # lines up. The verdict is therefore also stated in words, derived
         # from the same projection the plan printed.
+        # A crossing counts as tonight only before the sunrise after the plan:
+        # on 2026-11-06 this sentence called one found at 6:47 pm the next
+        # evening "IS expected tonight". So the sentence is now the same one
+        # Python gives for "will a generator run tonight?", from the same
+        # projection and deficit.
         intended = snap.get("intended") or {}
-        proj = (snap.get("data") or {}).get("projection") or {}
-        start = intended.get("mep_start", self.cfg["default_start"])
-        if proj.get("reached"):
-            when = history.clock(proj["reached"], self.cfg)
-            lines.append(
-                f"In plain terms: the pack is projected to reach the "
-                f"{start:.1f} V start threshold at {when}, so a generator run "
-                f"IS expected tonight. A policy shown as 'held' is waiting "
-                f"for its window, not cancelled; 'recommend: no change' means "
-                f"the thresholds are already set right, not that no run is "
-                f"coming.")
-        elif proj.get("reason"):
-            lines.append(
-                f"In plain terms: the pack is not projected to reach the "
-                f"{start:.1f} V start threshold ({proj['reason']}), so no "
-                f"generator run is expected tonight.")
+        verdict = None
+        if snap.get("ts"):
+            try:
+                verdict = self.gen_tonight_answer()
+            except Exception as e:                   # noqa: BLE001
+                log.warning("could not say whether a run is expected: %s", e)
+        if verdict:
+            lines.append("In plain terms: " + verdict)
+            proj = (snap.get("data") or {}).get("projection")
+            if toolsmod.tonight_crossing(self.cfg, proj, snap["ts"])["before_sunrise"]:
+                lines.append(
+                    "A policy shown as 'held' is waiting for its window, not "
+                    "cancelled; 'recommend: no change' means the thresholds "
+                    "are already set right, not that no run is coming.")
         if intended:
             lines.append(
                 "Thresholds in force: MEP start {mep_start:.1f} stop "

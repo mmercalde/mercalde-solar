@@ -202,8 +202,8 @@ class EvalTools(toolsmod.Tools):
     def get_load_forecast(self, hours):
         hours = max(1, min(int(hours), 48))
         out = self.model.load_forecast(hours, now=self.at)
-        out["projected_52v"] = toolsmod.relabel_projection(
-            self.model.project_voltage(52.0, now=self.at))
+        out["projected_52v"] = toolsmod.tonight_projection(
+            self.cfg, self.model.project_voltage(52.0, now=self.at), self.at)
         out["tonight"] = toolsmod.tonight_energy(self.model, self.cfg, self.at)
         drawdown = self.model.overnight_drawdown(now=self.at)
         if drawdown:
@@ -562,11 +562,17 @@ def numbers_as_written(reply, lang):
     return SPANISH_DECIMAL_RE.sub(r"\1.\2", reply or "") if lang == "es" else (reply or "")
 
 
+# Answers Python wrote from the plan; none of them says anything about a model.
+PYTHON_ANSWERED = ("python_plan", "python_gen_tonight")
+
+
 def ask_candidate(exam_agent, question, lang, cfg):
     """One question, and everything the report needs to know about the answer."""
     import agent as agentmod
     plan_question = agentmod.is_plan_question(question)
-    context = exam_agent.plan_context() if not plan_question else None
+    gen_question = agentmod.is_gen_tonight_question(question)
+    context = (exam_agent.plan_context()
+               if not (plan_question or gen_question) else None)
     now_text = history.stamp(int(time.time()), cfg)
     catcher = LogCatcher()
     logger = logging.getLogger(agentmod.__name__)
@@ -583,6 +589,9 @@ def ask_candidate(exam_agent, question, lang, cfg):
     calls = list(tools.calls) if tools else []
     if plan_question:
         answered_by = "python_plan"
+    elif gen_question:
+        # Python's sentence, not the model's: grading it would score nothing.
+        answered_by = "python_gen_tonight"
     elif catcher.saw(MODEL_ERROR_LOG):
         answered_by = "model_error"
     elif catcher.saw(STATUS_LOG):
@@ -659,11 +668,11 @@ def exam_candidate(candidate, cfg, snapshot, repeat=1, only=None, questions=(),
 def exam_summary(result):
     """The counts the report table is built from."""
     rows = result["cases"] + result["questions"]
-    graded = [r for r in result["cases"] if r["answered_by"] != "python_plan"]
+    graded = [r for r in result["cases"] if r["answered_by"] not in PYTHON_ANSWERED]
     model = [r for r in rows if r["answered_by"] in ("model", "python_status")]
     walls = [r["wall_s"] for r in model]
     return {"graded": len(graded), "passed": sum(r["passed"] for r in graded),
-            "python_answered": sum(r["answered_by"] == "python_plan" for r in rows),
+            "python_answered": sum(r["answered_by"] in PYTHON_ANSWERED for r in rows),
             "ungrounded_retries": sum(r["ungrounded_retry"] for r in rows),
             "status_fallbacks": sum(r["status_fallback"] for r in rows),
             "model_errors": sum(r["answered_by"] == "model_error" for r in rows),
@@ -682,7 +691,7 @@ def _answer_lines(row):
     flags = [f for f, on in (("UNGROUNDED RETRY", row["ungrounded_retry"]),
                              ("ANSWERED FROM /data", row["status_fallback"]),
                              ("MODEL ERROR", row["answered_by"] == "model_error"),
-                             ("PYTHON, NOT THE MODEL", row["answered_by"] == "python_plan")) if on]
+                             ("PYTHON, NOT THE MODEL", row["answered_by"] in PYTHON_ANSWERED)) if on]
     out = [f"  {row['wall_s']} s  tools: {calls}  unsourced: {row['unsourced'] or 'none'}"
            + (f"  [{', '.join(flags)}]" if flags else "")]
     out += [f"  A: {line}" for line in (row["reply"] or "(no reply)").splitlines() or [""]]
@@ -698,7 +707,7 @@ def exam_candidate_report(results):
         for r in result["cases"]:
             seen.setdefault(r["id"], []).append(r)
         for cid, rows in seen.items():
-            python = all(r["answered_by"] == "python_plan" for r in rows)
+            python = all(r["answered_by"] in PYTHON_ANSWERED for r in rows)
             count = f"{sum(r['passed'] for r in rows)}/{len(rows)}"
             out.append(f"\n{cid}: {count}" + ("  (answered by Python, says nothing "
                                               "about the model)" if python else ""))

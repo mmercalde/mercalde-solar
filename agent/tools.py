@@ -527,6 +527,68 @@ def relabel_projection(projection):
     return out
 
 
+def dated_clock(ts, cfg):
+    """A time with its day, "6:47 pm Sat Nov 7", for one that is not tonight."""
+    t = history.local(ts, cfg)
+    return f"{history.fmt_clock(t)} {t.strftime('%a %b')} {t.day}"
+
+
+def tonight_crossing(cfg, projection, ref_ts):
+    """project_voltage's crossing, cut at the first sunrise after `ref_ts`.
+
+    A crossing is tonight only if it comes before that sunrise. The walk runs
+    24 h and credits no solar surplus back into the pack, so past sunrise it
+    ignores the whole day's recharge; asked at 7:29 pm on 2026-11-06 it found
+    6:47 pm the next evening, which went to the model as a bare "6:47 pm" and
+    came back as a generator run tonight. Past sunrise there is no prediction
+    here at all - the time is dropped, as if the walk had stopped at sunrise,
+    which is the same answer because the walk returns its first crossing.
+
+    `ref_ts` is when the projection was made: a stored plan is judged against
+    the sunrise that followed it, not the one after the moment it is read.
+    """
+    p = projection or {}
+    reached, reason = p.get("reached"), p.get("reason") or ""
+    sunrise = sunmod.next_sunrise(cfg, now=ref_ts)
+    out = {"sunrise_ts": sunrise,
+           "sunrise": dated_clock(sunrise, cfg) if sunrise else None}
+    if not reached:
+        return dict(out, reached=None, before_sunrise=False, already=False,
+                    at=None, reason=reason or "unknown")
+    if reason.startswith("already"):
+        return dict(out, reached=reached, before_sunrise=True, already=True,
+                    at="now", reason=reason)
+    # No sunrise to measure against is the overnight report's old answer:
+    # the time stands.
+    if not sunrise or reached <= sunrise:
+        return dict(out, reached=reached, before_sunrise=True, already=False,
+                    at=history.clock(reached, cfg), reason=reason or None)
+    return dict(out, reached=None, before_sunrise=False, already=False, at=None,
+                after_sunrise_ts=reached,
+                reason=f"not reached before sunrise ({out['sunrise']})")
+
+
+def tonight_projection(cfg, projection, ref_ts):
+    """What the model is handed as `projected_52v`: tonight's crossing only.
+
+    The walk's own fields, relabelled, with `reached`/`at` replaced by the
+    sunrise-bounded answer and `before_sunrise` saying which it was.
+    """
+    out = relabel_projection(projection or {})
+    c = tonight_crossing(cfg, projection, ref_ts)
+    for key in ("reached", "at", "hours"):
+        out.pop(key, None)
+    out["before_sunrise"] = c["before_sunrise"]
+    out["next_sunrise"] = c["sunrise"]
+    if c["before_sunrise"]:
+        out["reached"] = c["reached"]
+        out["at"] = c["at"]
+        out["hours"] = round(max(0, c["reached"] - ref_ts) / 3600.0, 2)
+    else:
+        out["reason"] = c["reason"]
+    return out
+
+
 def _not_final(cfg, now, left, shortfall):
     """What the verdict adds while the top-up rule has yet to decide, or "".
 
@@ -815,8 +877,10 @@ class Tools:
         hours = max(1, min(int(hours), 48))
         out = self.model.load_forecast(hours)
         out["total_kwh"] = _kwh(out.get("total_wh"))
-        out["projected_52v"] = relabel_projection(self.model.project_voltage(52.0))
-        out["tonight"] = tonight_energy(self.model, self.cfg, int(time.time()))
+        now = int(time.time())
+        out["projected_52v"] = tonight_projection(
+            self.cfg, self.model.project_voltage(52.0, now=now), now)
+        out["tonight"] = tonight_energy(self.model, self.cfg, now)
         drawdown = self.model.overnight_drawdown()
         if drawdown:
             out["overnight_drawdown"] = dict(drawdown, kwh=_kwh(drawdown.get("wh")))
