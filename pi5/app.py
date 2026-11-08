@@ -47,6 +47,8 @@ Endpoints:
   /acdiag/stream - AC diagnostic stream capture (V2.4)
   /acdiag/log   - AC diagnostic log viewer (V2.4)
   /acdiag/log/clear - Clear AC diagnostic log (V2.4)
+  /history/api/*  - Read-only proxy to the KAMRUI's history API (history_routes.py)
+  /history/static/* - uPlot and the History section's JS/CSS (pi5/static)
 """
 
 import os
@@ -1338,6 +1340,10 @@ def poll_modbus():
 
 # --- Flask App ---
 app = Flask(__name__)
+# History section: /history/static/* and a read-only proxy /history/api/* to the
+# KAMRUI. Nothing in it touches the poll, the generator loop or Modbus.
+from history_routes import history_bp  # noqa: E402
+app.register_blueprint(history_bp)
 
 DASHBOARD_HTML = """<!DOCTYPE html>
 <html lang='en'>
@@ -1737,7 +1743,7 @@ input[type=range]::-moz-range-thumb{width:14px;height:14px;border-radius:50%;bac
     <div>
       <div class='k'>Solar</div>
       <div class='v num'><span id='hudPv'>0</span><span class='u'>W</span></div>
-      <div class='s'><span id='hudPvPct'>0</span>% of <span id='capKw_value'>--</span> kW</div>
+      <div class='s'><span id='hudPvPct'>0</span>% of <span class='capKw'>--</span> kW</div>
     </div>
     <div style='display:flex;align-items:center;gap:11px'>
       <svg class='hudring' viewBox='0 0 108 108'>
@@ -1788,7 +1794,7 @@ input[type=range]::-moz-range-thumb{width:14px;height:14px;border-radius:50%;bac
     <div>
       <div class='lbl'>&#9728;&#65039; Total Solar Production</div>
       <div class='val num'><span id='totalPV_value'>0</span><span class='u'>W</span></div>
-      <div class='sub'>Peak <span id='capKw_value'>--</span> kW &middot; <span id='pvPct_value'>0</span>% of array</div>
+      <div class='sub'>Array <span class='capKw'>--</span> kW &middot; <span id='pvPct_value'>0</span>% of array</div>
     </div>
     <div>
       <div class='track'><div class='fill' id='totalPV_bar' style='--c1:#ff8a00;--c2:#ffd54a'></div></div>
@@ -1897,6 +1903,33 @@ input[type=range]::-moz-range-thumb{width:14px;height:14px;border-radius:50%;bac
   </div>
 </div>
 </details>
+
+<!-- History: charts from the KAMRUI's history database, through /history/api.
+     Its script, styles and uPlot load from /history/static the first time the
+     section is opened, so the live page pays nothing until then. -->
+<details class='secacc' id='histSec'>
+<summary class='sec'>History <span class='caret'>&#10095;</span></summary>
+<div id='histRoot'><div class='h-status'>Loading history&hellip;</div></div>
+</details>
+<script>
+(function(){
+  var sec=document.getElementById('histSec'),loaded=false;
+  function css(href){var l=document.createElement('link');l.rel='stylesheet';l.href=href;document.head.appendChild(l);}
+  function js(src,next){var s=document.createElement('script');s.src=src;s.onload=next;
+    s.onerror=function(){document.getElementById('histRoot').innerHTML=
+      "<div class='h-status' style='color:var(--bad)'>Could not load the History script from the Pi5.</div>";loaded=false;};
+    document.body.appendChild(s);}
+  function load(){if(loaded)return;loaded=true;
+    css('/history/static/uPlot.min.css');css('/history/static/history.css');
+    js('/history/static/uPlot.iife.min.js',function(){js('/history/static/history.js');});}
+  sec.addEventListener('toggle',function(){
+    if(sec.open)load();
+    try{localStorage.setItem('histOpen',sec.open?'1':'0');}catch(e){}
+  });
+  try{if(localStorage.getItem('histOpen')==='1')sec.open=true;}catch(e){}
+  if(sec.open)load();
+})();
+</script>
 
 <h2 class='sec'>Control &amp; Settings</h2>
 
@@ -2655,7 +2688,8 @@ if(NARROW.addEventListener)NARROW.addEventListener('change',e=>placeAgentControl
 else NARROW.addListener(e=>placeAgentControls(e.matches));
 
 document.addEventListener('DOMContentLoaded',()=>{
-  document.getElementById('capKw_value').textContent=(CAPS.total/1000).toFixed(1);
+  /* Two places show the array's nameplate; an id would only reach the first. */
+  document.querySelectorAll('.capKw').forEach(function(el){el.textContent=(CAPS.total/1000).toFixed(1);});
   placeAgentControls(NARROW.matches);
   fetchData();fetchConfig();fetchAgent();startPolling();
 });

@@ -188,3 +188,63 @@ Pi5.**
   Not done: a Pi5-side ring buffer of today's minutes as a fallback. It would
   mean touching the poll thread, and KAMRUI being down is rare enough that the
   banner is the right first answer.
+
+## 5. What branch `dash-graphs` adds
+
+- `agent/history_api.py` + `agent/solar-history.service`: the API above,
+  `GET /history/api/{health,day,energy}`. A day is <= 1440 points (one per
+  minute, later sample wins, a null row across any gap > 5 min); days before
+  the minute samples come back `resolution: "hour"` from the InsightLocal
+  backfill; a day with nothing is `resolution: "none"`. Energy is per local
+  day for up to 400 days.
+- `pi5/history_routes.py`: blueprint with `/history/static/*` (from
+  `pi5/static/`) and the `/history/api/*` proxy (5 s timeout, allow-listed
+  names and arguments, gzip for large answers).
+- `pi5/static/`: uPlot 1.6.31 (MIT, licence alongside), `history.js`,
+  `history.css`.
+- `pi5/app.py`: the History section (closed by default; its files load the
+  first time it is opened and it remembers open/closed per browser), the
+  `capKw` fix and "Peak" -> "Array". Two lines register the blueprint. Nothing
+  else in the file changed.
+- `vps/nginx/default`: `location /history/`.
+
+**Chart library: uPlot**, not Chart.js. 50 KB for everything used here
+(Chart.js is ~200 KB and needs chartjs-plugin-zoom, hammer.js and a date
+adapter to match), drawn for exactly this shape of data: several thousand
+time-stamped points across stacked panels with a shared, synced cursor and
+zoom; drag-zoom and click-to-hide legend are built in; time zones come from
+`uPlot.tzDate`, so every axis and readout is America/Tijuana whatever the
+viewer's device is set to. Cost: pinch-zoom and grouped bars are not built in;
+both are a few dozen lines in `history.js`.
+
+Design choices worth knowing:
+
+- Small multiples, one unit per chart (voltage, current, SOC, power, solar by
+  array) rather than InsightLocal's four-axis chart: they share a time axis,
+  cursor and zoom, so reading across is the same, and no value is read off the
+  wrong axis.
+- Colours were checked with a colour-vision validator against the dark panel;
+  each chart has at most three line hues, and battery power is a filled area.
+- Threshold lines are the *current* settings from `/config`; the page says so.
+- Comparison draws the second day dashed on the first day's clock.
+
+## 6. Deploy (not done; needs the owner's OK)
+
+1. KAMRUI: fast-forward `agent` to `dash-graphs`, `git pull --ff-only` in
+   `~/mercalde-solar`; `sudo cp agent/solar-history.service /etc/systemd/system/`,
+   `sudo systemctl daemon-reload && sudo systemctl enable --now solar-history`.
+   Starts one new process. `solar-agent` is **not** restarted; its code on disk
+   changes only by the new files.
+2. Pi5: copy `pi5/app.py`, `pi5/history_routes.py`, `pi5/static/` to
+   `/home/michael/solar_dashboard/` (backup app.py first, per README), then
+   `sudo systemctl restart solar-dashboard`. **This restarts the Modbus poll
+   and the automatic generator loop** (gunicorn, one worker), clears the
+   in-memory event log and the start-origin memory, and for ~10 s the VPS
+   fails over to the ESP8266 backup. Same windows as any dashboard deploy:
+   no generator running, after sunrise, not 8:30-11:00 pm.
+3. VPS: install the new `vps/nginx/default`, `sudo nginx -t && sudo systemctl
+   reload nginx`. Without it the section works on the LAN but not on
+   mercalde-solar.org.
+
+Rollback: Pi5 `cp` the backup app.py back and restart; the KAMRUI service can
+simply be stopped; nginx block removal is inert.

@@ -214,6 +214,21 @@ server {
         expires 7d;
     }
 
+    # History section: /history/static/* (uPlot and its JS/CSS, self-hosted on
+    # the Pi5) and /history/api/* (read-only, proxied by the Pi5 to the KAMRUI's
+    # history API). Open, like /data: it only reads. Without this block the
+    # path falls through to `location /` and lands on InsightLocal.
+    location /history/ {
+        proxy_pass http://solar_dashboard;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header Accept-Encoding $http_accept_encoding;
+        proxy_connect_timeout 5s;
+        # The Pi5 gives the KAMRUI 5 s; this only has to outlast that.
+        proxy_read_timeout 15s;
+    }
+
     # InsightLocal - main page
     location / {
         if ($solar_locked) { return 403; }

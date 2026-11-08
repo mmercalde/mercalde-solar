@@ -1,0 +1,51 @@
+/* History section. Uses the dashboard's own tokens (--panel, --line, --txt, --dim2). */
+#histRoot{min-width:0}
+#histRoot .h-tabs{display:flex;gap:6px;margin-bottom:12px}
+#histRoot .h-tab{background:rgba(255,255,255,.05);color:var(--dim2);border:1px solid var(--line);
+  border-radius:10px;padding:7px 16px;font-weight:600;font-size:.82rem;cursor:pointer}
+#histRoot .h-tab.on{background:rgba(255,255,255,.12);color:var(--txt)}
+#histRoot .h-bar{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-bottom:10px}
+#histRoot .h-bar .btn.sm{padding:6px 11px;min-width:34px}
+#histRoot .h-bar .btn:disabled{opacity:.35;cursor:default}
+#histRoot .h-sep{width:1px;height:22px;background:var(--line);margin:0 4px}
+#histRoot input[type=date],#histRoot input[type=month]{background:rgba(0,0,0,.3);color:var(--txt);
+  border:1px solid var(--line);border-radius:9px;padding:6px 8px;font:inherit;font-size:.82rem;color-scheme:dark}
+#histRoot .h-cmp{font-size:.78rem;color:var(--dim2);display:flex;align-items:center;gap:6px}
+#histRoot .h-status{font-size:.8rem;color:var(--dim2);margin:4px 0 10px;min-height:1.2em}
+#histRoot .h-status.bad{color:var(--bad)}
+#histRoot .h-status.warn{color:var(--warn)}
+#histRoot .h-sum{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px}
+#histRoot .h-chip,#histRoot .h-run{font-size:.76rem;color:var(--txt);background:rgba(255,255,255,.05);
+  border:1px solid var(--line);border-radius:99px;padding:4px 10px;font-variant-numeric:tabular-nums}
+#histRoot .h-chip b{color:var(--dim2);font-weight:600;margin-right:3px}
+#histRoot .h-run i{display:inline-block;width:9px;height:9px;border-radius:2px;background:var(--c);margin-right:6px;vertical-align:-1px}
+#histRoot .h-panel{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);
+  padding:12px 12px 8px;margin-bottom:12px;min-width:0;overflow:hidden}
+#histRoot .h-ttl{font-size:.72rem;text-transform:uppercase;letter-spacing:.09em;color:var(--dim2);
+  font-weight:600;margin:0 0 6px 4px}
+#histRoot .h-foot{font-size:.74rem;color:var(--dim2);line-height:1.5;margin:4px 2px 8px}
+#histRoot .h-tablewrap{overflow-x:auto;margin-bottom:8px}
+#histRoot .h-table{border-collapse:collapse;width:100%;font-size:.78rem;font-variant-numeric:tabular-nums}
+#histRoot .h-table th,#histRoot .h-table td{padding:6px 8px;text-align:right;border-bottom:1px solid var(--line);white-space:nowrap}
+#histRoot .h-table th{color:var(--dim2);font-weight:600}
+#histRoot .h-table th:first-child,#histRoot .h-table td:first-child{text-align:left}
+#histRoot .h-table tr.tot td{font-weight:650;border-top:1px solid var(--dim2)}
+#histRoot .h-table a{color:var(--ac);text-decoration:none}
+
+/* uPlot ships light; restyle its legend and selection for the dark panels. */
+#histRoot .uplot{font-family:inherit;color:var(--txt)}
+#histRoot .u-legend{font-size:.76rem;color:var(--txt);text-align:left;margin-top:4px}
+#histRoot .u-legend th{font-weight:500;color:var(--dim2)}
+#histRoot .u-legend .u-series{padding:1px 6px}
+#histRoot .u-legend .u-series > *{padding:2px}
+#histRoot .u-legend .u-value{font-variant-numeric:tabular-nums;color:var(--txt)}
+#histRoot .u-legend .u-off > *{opacity:.35}
+#histRoot .u-select{background:rgba(255,255,255,.09)}
+#histRoot .u-over{touch-action:pan-y}
+#histRoot .u-cursor-x{border-right:1px dashed rgba(255,255,255,.35)}
+#histRoot .u-cursor-y{display:none}
+@media(max-width:560px){
+  #histRoot .h-sep{display:none}
+  #histRoot .h-panel{padding:10px 6px 6px}
+  #histRoot .u-legend{font-size:.7rem}
+}
