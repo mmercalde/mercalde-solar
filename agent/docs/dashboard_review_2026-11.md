@@ -253,3 +253,13 @@ Design choices worth knowing:
 
 Rollback: Pi5 `cp` the backup app.py back and restart; the KAMRUI service can
 simply be stopped; nginx block removal is inert.
+
+## 7. Usable % (added after the battery work landed)
+
+The battery card, its ring and the HUD show the battery work's usable figure
+from `usable.py`, as "26% usable (monitor 81%)". The Pi5 proxies
+`/history/api/usable` to the agent's own `GET /battery` on 8090 and takes the
+number as given. When the agent does not answer, the page shows the monitor's
+SOC and labels it "monitor SOC". The History SOC panel draws usable % from
+`/battery?date=&step=1` next to the monitor's SOC, with usable.py's anchors
+(full / 52.0 V) as dashed verticals.

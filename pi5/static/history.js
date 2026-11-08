@@ -24,7 +24,7 @@
     solar: '#c98500', load: '#3987e5', gen: '#d55181', batt: '#199e70',
     mppt80: '#d95926', south: '#3987e5', west: '#199e70',
     mep: '#9085e9', kub: '#d55181',
-    v: '#199e70', a: '#3987e5', soc: '#c98500',
+    v: '#199e70', a: '#3987e5', soc: '#c98500', usable: '#199e70',
     axis: '#8fa0b3', grid: 'rgba(255,255,255,0.07)', txt: '#e8eef5', dim: '#8fa0b3'
   };
   var GEN_NAME = { mep: 'MEP-803A', kubota: 'Kubota' };
@@ -46,6 +46,7 @@
   function tzDate(ts) { return uPlot.tzDate(new Date(ts * 1e3), TZ); }
   function num(v, d) {
     if (v == null || isNaN(v)) return '--';
+    if (Math.abs(v) < 0.5 * Math.pow(10, -(d || 0))) v = 0;   /* no "-0" */
     return Number(v).toLocaleString('en-US', { minimumFractionDigits: d || 0, maximumFractionDigits: d || 0 });
   }
   function esc(s) { return String(s).replace(/[&<>"']/g, function (c) { return '&#' + c.charCodeAt(0) + ';'; }); }
@@ -138,18 +139,32 @@
     $('hDate').value = S.date;
     $('hNext').disabled = S.date >= today();
     setStatus('hStatus', 'Loading ' + esc(label(S.date)) + '&hellip;');
-    var reqs = [getJSON('/history/api/day?date=' + S.date)];
-    if (S.cmp) reqs.push(getJSON('/history/api/day?date=' + S.cmp));
+    var reqs = [getJSON('/history/api/day?date=' + S.date), getJSON('/history/api/usable?date=' + S.date + '&step=1')];
+    if (S.cmp) reqs.push(getJSON('/history/api/day?date=' + S.cmp), getJSON('/history/api/usable?date=' + S.cmp + '&step=1'));
     Promise.all(reqs).then(function (res) {
       if (seq !== S.seq) return;
       if (unreachable(res[0])) { setStatus('hStatus', DOWN, 'bad'); clearPanels(); return; }
       if (res[0].status !== 200) { setStatus('hStatus', esc(res[0].body.error || 'Request failed'), 'bad'); clearPanels(); return; }
-      S.A = res[0].body;
-      S.B = (res[1] && res[1].status === 200) ? res[1].body : null;
+      S.A = withUsable(res[0].body, res[1]);
+      S.B = (res[2] && res[2].status === 200) ? withUsable(res[2].body, res[3]) : null;
       if (!keepView) S.view = null;
       render();
       scheduleRefresh();
     });
+  }
+
+  /* The battery work's usable % (agent usable.py, GET /battery?date=&step=1),
+     put on our minute axis. Taken as given, never recomputed here. */
+  function withUsable(D, res) {
+    var pts = (res && res.status === 200 && res.body.day && res.body.day.points) || [];
+    var byMin = {};
+    pts.forEach(function (p) { if (p.usable_pct != null) byMin[p.ts - p.ts % 60] = p.usable_pct; });
+    D.series.usable = D.series.t.map(function (t) { return t in byMin ? byMin[t] : null; });
+    D.usableAnchors = (res && res.status === 200 && res.body.day && res.body.day.anchors) || [];
+    D.usableOk = pts.length > 0;
+    var u = D.series.usable.filter(function (v) { return v != null; });
+    if (u.length) { D.summary.min_usable = Math.min.apply(null, u); D.summary.max_usable = Math.max.apply(null, u); }
+    return D;
   }
 
   function scheduleRefresh() {
@@ -198,9 +213,11 @@
       { id: 'a', title: 'Battery current', unit: 'A', h: 160, zero: true,
         keys: ['a'], series: [{ label: 'Current (+ charge)', stroke: C.a, fmt: function (v) { return v == null ? '--' : num(v, 1) + ' A'; } }],
         cmp: ['a'] },
-      { id: 'soc', title: "State of charge (battery monitor's estimate)", unit: '%', h: 150, hide: hourly,
-        keys: ['soc'], series: [{ label: 'Monitor SOC', stroke: C.soc, fmt: function (v) { return v == null ? '--' : num(v) + ' %'; } }],
-        cmp: ['soc'] },
+      { id: 'soc', title: 'State of charge', unit: '%', h: 170, hide: hourly, anchors: true,
+        keys: ['usable', 'soc'], series: [
+          { label: 'Usable (0 % = 52.0 V)', stroke: C.usable, width: 2, fmt: function (v) { return v == null ? '--' : num(v, 1) + ' %'; } },
+          { label: "Monitor's SOC", stroke: C.soc, fmt: function (v) { return v == null ? '--' : num(v) + ' %'; } }],
+        cmp: ['usable', 'soc'] },
       { id: 'pw', title: 'Power', unit: 'W', h: 230, zero: true,
         keys: ['solar', 'load', 'gen_w', 'batt_kw'],
         series: [
@@ -244,6 +261,7 @@
   function summaryHtml() {
     var A = S.A, m = A.summary || {}, out = [];
     if (m.min_v != null) out.push(chip('Voltage', num(m.min_v, 2) + '–' + num(m.max_v, 2) + ' V'));
+    if (m.min_usable != null) out.push(chip('Usable', num(m.min_usable) + '–' + num(m.max_usable) + ' %'));
     if (m.min_soc != null) out.push(chip('Monitor SOC', num(m.min_soc) + '–' + num(m.max_soc) + ' %'));
     if (m.peak_solar_w != null) out.push(chip('Peak solar', num(m.peak_solar_w) + ' W at ' + clock(m.peak_solar_at)));
     if (A.sun) out.push(chip('Sun', clock(A.sun.sunrise) + ' – ' + clock(A.sun.sunset)));
@@ -314,7 +332,7 @@
 
   function yRange(p, mn, mx) {
     if (mn == null || mx == null) return p.unit === '%' ? [0, 100] : [0, 1];
-    if (p.unit === '%') return [Math.max(0, Math.floor(mn / 10) * 10 - 10), 100];
+    if (p.unit === '%') return [Math.max(0, Math.floor(mn / 10) * 10 - 10), Math.max(100, Math.ceil(mx / 10) * 10)];
     if (p.thresholds && S.cfg) {
       [S.cfg.mep803a, S.cfg.kubota].forEach(function (g) {
         mn = Math.min(mn, g.startVoltage); mx = Math.max(mx, g.stopVoltage);
@@ -392,6 +410,16 @@
         ctx.textAlign = 'left';
       });
     }
+    if (p.anchors) {
+      /* Where usable.py re-set its counter: a full pack (top) or 52.0 V (floor). */
+      ctx.setLineDash([2 * dpr, 3 * dpr]); ctx.strokeStyle = 'rgba(232,238,245,0.5)';
+      (A.usableAnchors || []).forEach(function (an) {
+        var x = u.valToPos(an.ts, 'x', true);
+        ctx.beginPath(); ctx.moveTo(x, b.top); ctx.lineTo(x, b.top + b.height); ctx.stroke();
+        ctx.fillStyle = C.txt;
+        ctx.fillText(an.kind === 'top' ? 'full (100 %)' : '52.0 V (0 %)', x + 4 * dpr, b.top + 12 * dpr);
+      });
+    }
     if (p.zero) {
       var y0 = u.valToPos(0, p.unit, true);
       ctx.setLineDash([]); ctx.strokeStyle = 'rgba(255,255,255,0.25)';
@@ -466,7 +494,7 @@
   }
   function csvCell(v) { return v == null ? '' : (typeof v === 'string' && /[",\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : String(v)); }
   function dayCsv(D) {
-    var cols = [['battery_v', 'v'], ['battery_a', 'a'], ['battery_w', 'batt_w'], ['monitor_soc_pct', 'soc'],
+    var cols = [['battery_v', 'v'], ['battery_a', 'a'], ['battery_w', 'batt_w'], ['usable_pct', 'usable'], ['monitor_soc_pct', 'soc'],
       ['solar_w', 'solar'], ['mppt80_w', 'mppt80'], ['south_w', 'south'], ['west_w', 'west'],
       ['load_w', 'load'], ['generator_w_est', 'gen_w'], ['mep_running', 'mep'], ['kubota_running', 'kub']];
     if (D.resolution === 'hour') cols.splice(1, 0, ['battery_v_min', 'v_min'], ['battery_v_max', 'v_max']);

@@ -1755,9 +1755,9 @@ input[type=range]::-moz-range-thumb{width:14px;height:14px;border-radius:50%;bac
         <circle class='fg' id='hudRing' cx='54' cy='54' r='47'/>
       </svg>
       <div>
-        <div class='k'>Battery</div>
+        <div class='k'>Battery <span id='hudSocWhich'></span></div>
         <div class='v num'><span id='hudSoc'>0</span><span class='u'>%</span></div>
-        <div class='s'><span class='num' id='hudVolts'>0</span> V &middot; <span id='hudRunway'>--</span></div>
+        <div class='s'><span class='num' id='hudVolts'>0</span> V &middot; <span id='hudMon'></span><span id='hudRunway'>--</span></div>
       </div>
     </div>
     <div>
@@ -1815,6 +1815,7 @@ input[type=range]::-moz-range-thumb{width:14px;height:14px;border-radius:50%;bac
       </svg>
       <div>
         <div class='ring-txt num'><span id='batterySOC_value'>0</span>%</div>
+        <div class='sub' id='socWhich' style='margin-top:2px'>monitor</div>
         <div class='sub' style='margin-top:4px'><span class='num' id='batteryVoltage_value'>0</span> V &middot; <span id='battFlow_value'>--</span></div>
       </div>
     </div>
@@ -2099,6 +2100,17 @@ const genActionMap={0:'Preheating',1:'Start delay',2:'Cranking',3:'Starter cooli
 const ACT_STARTING=[0,1,2,3,4,11], ACT_STOPPING=[5,6,7,8];
 const PV_MAX=CAPS.total, AC_MAX=12000;
 let currentConfig=null;
+/* The battery work's usable % (agent usable.py, via /history/api/usable), once
+   a minute. null when the agent does not answer; the page then shows the
+   monitor's own SOC and says so. */
+let usableNow=null, lastData=null;
+async function fetchUsable(){
+  try{const r=await fetch('/history/api/usable',{cache:'no-store'});
+    const b=r.ok?await r.json():null;
+    usableNow=(b&&b.usable_pct!=null)?b:null;}
+  catch(e){usableNow=null;}
+  if(lastData)updateUI(lastData);   /* show it now, not at the next /data poll */
+}
 const shown={};
 const history=new Array(28).fill(0);
 
@@ -2110,7 +2122,9 @@ function setNum(id,target,dec){
   if(Math.abs(target-from)<Math.pow(10,-dec-1)){el.textContent=target.toFixed(dec);shown[id]=target;return;}
   const t0=performance.now(), dur=650;
   function step(now){
-    const p=Math.min(1,(now-t0)/dur), e=1-Math.pow(1-p,3);
+    /* A frame's timestamp can be earlier than t0; a negative p would throw the
+       cubic far past the target ("21899%"), so it is clamped. */
+    const p=Math.max(0,Math.min(1,(now-t0)/dur)), e=1-Math.pow(1-p,3);
     const v=from+(target-from)*e;
     el.textContent=v.toFixed(dec);
     if(p<1)requestAnimationFrame(step); else shown[id]=target;
@@ -2182,9 +2196,16 @@ function updateUI(data){
   }
   /* A failed read arrives as 0; the *Ok flags say so. "--", never 0 % / 0.0 V. */
   const socOk=data.batterySocOk!==false, vOk=data.batteryVoltageOk!==false;
-  setNumOr('hudSoc',socOk,soc0);
+  /* "Battery 41% usable (monitor 82%)": the ring and big number are usable %
+     when the agent has one, the monitor's SOC otherwise. */
+  const u=usableNow, pct=u?+u.usable_pct:soc0, pctOk=u?true:socOk;
+  const mon=socOk?Math.round(soc0)+'%':'--';
+  setNumOr('hudSoc',pctOk,pct);
   setNumOr('hudVolts',vOk,+data.batteryVoltage||0,1);
-  ringFor('hudRing',socOk,soc0);
+  ringFor('hudRing',pctOk,pct);
+  const hw=document.getElementById('hudSocWhich'), hm=document.getElementById('hudMon');
+  if(hw)hw.textContent=u?'usable':'monitor';
+  if(hm)hm.textContent=u?'monitor '+mon+' \u00b7 ':'';
   setBar('totalPV_bar',(totalPV/PV_MAX)*100,totalPV>50);
   pushSpark(totalPV);
   document.getElementById('sunmark').classList.toggle('spin',totalPV>50);
@@ -2200,9 +2221,15 @@ function updateUI(data){
   xwPlusCard(data);
 
   const soc=+data.batterySOC||0;
-  setNumOr('batterySOC_value',socOk,soc);
+  setNumOr('batterySOC_value',pctOk,pct);
   setNumOr('batteryVoltage_value',vOk,+data.batteryVoltage||0,1);
-  ringFor('socRing',socOk,soc);
+  ringFor('socRing',pctOk,pct);
+  const sw=document.getElementById('socWhich');
+  if(sw){
+    sw.textContent=u?'usable (monitor '+mon+')'+(u.uncertain?' \u00b7 uncertain':''):'monitor SOC';
+    sw.title=u?((u.uncertain_reason?u.uncertain_reason+'. ':'')+'0% = 52.0 V, 100% = full at 59.5 V, '
+      +u.window_ah+' Ah window. Last anchor: '+((u.last_anchor&&u.last_anchor.at)||'none')+'.'):'';
+  }
 
   setNum('mppt80PVPower_value',mp); setNum('mppt80PVVoltage_value',+data.mppt80PVVoltage||0,1);
   setNum('southArrayPVPower_value',sp); setNum('southArrayPVVoltage_value',+data.southArrayPVVoltage||0,1);
@@ -2500,7 +2527,7 @@ async function askAgent(preset){
 }
 
 async function fetchData(){
-  try{const r=await fetch('/data');if(r.ok)updateUI(await r.json());}
+  try{const r=await fetch('/data');if(r.ok){lastData=await r.json();updateUI(lastData);}}
   catch(e){console.error('fetchData:',e);}
 }
 async function fetchConfig(){
@@ -2548,6 +2575,7 @@ function setGeneratorMode(slaveId,mode){
 /* ---- solar agent status badge ---- */
 let agentPlan=null,agentPlanShown=false;
 async function fetchAgent(){
+  fetchUsable();
   try{
     const r=await fetch('/agent/plan');
     renderAgent(r.ok?await r.json():null);

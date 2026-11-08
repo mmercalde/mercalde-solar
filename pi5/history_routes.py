@@ -6,6 +6,9 @@ needs one nginx location:
   /history/static/<file>      uPlot and the History section's JS/CSS, from pi5/static.
                               Self-hosted: the page must chart on the LAN with no uplink.
   /history/api/<name>         GET only, forwarded to history_api.py on the KAMRUI.
+  /history/api/usable         GET only, forwarded to the agent's own GET /battery
+                              (usable.py, 8090): the usable % now, and with
+                              ?date=&step= a day's series. Not recomputed here.
 
 The proxy never raises and never blocks long: the dashboard and the generator
 loop share this process, and KAMRUI being down must cost them nothing. It is
@@ -27,7 +30,9 @@ HISTORY_API_URL = "http://192.168.3.152:8091/history/api/"
 # network must not hold one for long, so the connect half is short.
 HISTORY_API_TIMEOUT = (2, 5)
 ALLOWED = ("day", "energy", "health")
-ALLOWED_ARGS = ("date", "from", "to")
+ALLOWED_ARGS = ("date", "from", "to", "step")
+# The battery work's usable figure lives in solar-agent, not the history API.
+AGENT_BATTERY_URL = "http://192.168.3.152:8090/battery"
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 
 history_bp = Blueprint("history", __name__, url_prefix="/history",
@@ -36,12 +41,15 @@ history_bp = Blueprint("history", __name__, url_prefix="/history",
 
 @history_bp.route("/api/<name>")
 def history_api(name):
-    if name not in ALLOWED:
+    if name == "usable":
+        url = AGENT_BATTERY_URL
+    elif name in ALLOWED:
+        url = HISTORY_API_URL + name
+    else:
         return jsonify({"error": "not found"}), 404
     params = {k: request.args[k] for k in ALLOWED_ARGS if k in request.args}
     try:
-        r = requests.get(HISTORY_API_URL + name, params=params,
-                         timeout=HISTORY_API_TIMEOUT)
+        r = requests.get(url, params=params, timeout=HISTORY_API_TIMEOUT)
     except requests.RequestException as e:
         log.debug("history API unavailable: %s", e)
         return jsonify({"online": False}), 503

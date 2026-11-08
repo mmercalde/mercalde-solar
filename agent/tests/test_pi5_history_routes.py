@@ -156,4 +156,32 @@ def test_charge_label_and_failed_battery_reads():
     # the values the rest of the program reads are unchanged
     assert 'new_data["batteryVoltage"] = round(val / 1000.0, 2) if val is not None else 0.0' in src
     assert 'new_data["batterySOC"] = val if val is not None else 0' in src
-    assert "setNumOr('batterySOC_value',socOk,soc)" in src
+    assert "setNumOr('batterySOC_value',pctOk,pct)" in src and "const socOk=data.batterySocOk!==false" in src
+
+
+def test_usable_goes_to_the_agents_battery_endpoint_untouched(routes, client, monkeypatch):
+    seen = []
+
+    def fake(url, params=None, timeout=None):
+        seen.append((url, params))
+        return FakeResp(200, {"usable_pct": 41, "monitor_soc_pct": 82})
+    monkeypatch.setattr(routes.requests, "get", fake)
+    assert client.get("/history/api/usable").get_json()["usable_pct"] == 41
+    client.get("/history/api/usable?date=2026-11-08&step=1")
+    assert seen == [("http://192.168.3.152:8090/battery", {}),
+                    ("http://192.168.3.152:8090/battery", {"date": "2026-11-08", "step": "1"})]
+
+
+def test_usable_down_reads_as_offline(routes, client, monkeypatch):
+    monkeypatch.setattr(routes, "AGENT_BATTERY_URL", f"http://127.0.0.1:{closed_port()}/battery")
+    r = client.get("/history/api/usable")
+    assert r.status_code == 503 and r.get_json() == {"online": False}
+
+
+def test_card_says_usable_then_monitor_and_falls_back_to_the_monitor():
+    src = open(APP).read()
+    assert "'usable (monitor '+mon+')'" in src
+    assert "pct=u?+u.usable_pct:soc0" in src          # monitor SOC when the agent has none
+    assert "fetch('/history/api/usable'" in src
+    js = open(os.path.join(PI5, "static", "history.js")).read()
+    assert "/history/api/usable?date=" in js and "'usable', 'soc'" in js
