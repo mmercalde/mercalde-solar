@@ -142,7 +142,7 @@ def test_three_js_is_committed_and_served_before_the_cdn():
     assert os.path.getsize(path) > 500_000
     assert '"128"' in open(path).read()          # r128, the revision the scene was built on
     src = open(APP).read()
-    route = src[src.index("def vendor_file"):].split("\n\n")[0]
+    route = src[src.index("def vendor_file"):src.index("@app.route('/data')")]
     assert "'static', name" in route
     js = src[src.index("libSrc(['/vendor/three.min.js'"):][:200]
     assert js.index("/vendor/three.min.js") < js.index("cdnjs")
