@@ -19,6 +19,7 @@ LIMIT = 24 * 1024
 SOLAR = {"batterySOC": 85, "batteryVoltage": 52.46, "mppt80PVPower": 100,
          "southArrayPVPower": 200, "westArrayPVPower": 300, "mep803aMode": 2,
          "kubotaMode": 0, "autoGenEnabled": True}
+USABLE = {"usable_pct": 41, "uncertain": False, "monitor_soc_pct": 85}
 SECRET = "123456:SECRET-TOKEN"
 CONFIG = {"config": {"mep803a": {"startVoltage": 52.0, "stopVoltage": 56.0},
                      "kubota": {"startVoltage": 51.5, "stopVoltage": 57.0},
@@ -53,7 +54,8 @@ def alexa(monkeypatch):
     sunrise, sunset = module.sun_times(DAY)
     module.current_time = lambda: (sunrise + sunset) / 2
     module.calls = []
-    module.routes = {"data": SOLAR, "config": CONFIG, "events": {"events": []}}
+    module.routes = {"data": SOLAR, "config": CONFIG, "events": {"events": []},
+                     "battery": USABLE}
     module.agent = (200, "The battery is fine.")
 
     def get(url, **kw):
@@ -594,7 +596,7 @@ def test_an_answer_shows_the_question_the_answer_and_the_strip(alexa):
     body = ask(alexa, "AskWhyIntent", query="did it start")
     p = payload(body)
     assert p["question"] == "why did it start" and p["answer"] == "The battery is fine."
-    assert p["statusLine"] == "85% · 52.5 V · 600 W"
+    assert p["statusLine"] == "Battery 41% usable (monitor 85%) · 52.5 V · 600 W"
     assert p["genLine"] == "MEP-803A: Auto · Kubota: Off"
     assert body["response"]["outputSpeech"]["text"] == "The battery is fine."
 
@@ -646,7 +648,8 @@ def test_the_figures_after_an_agent_answer_use_the_short_timeout(alexa):
         get=lambda url, **kw: seen.append(kw["timeout"]) or real(url, **kw), post=alexa.requests.post)
     alexa.agent = (202, "")
     ask(alexa, "AskAgentIntent", query="anything")
-    assert seen == [alexa.AGENT_STATUS_TIMEOUT, alexa.AGENT_STATUS_TIMEOUT]
+    # /data, the agent's /battery, then the thresholds.
+    assert seen == [alexa.AGENT_STATUS_TIMEOUT] * 3
 
 
 def test_no_empty_question_screen(alexa):
@@ -657,7 +660,8 @@ def test_no_empty_question_screen(alexa):
 def test_nothing_on_these_paths_writes(alexa):
     for intent in READS + ["GetEventsIntent", "AMAZON.HelpIntent"]:
         ask(alexa, intent)
-        assert all(c.rsplit("/", 1)[1] in ("data", "config", "events") for c in alexa.calls), intent
+        assert all(c.rsplit("/", 1)[1] in ("data", "config", "events", "battery")
+                   for c in alexa.calls), intent
 
 
 # --- size -------------------------------------------------------------------------------------
@@ -689,3 +693,45 @@ def test_templates_leave_the_values_in_the_datasource(alexa):
     doc = json.dumps(directive(body)["document"])
     assert "viewport.width" not in doc and "1+1" not in doc
     assert all("when" in i for i in directive(ask(alexa, "GetBatteryIntent"))["document"]["mainTemplate"]["items"])
+
+
+# --- the usable battery figure ---------------------------------------------------------------
+
+@pytest.mark.parametrize("locale,speech", [
+    ("en-US", "Battery 41 percent usable (monitor 85 percent), 52.46 volts."),
+    ("es-US", "Batería al 41 por ciento útil (monitor 85 por ciento), 52.46 voltios.")])
+def test_battery_speech_leads_with_usable(alexa, locale, speech):
+    body = ask(alexa, "GetBatteryIntent", locale=locale)
+    assert body["response"]["outputSpeech"]["text"] == speech
+
+
+def test_status_speech_leads_with_usable(alexa):
+    text = ask(alexa, "GetStatusIntent")["response"]["outputSpeech"]["text"]
+    assert text.startswith("Battery 41 percent usable (monitor 85 percent), 52.46 volts.")
+
+
+def test_the_big_percent_and_the_fill_use_usable(alexa):
+    p = payload(ask(alexa, "GetBatteryIntent"))
+    assert p["batterySOC"] == 41
+    assert p["batteryNote"] == "usable · monitor 85%"
+    assert p["batteryColor"] == alexa.get_battery_color(41)
+    assert p["showFillPath"] == alexa.battery_fill_path(alexa.SHOW, 41)
+
+
+def test_the_note_in_spanish_and_uncertain(alexa):
+    alexa.routes["battery"] = dict(USABLE, uncertain=True)
+    p = payload(ask(alexa, "GetBatteryIntent", locale="es-US"))
+    assert p["batteryNote"] == "útil, incierto · monitor 85 %"
+
+
+def test_without_the_agent_the_monitor_figure_stands_and_says_so(alexa):
+    alexa.routes["battery"] = ConnectionError("agent down")
+    body = ask(alexa, "GetBatteryIntent")
+    assert body["response"]["outputSpeech"]["text"] == "Battery monitor 85 percent, 52.46 volts."
+    p = payload(body)
+    assert p["batterySOC"] == 85 and p["batteryNote"] == "monitor"
+
+
+def test_both_scenes_carry_the_note(alexa):
+    doc = json.dumps(alexa.build_apl_document())
+    assert doc.count("${solar.batteryNote}") == 2

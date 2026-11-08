@@ -34,6 +34,11 @@ ESP8266_CONFIG_URL = "http://10.8.0.2:8080/config"
 
 # Solar agent on the KAMRUI, reached over WireGuard through the Pi5.
 AGENT_ASK_URL = "http://192.168.3.152:8090/ask"
+# The agent's own amp-hour count, 0 % at 52.0 V and 100 % at the tapered top
+# (agent/usable.py). The Battery Monitor's 1800 Ah SOC reads 69 % at the floor,
+# so speech and screens lead with this and name the monitor's figure after it.
+AGENT_BATTERY_URL = "http://192.168.3.152:8090/battery"
+AGENT_BATTERY_TIMEOUT = (0.5, 0.5)
 # The agent answers within AGENT_WAIT_S or says it will use Telegram; Alexa gives
 # up after about 8 s, and Gemma takes 15 to 30.
 AGENT_WAIT_S = 5
@@ -114,13 +119,69 @@ def ask_agent(query, lang):
         print(f"ERROR ask_agent: {e}")
         return AGENT_FALLBACK[lang]
 
-def get_solar_data(timeout=5):
+def get_solar_data(timeout=5, usable=True):
     try:
         resp = requests.get(ESP8266_DATA_URL, timeout=timeout)
-        return resp.json()
+        solar = resp.json()
     except Exception as e:
         print(f"ERROR get_solar_data: {e}")
         return None
+    return add_usable(solar) if usable else solar
+
+def add_usable(solar, timeout=AGENT_BATTERY_TIMEOUT):
+    """The Pi5's figures plus the agent's usable %, as a new dict. Without it, the monitor's stands."""
+    if not isinstance(solar, dict):
+        return solar
+    solar = dict(solar)
+    try:
+        body = requests.get(AGENT_BATTERY_URL, timeout=timeout).json()
+        if body.get("usable_pct") is not None:
+            solar["batteryUsable"] = int(body["usable_pct"])
+            solar["batteryUsableUncertain"] = bool(body.get("uncertain"))
+    except Exception as e:
+        print(f"ERROR add_usable: {e}")
+    return solar
+
+def display_soc(solar):
+    """The percentage the screen shows and fills: usable when the agent has it."""
+    usable = solar.get('batteryUsable')
+    return usable if usable is not None else solar.get('batterySOC', 0)
+
+def battery_words(solar, spanish, spoken=False):
+    """"Battery 41% usable (monitor 82%)", in either language, written or spoken.
+
+    The same words as agent/usable.py phrase(); this file deploys alone, so it
+    carries its own copy.
+    """
+    usable, monitor = solar.get('batteryUsable'), solar.get('batterySOC')
+    if spoken:
+        pct = " por ciento" if spanish else " percent"
+    else:
+        pct = " %" if spanish else "%"
+    mon = f"monitor {monitor}{pct}" if monitor is not None else None
+    if usable is None:
+        if not mon:
+            return "Batería sin dato" if spanish else "Battery unknown"
+        return f"Batería: {mon}" if spanish else f"Battery {mon}"
+    if spanish:
+        head = f"Batería al {usable}{pct} útil" if spoken else f"Batería {usable}{pct} útil"
+    else:
+        head = f"Battery {usable}{pct} usable"
+    if solar.get('batteryUsableUncertain'):
+        head += ", incierto" if spanish else ", uncertain"
+    return f"{head} ({mon})" if mon else head
+
+def battery_note(solar, spanish):
+    """The line under the big % on the scene: what the number is, and the monitor's."""
+    monitor = solar.get('batterySOC')
+    if solar.get('batteryUsable') is None:
+        return "monitor" if spanish else "monitor"
+    word = "útil" if spanish else "usable"
+    if solar.get('batteryUsableUncertain'):
+        word += ", incierto" if spanish else ", uncertain"
+    if monitor is None:
+        return word
+    return f"{word} · monitor {monitor}{' %' if spanish else '%'}"
 
 def get_thresholds(timeout=2):
     """{generator: (start V, stop V)} from the Pi5's /config, or None.
@@ -617,6 +678,7 @@ def show_scene():
         scene_text("${solar.batterySOC}%", "25.2vw", "38.6vh", "32vw", "9.33vh", "${solar.batteryColor}",
                    "center", fontWeight="300"),
         scene_text("${solar.batteryVoltage}", "25.2vw", "51vh", "32vw", "3.5vh", "#E3E8EF", "center"),
+        scene_text("${solar.batteryNote}", "25.2vw", "55.2vh", "32vw", "2.5vh", "${solar.secondary}", "center"),
         # the flows' labels
         *flow_labels(SHOW),
         scene_text("${solar.houseLabel}", "47vw", "77vh", "22vw", "2.6vh", BLUE, "center", when="${solar.houseFlow}"),
@@ -642,6 +704,7 @@ def spot_scene():
         scene_text("${solar.batterySOC}%", "30vw", "58.6vh", "40vw", "10vh", "${solar.batteryColor}",
                    "center", fontWeight="300"),
         scene_text("${solar.batteryVoltage}", "30vw", "71.5vh", "40vw", "3vh", "#E3E8EF", "center"),
+        scene_text("${solar.batteryNote}", "30vw", "75.3vh", "40vw", "2.4vh", "${solar.secondary}", "center"),
         scene_text("MEP", "18.2vw", "62.8vh", "12vw", "3vh", "#E3E8EF"),
         scene_text("Kubota", "18.2vw", "68.6vh", "12vw", "3vh", "#E3E8EF"),
         scene_text("${solar.houseKw}", "70vw", "71vh", "20vw", "2.8vh", BLUE, "center", when="${solar.houseFlow}"),
@@ -715,12 +778,12 @@ def build_answer_datasource(question, answer, solar, spanish, now=None):
               "answer": clip(no_emoji(answer), SCREEN_ANSWER_CHARS),
               "statusLine": "", "statusColor": PRIMARY, "genLine": "", **PALETTE[state["day"]]}
     if solar:
-        soc = solar.get('batterySOC', 0)
+        soc = display_soc(solar)
         voltage = round(solar.get('batteryVoltage', 0), 1)
         total = (solar.get('mppt80PVPower', 0) + solar.get('southArrayPVPower', 0)
                  + solar.get('westArrayPVPower', 0))
         word = lambda gen: GEN_STATES[generator_state(solar, gen)][2 if spanish else 1]
-        screen.update(statusLine=f"{soc}% · {voltage} V · {total} W",
+        screen.update(statusLine=f"{battery_words(solar, spanish)} · {voltage} V · {total} W",
                       statusColor=get_battery_color(soc),
                       genLine=f"MEP-803A: {word('mep')} · Kubota: {word('kubota')}")
     return screen
@@ -769,7 +832,7 @@ def scene_geometry(layout, state, soc):
 def build_apl_datasource(solar, spanish=False, thresholds=None, notice="", now=None):
     now = current_time() if now is None else now
     state = sky_state(now)
-    soc = solar.get('batterySOC', 0)
+    soc = display_soc(solar)
     mppt80 = solar.get('mppt80PVPower', 0)
     south = solar.get('southArrayPVPower', 0)
     west = solar.get('westArrayPVPower', 0)
@@ -800,6 +863,7 @@ def build_apl_datasource(solar, spanish=False, thresholds=None, notice="", now=N
         "autoText": auto_text,
         "autoDot": GREEN if auto_enabled else GEN_STATES["off"][0],
         "batterySOC": soc,
+        "batteryNote": battery_note(solar, spanish),
         "batteryVoltage": f"{solar.get('batteryVoltage', 0):.1f} V",
         "batteryColor": get_battery_color(soc),
         "solarFlow": solar_flowing,
@@ -868,7 +932,9 @@ def agent_screen_response(speech, question, spanish, started):
     """The answer on a screen. The Pi5's figures are extras: Alexa's clock is running."""
     lang = 'es' if spanish else 'en'
     in_time = lambda: time.monotonic() - started < AGENT_STATUS_DEADLINE
-    solar = get_solar_data(AGENT_STATUS_TIMEOUT) if in_time() else None
+    solar = get_solar_data(AGENT_STATUS_TIMEOUT, usable=False) if in_time() else None
+    if solar and in_time():
+        solar = add_usable(solar, AGENT_STATUS_TIMEOUT)
     if speech == AGENT_LATER[lang]:
         notice = AGENT_SENT_TO_PHONE[lang]
         if solar:
@@ -919,12 +985,12 @@ def alexa_handler():
                 if solar is None:
                     speech = "Lo siento, no pude conectar al sistema solar." if spanish else "Sorry, I couldn't connect to the solar system."
                     return build_response(speech)
-                soc = solar.get('batterySOC', 0)
                 voltage = round(solar.get('batteryVoltage', 0), 2)
+                words = battery_words(solar, spanish, spoken=True)
                 if spanish:
-                    speech = f"La bateria esta al {soc} por ciento con {voltage} voltios."
+                    speech = f"{words}, {voltage} voltios."
                 else:
-                    speech = f"Battery is at {soc} percent with {voltage} volts."
+                    speech = f"{words}, {voltage} volts."
                 
                 if has_display:
                     return dashboard_response(speech, solar, spanish)
@@ -935,7 +1001,7 @@ def alexa_handler():
                 if solar is None:
                     speech = "Lo siento, no pude conectar al sistema solar." if spanish else "Sorry, I couldn't connect to the solar system."
                     return build_response(speech)
-                soc = solar.get('batterySOC', 0)
+                words = battery_words(solar, spanish, spoken=True)
                 voltage = round(solar.get('batteryVoltage', 0), 2)
                 total_solar = solar.get('mppt80PVPower', 0) + solar.get('southArrayPVPower', 0) + solar.get('westArrayPVPower', 0)
                 mep_mode = get_gen_mode(solar.get('mep803aMode', 0), spanish)
@@ -943,10 +1009,10 @@ def alexa_handler():
                 auto_enabled = solar.get('autoGenEnabled', False)
                 if spanish:
                     auto_status = "activado" if auto_enabled else "desactivado"
-                    speech = f"Bateria al {soc} por ciento, {voltage} voltios. Solar produciendo {total_solar} watts. MEP 803 esta {mep_mode}. Kubota esta {kubota_mode}. Control automatico {auto_status}."
+                    speech = f"{words}, {voltage} voltios. Solar produciendo {total_solar} watts. MEP 803 esta {mep_mode}. Kubota esta {kubota_mode}. Control automatico {auto_status}."
                 else:
                     auto_status = "enabled" if auto_enabled else "disabled"
-                    speech = f"Battery at {soc} percent, {voltage} volts. Solar producing {total_solar} watts. MEP 803 Alpha is {mep_mode}. Kubota is {kubota_mode}. Auto control {auto_status}."
+                    speech = f"{words}, {voltage} volts. Solar producing {total_solar} watts. MEP 803 Alpha is {mep_mode}. Kubota is {kubota_mode}. Auto control {auto_status}."
                 
                 if has_display:
                     return dashboard_response(speech, solar, spanish)

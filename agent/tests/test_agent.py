@@ -59,13 +59,21 @@ def base_facts(cfg, gate_open=False, model=None):
 
 # --- the plan record --------------------------------------------------------
 
+def test_plan_record_names_the_usable_figure_and_the_monitor(a, cfg):
+    f = base_facts(cfg)
+    f["usable"] = {"usable_pct": 41, "monitor_soc_pct": 63, "uncertain": False}
+    rec = a.plan_record(f, "MEP 52.0 / 54.5", "no (learning phase)")
+    assert rec.splitlines()[0] == ("2026-08-28 4:00 pm  V 54.2  "
+                                   "Battery 41% usable (monitor 63%)  load 1.1 kW")
+
+
 def test_plan_record_matches_the_spec_shape(a, cfg):
     rec = a.plan_record(base_facts(cfg),
                         "Kubota solo, start 56.0 / stop 57.0; MEP 52.0 / 54.5",
                         "no (learning phase)")
     lines = rec.splitlines()
     assert len(lines) == 11
-    assert lines[0] == "2026-08-28 4:00 pm  V 54.2  SOC 63%  load 1.1 kW"
+    assert lines[0] == "2026-08-28 4:00 pm  V 54.2  Battery monitor 63%  load 1.1 kW"
     assert lines[1] == "peak today: 55.8 V  (threshold 57.0 -> solar shortfall)"
     assert lines[2] == ("overnight Wh out of the pack: 10,800 — from "
                         "last 14 nights (12 nights)")
