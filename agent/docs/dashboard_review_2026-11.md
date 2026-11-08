@@ -57,8 +57,11 @@ diagnostic snapshot / stream / log).
      red ring rather than "--". Same for battery volts (0.0 V).
    - Nothing on the page says the figure is the monitor's estimate, or how
      long since it last synced. Next to "52.3 V" it reads as fact.
-   Left alone on this branch because it is battery-monitor related; recommended
-   for whoever owns that investigation.
+   *Fixed later on this branch (owner's request)*: the poll adds
+   `batteryVoltageOk` / `batterySocOk` to `/data` (the 0 values themselves are
+   unchanged for every other reader) and the page shows "--" and a dimmed ring.
+   The second point is for the battery SOC work: the card will show its
+   "usable %" next to the monitor's figure.
 4. **The sparkline is 2 minutes 20 seconds.** 28 bars at one per 5 s poll,
    in memory, empty after every page load. It looks like a day's curve and is
    not. The History section replaces the need; the sparkline could go or be
@@ -72,12 +75,13 @@ diagnostic snapshot / stream / log).
    the Pi5 (`ls /home/michael/solar_dashboard/vendor` -> no such directory),
    so `/vendor/three.min.js` is a 404 and the page falls back to cdnjs. On the
    LAN with the uplink down the 3D stage shows "Loading renderer..." and an
-   error. Fix: commit three.min.js under `pi5/static/` like the chart library
-   on this branch (not done here; it is a 600 KB binary-ish blob and wants its
-   own commit).
+   error. *Fixed on this branch*: three.js r128 is committed in `pi5/static/`
+   and `/vendor/three.min.js` serves it from there (no nginx change); cdnjs is
+   only the second fallback.
 7. **"AC charge" on the Load card is DC charge power.** It is
    `chargePower1+2+3`, register 0x005E "charge DC power", the generators'
    contribution into the pack through the inverters. Label says AC.
+   *Fixed on this branch*: "DC charge power".
 8. **Event log is in memory.** `log_event` keeps the list in the process;
    every restart of `solar-dashboard` empties it, so after a deploy "what
    happened last night" is blank on the dashboard (the agent's DB still has
@@ -145,10 +149,11 @@ by `solar-agent`:
 
 - **Battery temperature.** Only in the gateway's minute chart CSV
   (`/SYS/BATT1/T`). The Pi5 does not read the monitor's temperature register,
-  and adding it is battery-monitor work, so it is out of scope here. The
-  History chart shows temperature as "not recorded". Follow-up: read the
-  monitor temperature in the poll and add it to `SAMPLE_FIELDS`, or have the
-  agent's nightly scrape keep yesterday's minute temperature.
+  and adding it is battery-monitor work, so it is out of scope here.
+  Decision (2026-11-08): the pack is climate-controlled (28-31 °C in the
+  gateway logs), so the History section leaves temperature out rather than
+  showing an empty series. If it is wanted later: read the monitor
+  temperature in the poll and add it to `SAMPLE_FIELDS`.
 - **Generator charge power.** `chargePower1/2/3` are in `/data` but not in
   `SAMPLE_FIELDS`. The History API estimates it the way `gen_runs.gross_w`
   does: on minutes a generator is running, `battery W + load W - solar W`.

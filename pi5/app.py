@@ -1146,10 +1146,14 @@ def poll_modbus():
 
             val = modbus.read_holding_register_32(MODBUS_HOST, MODBUS_PORT, BATTERY_MONITOR_ID, REG_BATTERY_VOLTAGE)
             new_data["batteryVoltage"] = round(val / 1000.0, 2) if val is not None else 0.0
+            # The 0.0 stays for everything that already reads batteryVoltage;
+            # this only tells the page to show "--" instead of 0.0 V.
+            new_data["batteryVoltageOk"] = val is not None
             errors += 0 if val is not None else 1
 
             val = modbus.read_holding_register_32(MODBUS_HOST, MODBUS_PORT, BATTERY_MONITOR_ID, REG_BATTERY_SOC)
             new_data["batterySOC"] = val if val is not None else 0
+            new_data["batterySocOk"] = val is not None
             errors += 0 if val is not None else 1
 
             val = modbus.read_holding_register_32(MODBUS_HOST, MODBUS_PORT, MPPT_80_ID, REG_PV_VOLTAGE)
@@ -1819,7 +1823,7 @@ input[type=range]::-moz-range-thumb{width:14px;height:14px;border-radius:50%;bac
   <div class='card rise' style='--accent:var(--ac);animation-delay:.14s'>
     <div class='lbl'>&#9889; AC Load</div>
     <div class='val num'><span id='totalAC_value'>0</span><span class='u'>W</span></div>
-    <div class='sub'>AC charge <span class='num' id='totalCharge_value'>0</span> W</div>
+    <div class='sub'>DC charge power <span class='num' id='totalCharge_value'>0</span> W</div>
     <div class='track'><div class='fill' id='totalAC_bar' style='--c1:#4cc9f0;--c2:#7ee0ff'></div></div>
   </div>
 </div>
@@ -2113,6 +2117,16 @@ function setNum(id,target,dec){
   }
   shown[id]=target; requestAnimationFrame(step);
 }
+function setNumOr(id,ok,target,dec){
+  if(ok){setNum(id,target,dec);return;}
+  const el=document.getElementById(id); if(!el)return;
+  el.textContent='--'; delete shown[id];
+}
+function ringFor(id,ok,soc){
+  const el=document.getElementById(id); if(!el)return;
+  el.style.strokeDashoffset=(2*Math.PI*47)*(1-(ok?Math.min(100,soc):0)/100);
+  el.style.opacity=ok?1:0.25;
+}
 function setBar(id,pct,live){
   const el=document.getElementById(id); if(!el)return;
   el.style.width=Math.max(0,Math.min(100,pct))+'%';
@@ -2166,10 +2180,11 @@ function updateUI(data){
     else if(m===undefined||m===null||m===0)run.textContent='--';
     else run.textContent=Math.floor(m/60)+'h '+(m%60)+'m left';
   }
-  setNum('hudSoc',soc0);
-  setNum('hudVolts',+data.batteryVoltage||0,1);
-  const hr=document.getElementById('hudRing');
-  if(hr)hr.style.strokeDashoffset=(2*Math.PI*47)*(1-Math.min(100,soc0)/100);
+  /* A failed read arrives as 0; the *Ok flags say so. "--", never 0 % / 0.0 V. */
+  const socOk=data.batterySocOk!==false, vOk=data.batteryVoltageOk!==false;
+  setNumOr('hudSoc',socOk,soc0);
+  setNumOr('hudVolts',vOk,+data.batteryVoltage||0,1);
+  ringFor('hudRing',socOk,soc0);
   setBar('totalPV_bar',(totalPV/PV_MAX)*100,totalPV>50);
   pushSpark(totalPV);
   document.getElementById('sunmark').classList.toggle('spin',totalPV>50);
@@ -2185,10 +2200,9 @@ function updateUI(data){
   xwPlusCard(data);
 
   const soc=+data.batterySOC||0;
-  setNum('batterySOC_value',soc);
-  setNum('batteryVoltage_value',+data.batteryVoltage||0,1);
-  const C=2*Math.PI*47;
-  document.getElementById('socRing').style.strokeDashoffset=C*(1-Math.min(100,soc)/100);
+  setNumOr('batterySOC_value',socOk,soc);
+  setNumOr('batteryVoltage_value',vOk,+data.batteryVoltage||0,1);
+  ringFor('socRing',socOk,soc);
 
   setNum('mppt80PVPower_value',mp); setNum('mppt80PVVoltage_value',+data.mppt80PVVoltage||0,1);
   setNum('southArrayPVPower_value',sp); setNum('southArrayPVVoltage_value',+data.southArrayPVVoltage||0,1);
@@ -2779,7 +2793,7 @@ function boot3D(){
   if(!(rev>=125)){
     msg.textContent=['three.js r'+THREE.REVISION+' is too old.',
       'This scene needs r125 or newer (Matrix4.invert, Float32BufferAttribute).',
-      'Re-vendor with: curl -o vendor/three.min.js '
+      'Re-vendor with: curl -o static/three.min.js '
         +'https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js'].join(NL);
     return;
   }
@@ -3777,11 +3791,16 @@ def index():
 
 @app.route('/vendor/<path:name>')
 def vendor_file(name):
-    """Serve locally vendored JS so the 3D view works without an internet route."""
+    """Serve locally vendored JS so the 3D view works without an internet route.
+
+    three.js r128 is committed in pi5/static and deployed with the page; vendor/
+    is the old, uncommitted location and is still looked in second."""
     if name not in ('three.min.js',):
         return jsonify({'error': 'not found'}), 404
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'vendor', name)
-    if not os.path.isfile(path):
+    here = os.path.dirname(os.path.abspath(__file__))
+    path = next((p for p in (os.path.join(here, 'static', name), os.path.join(here, 'vendor', name))
+                 if os.path.isfile(p)), None)
+    if path is None:
         return jsonify({'error': 'not vendored'}), 404
     return send_file(path, mimetype='application/javascript', max_age=604800)
 

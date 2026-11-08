@@ -223,7 +223,6 @@ def day(conn, cfg, date, now=None):
         if resolution == "hour":
             notes.append("Hourly averages only: minute samples start "
                          "2026-08-28 and are kept for 90 days.")
-    notes.append("Battery temperature is not recorded.")
     st = sun.sun_times(cfg["lat"], cfg["lon"], date, history.tzinfo(cfg))
 
     summary = {}

@@ -135,3 +135,25 @@ def test_nginx_proxies_the_history_prefix_to_the_pi5():
     block = block[:block.index("}")]
     assert "proxy_pass http://solar_dashboard;" in block
     assert "solar_locked" not in block
+
+
+def test_three_js_is_committed_and_served_before_the_cdn():
+    path = os.path.join(PI5, "static", "three.min.js")
+    assert os.path.getsize(path) > 500_000
+    assert '"128"' in open(path).read()          # r128, the revision the scene was built on
+    src = open(APP).read()
+    route = src[src.index("def vendor_file"):].split("\n\n")[0]
+    assert "'static', name" in route
+    js = src[src.index("libSrc(['/vendor/three.min.js'"):][:200]
+    assert js.index("/vendor/three.min.js") < js.index("cdnjs")
+
+
+def test_charge_label_and_failed_battery_reads():
+    src = open(APP).read()
+    assert "AC charge" not in src and "DC charge power" in src
+    assert 'new_data["batteryVoltageOk"] = val is not None' in src
+    assert 'new_data["batterySocOk"] = val is not None' in src
+    # the values the rest of the program reads are unchanged
+    assert 'new_data["batteryVoltage"] = round(val / 1000.0, 2) if val is not None else 0.0' in src
+    assert 'new_data["batterySOC"] = val if val is not None else 0' in src
+    assert "setNumOr('batterySOC_value',socOk,soc)" in src

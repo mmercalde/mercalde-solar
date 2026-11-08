@@ -81,7 +81,7 @@ def test_minute_day_is_one_point_per_minute_with_gaps(db, cfg, now):
     i = s["t"].index(lo + 7 * 3600)
     assert s["v"][i] == 53.5 and s["solar"][i] == 1500 and s["south"][i] == 1200.0
     assert s["load"][0] == 500
-    assert "Battery temperature is not recorded." in out["notes"]
+    assert not any("temperature" in n.lower() for n in out["notes"])
 
 
 def test_generator_power_is_estimated_only_while_running(db, cfg, now):
