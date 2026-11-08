@@ -23,7 +23,9 @@ from flask import Blueprint, Response, jsonify, request
 log = logging.getLogger(__name__)
 
 HISTORY_API_URL = "http://192.168.3.152:8091/history/api/"
-HISTORY_API_TIMEOUT = 5
+# (connect, read). gunicorn here has four threads; a KAMRUI that is off the
+# network must not hold one for long, so the connect half is short.
+HISTORY_API_TIMEOUT = (2, 5)
 ALLOWED = ("day", "energy", "health")
 ALLOWED_ARGS = ("date", "from", "to")
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")

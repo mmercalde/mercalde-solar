@@ -75,7 +75,7 @@ def test_only_known_names_and_args_are_forwarded(routes, client, monkeypatch):
     assert client.get("/history/api/day?date=2026-11-07&evil=1").status_code == 200
     assert seen == [(routes.HISTORY_API_URL + "day", {"date": "2026-11-07"},
                      routes.HISTORY_API_TIMEOUT)]
-    assert routes.HISTORY_API_TIMEOUT <= 5
+    assert max(routes.HISTORY_API_TIMEOUT) <= 5 and routes.HISTORY_API_TIMEOUT[0] <= 2
 
 
 def test_upstream_400_passes_through_and_500_reads_as_offline(routes, client, monkeypatch):

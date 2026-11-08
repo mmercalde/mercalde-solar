@@ -1927,6 +1927,7 @@ input[type=range]::-moz-range-thumb{width:14px;height:14px;border-radius:50%;bac
     try{localStorage.setItem('histOpen',sec.open?'1':'0');}catch(e){}
   });
   try{if(localStorage.getItem('histOpen')==='1')sec.open=true;}catch(e){}
+  if(location.hash.indexOf('#history')===0)sec.open=true;
   if(sec.open)load();
 })();
 </script>
