@@ -38,6 +38,7 @@ import sun as sunmod
 import telegram
 import tools as toolsmod
 import topup as topupmod
+import usable as usablemod
 import weather
 from llm import LLM, LLMError
 
@@ -217,6 +218,18 @@ def _month_of(day, now, cfg):
     return history.local(now, cfg).strftime("%b")
 
 
+def _battery_text(facts, lang="en"):
+    """"Battery 41% usable (monitor 82%)" for a fact dict.
+
+    A fact dict built before the usable figure existed (a replay, a stored
+    record) still has the monitor's SOC, and says only that.
+    """
+    u = facts.get("usable")
+    if not u:
+        soc = facts.get("soc")
+        u = {"monitor_soc_pct": None if soc is None else round(soc)}
+    return usablemod.phrase(u, lang)
+
 class Agent:
     def __init__(self, cfg, dry_run=False, db_path=None):
         self.cfg = cfg
@@ -343,6 +356,10 @@ class Agent:
             # house actually took out between two voltages, and no rule and
             # no guard check reads this.
             "soc": data.get("battSocBM"),
+            # The agent's own amp-hour count on the measured 52.0-59.8 V
+            # window, which the owner reads instead of the monitor's 1800 Ah
+            # scale. Display only too: no rule and no guard check reads it.
+            "usable": self.usable_now(data, now),
             "load_w": None if gen_running else (data.get("acPower1") or 0)
                                               + (data.get("acPower2") or 0),
             "solar_w": solar_w, "gen_running": gen_running,
@@ -432,7 +449,7 @@ class Agent:
                    else f"{facts['load_w'] / 1000.0:.1f} kW")
         lines.append(f"{history.stamp(facts['now'], self.cfg)}  "
                      f"V {_fmt(facts['voltage'], 1)}  "
-                     f"SOC {facts['soc'] if facts['soc'] is not None else '?'}%  "
+                     f"{_battery_text(facts)}  "
                      f"load {load_kw}")
 
         peak = facts["peak_today"]
@@ -577,8 +594,8 @@ class Agent:
             f"({'weekend' if t.weekday() >= 5 else 'weekday'})",
             "",
             "NOW",
-            f"  battery {_fmt(f['voltage'], 2)} V, SOC {f['soc']}% "
-            f"(display only - nothing is decided on it), "
+            f"  battery {_fmt(f['voltage'], 2)} V, {_battery_text(f)} "
+            f"(display only - nothing is decided on either), "
             f"monitor {'online' if f['data'].get('battMonitorOnline') else 'OFFLINE'}",
             f"  solar {f['solar_w']} W, house load "
             f"{'unknown (generator running)' if f['load_w'] is None else str(f['load_w']) + ' W'}",
@@ -733,6 +750,7 @@ class Agent:
             history.rollup_daily(self.conn, self.cfg, days=[facts["today"]])
         except Exception as e:                       # noqa: BLE001
             log.warning("store update failed, continuing: %s", e)
+        self.update_usable()
 
         # What the state machine owes the owner, before anything else is said
         # about the tick.
@@ -780,6 +798,8 @@ class Agent:
 
         history.record_plan(self.conn, record, {
             "voltage": facts["voltage"], "soc": facts["soc"],
+            "usable_pct": (facts.get("usable") or {}).get("usable_pct"),
+            "usable_uncertain": (facts.get("usable") or {}).get("uncertain"),
             "peak_today": facts["peak_today"],
             "peak_day": facts.get("peak_day"),
             # Which day's forecast this plan acted on. "tomorrow" in a stored
@@ -1024,7 +1044,7 @@ class Agent:
         now = facts["now"]
         head = "Evening plan" if evening else "Overnight report"
         lines = [f"<b>{head}</b>",
-                 f"V {_fmt(facts['voltage'], 2)}  SOC {facts['soc']}%  "
+                 f"V {_fmt(facts['voltage'], 2)}  {_battery_text(facts)}  "
                  f"{_peak_label(facts)} {_fmt(facts['peak_today'], 2)} V"]
 
         if evening:
@@ -1534,7 +1554,7 @@ class Agent:
         except requests.RequestException:
             return ask_server.FALLBACK.get(lang or "en")
         v = _fmt(data.get("batteryVoltage"), 2)
-        soc = data.get("battSocBM")
+        battery = usablemod.phrase(self.usable_now(data), lang, spoken=True)
         solar = sum(data.get(k) or 0 for k in
                     ("mppt80PVPower", "southArrayPVPower", "westArrayPVPower"))
         running = [n for n, k in (("MEP", "mep803aAction"), ("Kubota", "kubotaAction"))
@@ -1542,12 +1562,43 @@ class Agent:
         if lang == "es":
             gen = ("Ningun generador esta funcionando." if not running
                    else f"{' y '.join(running)} esta funcionando.")
-            return (f"La bateria esta a {v} voltios, {soc} por ciento de carga. "
+            return (f"{battery}, {v} voltios. "
                     f"Solar {solar:.0f} vatios. {gen}")
         gen = ("No generator is running." if not running
                else f"{' and '.join(running)} running.")
-        return (f"Battery {v} volts, {soc} percent charge. "
+        return (f"{battery}, {v} volts. "
                 f"Solar {solar:.0f} watts. {gen}")
+
+    def usable_now(self, data=None, now=None, conn=None):
+        """usable.current() for this moment; never raises. Display only."""
+        conn = conn or self.conn
+        try:
+            soc = (data or {}).get("battSocBM")
+            return usablemod.current(conn, self.cfg, now=now, monitor_soc=soc)
+        except Exception as e:                       # noqa: BLE001
+            log.warning("could not compute the usable battery figure: %s", e)
+            return None
+
+    def battery_json(self, conn=None, query=None):
+        """GET /battery: the usable figure, for the VPS and the dashboard.
+
+        With ?date=YYYY-MM-DD (and step=1 or 5 minutes, default 5) it also
+        carries that local day's series and anchors under "day", for the
+        dashboard's battery chart. A bad date or step is a ValueError (400).
+        """
+        conn = conn or self.conn
+        query = query or {}
+        u = usablemod.current(conn, self.cfg)
+        u["text"] = {"en": usablemod.phrase(u, "en"), "es": usablemod.phrase(u, "es")}
+        if query.get("date"):
+            day = query["date"]
+            datetime.strptime(day, "%Y-%m-%d")       # ValueError -> 400
+            try:
+                step = int(query.get("step", 5))
+            except ValueError:
+                raise ValueError("step must be 1 or 5 (minutes)")
+            u["day"] = usablemod.day_series(conn, self.cfg, day, step_min=step)
+        return u
 
     def latest_plan_json(self, conn=None):
         """The plan record plus the live learning gate.
@@ -1756,6 +1807,14 @@ class Agent:
             history.poll_once(self.conn, self.cfg)
         except (requests.RequestException, Exception) as e:   # noqa: BLE001
             log.debug("sample failed: %s", e)
+        self.update_usable()
+
+    def update_usable(self):
+        """Log any battery anchor in the samples since the last one."""
+        try:
+            usablemod.update(self.conn)
+        except Exception as e:                       # noqa: BLE001
+            log.warning("battery anchor update failed: %s", e)
 
     def poll_errors_seen(self, now=None):
         """Has the Pi5's own Modbus poll lost a read in the last 2 minutes?
@@ -1820,7 +1879,8 @@ class Agent:
 
         server = ask_server.serve(self.cfg, self.answer, self.latest_plan_json,
                                   host=ask_host, db_path=self.db_path,
-                                  brief_handler=self.plan_brief)
+                                  brief_handler=self.plan_brief,
+                                  battery_provider=self.battery_json)
         threading.Thread(target=self.telegram_loop, name="telegram",
                          daemon=True).start()
         # In the background: startup must not wait on the model, and the
@@ -1832,6 +1892,9 @@ class Agent:
                  "counters hourly at :%02d",
                  self.cfg["tick_minutes"], self.cfg["digest_hours"],
                  COUNTERS_MINUTE)
+        # Bootstrap the battery anchors before the first plan record names
+        # the usable figure; on a fresh table this replays every sample.
+        self.update_usable()
         self.tick()
         try:
             while not self.stop_event.is_set():

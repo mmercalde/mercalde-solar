@@ -5,12 +5,18 @@
               comes within N seconds, otherwise 202, and the answer goes to Telegram.
               A plan question is one spoken sentence, with the record sent to Telegram.
   GET  /plan                                       -> the latest plan record as JSON
+  GET  /battery                                    -> the usable battery figure as JSON
+                                                      (usable.current, read-only)
+  GET  /battery?date=YYYY-MM-DD&step=5             -> the same, plus "day": that local
+                                                      day's series (step 1 or 5 min) and
+                                                      its anchors (usable.day_series)
 
 Bound to the KAMRUI LAN address only, never 0.0.0.0: the VPS reaches it over
 WireGuard through the Pi5, and nothing else should.
 """
 
 import json
+import urllib.parse
 import logging
 import sqlite3
 import threading
@@ -104,11 +110,17 @@ class _Handler(BaseHTTPRequestHandler):
         self.wfile.write(payload)
 
     def do_GET(self):
-        if self.path.rstrip("/") != "/plan":
+        path, _, qs = self.path.partition("?")
+        path = path.rstrip("/")
+        query = {k: v[-1] for k, v in urllib.parse.parse_qs(qs).items()}
+        providers = {"/plan": ("plan", self.server.plan_provider),
+                     "/battery": ("battery", self.server.battery_provider)}
+        if path not in providers:
             self._send(404, "not found")
             return
-        if not self.server.plan_provider:
-            self._send(503, json.dumps({"error": "no plan provider"}),
+        what, provider = providers[path]
+        if not provider:
+            self._send(503, json.dumps({"error": f"no {what} provider"}),
                        "application/json")
             return
         # Each request runs on its own thread, and a sqlite3 connection may
@@ -117,15 +129,18 @@ class _Handler(BaseHTTPRequestHandler):
         conn = None
         try:
             conn = history.readonly_connection(self.server.db_path)
-            plan = self.server.plan_provider(conn)
+            plan = provider(conn, query) if what == "battery" else provider(conn)
+        except ValueError as e:
+            self._send(400, json.dumps({"error": str(e)}), "application/json")
+            return
         except sqlite3.Error as e:
-            log.warning("could not read the plan: %s", e)
+            log.warning("could not read the %s: %s", what, e)
             self._send(503, json.dumps({"error": f"database unavailable: {e}"}),
                        "application/json")
             return
         except Exception:                            # noqa: BLE001
-            log.exception("plan provider failed")
-            self._send(500, json.dumps({"error": "plan provider failed"}),
+            log.exception("%s provider failed", what)
+            self._send(500, json.dumps({"error": f"{what} provider failed"}),
                        "application/json")
             return
         finally:
@@ -198,8 +213,9 @@ class AskServer(ThreadingHTTPServer):
     allow_reuse_address = True
 
     def __init__(self, addr, ask_handler, plan_provider, db_path=None, cfg=None,
-                 brief_handler=None):
+                 brief_handler=None, battery_provider=None):
         super().__init__(addr, _Handler)
+        self.battery_provider = battery_provider
         self.cfg = cfg
         self.brief_handler = brief_handler
         self.ask_handler = ask_handler
@@ -208,7 +224,7 @@ class AskServer(ThreadingHTTPServer):
 
 
 def serve(cfg, ask_handler, plan_provider, host=None, port=None, db_path=None,
-          brief_handler=None):
+          brief_handler=None, battery_provider=None):
     """Start the server on a daemon thread. Returns the server, or None.
 
     `plan_provider` is called with a read-only connection opened for that
@@ -219,7 +235,7 @@ def serve(cfg, ask_handler, plan_provider, host=None, port=None, db_path=None,
     port = cfg["ask_port"] if port is None else port
     try:
         server = AskServer((host, port), ask_handler, plan_provider, db_path, cfg,
-                           brief_handler)
+                           brief_handler, battery_provider)
     except OSError as e:
         log.error("cannot bind ask server to %s:%s (%s). Alexa and /plan will "
                   "be unavailable; the rest of the agent runs normally.",

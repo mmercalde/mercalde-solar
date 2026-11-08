@@ -31,6 +31,7 @@ import policy as policymod
 import sun as sunmod
 import system as systemmod
 import telegram
+import usable as usablemod
 import weather
 
 log = logging.getLogger(__name__)
@@ -754,6 +755,36 @@ class Tools:
                        "nothing is being drawn on one poll of it.")
         return total, None
 
+    def _usable(self, data):
+        try:
+            return usablemod.current(self.conn, self.cfg,
+                                     monitor_soc=data.get("battSocBM"))
+        except Exception as e:                       # noqa: BLE001
+            log.warning("could not compute the usable battery figure: %s", e)
+            return None
+
+    @staticmethod
+    def _usable_fields(u):
+        """The battery percentage as the owner reads it, in both languages."""
+        u = u or {}
+        return {
+            "battery_line": usablemod.phrase(u, "en"),
+            "battery_line_es": usablemod.phrase(u, "es"),
+            "usable_pct": u.get("usable_pct"),
+            "usable_uncertain": u.get("uncertain"),
+            "usable_uncertain_reason": u.get("uncertain_reason"),
+            "ah_above_floor": u.get("ah_above_floor"),
+            "window_ah": u.get("window_ah"),
+            "monitor_soc_pct": u.get("monitor_soc_pct"),
+            "battery_pct_note": (
+                "Quote battery_line (battery_line_es in Spanish) exactly when "
+                "asked how full the battery is. usable_pct is the agent's own "
+                "amp-hour count from 0 % at 52.0 V to 100 % at the tapered "
+                "top; monitor_soc_pct is the Battery Monitor's 1800 Ah scale. "
+                "Both are display only: what the pack holds for a decision is "
+                "watt-hours between two voltages."),
+        }
+
     def get_status(self):
         data = history.fetch_data(self.cfg)
         live = history.fetch_config(self.cfg)
@@ -805,9 +836,10 @@ class Tools:
                     "the dashboard started it because the pack reached the start "
                     "voltage. The AGS reports manual_on for this kind of start. "
                     "Nobody turned it on.")
+        u = self._usable(data)
         return {
             "voltage": data.get("batteryVoltage"),
-            "soc_pct_note": "not reported: the Battery Monitor's state of charge scale is unreliable and nothing may be quoted from it. What the pack holds is watt-hours between two voltages; how it is ageing is the battery_health tool.",
+            **self._usable_fields(u),
             "battery_w": data.get("battPower"),
             "battery_a": data.get("battCurrent"),
             "battery_monitor_online": data.get("battMonitorOnline"),
@@ -1256,7 +1288,8 @@ class Tools:
                         "slave": b["monitor"]["slave"],
                         "online": data.get("battMonitorOnline")},
             "voltage": data.get("batteryVoltage"),
-            "soc_pct_note": "not reported: the Battery Monitor's state of charge scale is unreliable and nothing may be quoted from it. What the pack holds is watt-hours between two voltages; how it is ageing is the battery_health tool.",
+            **self._usable_fields(self._usable(data)),
+            "usable_detail": self._usable(data),
             "ah_remaining": data.get("battAhRemaining"),
             "minutes_to_discharge": data.get("battMinToDischarge"),
             "net_current_a": data.get("battCurrent"),

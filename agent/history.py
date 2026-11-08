@@ -177,6 +177,22 @@ CREATE TABLE IF NOT EXISTS actions (
   reason TEXT, voltage REAL, soc REAL, result TEXT
 );
 CREATE INDEX IF NOT EXISTS actions_ts ON actions (ts);
+
+-- usable.py's amp-hour counter: one row per anchor it has detected in
+-- samples. kind is 'top' (tapered at >= 59.5 V, the measured 100 %) or
+-- 'floor' (the pack reached 52.0 V, 0 %). error_ah is what the counter read
+-- just before the anchor reset it, minus the anchor's own value; NULL for the
+-- first anchor, which had nothing to count from. ah_in/ah_out are the raw
+-- shunt amp-hours since the previous anchor, before any efficiency factor,
+-- and gap_s the seconds of samples that were missing in between: they are
+-- what calibration fits from. Derived data: replaying samples rebuilds it.
+CREATE TABLE IF NOT EXISTS battery_anchors (
+  ts INTEGER PRIMARY KEY, kind TEXT NOT NULL,
+  battery_v REAL, battery_a REAL,
+  counter_ah REAL, error_ah REAL,
+  ah_in REAL, ah_out REAL, gap_s INTEGER, since_s INTEGER,
+  window_ah REAL, cef REAL
+);
 """
 
 

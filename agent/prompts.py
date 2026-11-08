@@ -66,7 +66,10 @@ POLICY = """\
    Monitor's state of charge is shown because the owner reads it, and is used
    in no decision at all: it is one shunt's percentage multiplied by a
    capacity derived from the same shunt, so it cannot check itself. Never
-   reason from SOC, and never quote it as evidence for a threshold.
+   reason from SOC, and never quote it as evidence for a threshold. When
+   asked how full the battery is, quote get_status's battery_line exactly
+   ("Battery 41% usable (monitor 82%)"; battery_line_es in Spanish). The
+   usable figure is display only too.
 9. Restate numbers only from tool results. Never compute watt-hours, hours or
    rates myself. When uncertain, send a Telegram instead of acting. Every
    action carries a one-line reason.
