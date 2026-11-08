@@ -71,6 +71,19 @@ SAMPLE_FIELDS = [
     ("kubotaStartOrigin", "kub_start_origin"),
     ("autoGenEnabled", "auto_gen_enabled"),
     ("lastUpdate", "last_update"),
+    # The XW+ 5548 (slave 11), which the Kubota feeds on AC2. The Pi5 already
+    # reads these every 5 s for its card; they are kept here so a Kubota run
+    # can confirm the live generator-AC registers (0x00A2/0x00A4/0x00AC),
+    # which until 2026-11-08 had been checked only against the lifetime
+    # energy counter. See docs/xwplus_gen_ac_2026-11.md.
+    ("xwPlusAcInVoltage", "xw_gen_ac_v"),
+    ("xwPlusAcInCurrent", "xw_gen_ac_a"),
+    ("xwPlusAcInPower", "xw_gen_ac_w"),
+    ("xwPlusChargeCurrent", "xw_charge_dc_a"),
+    ("xwPlusChargePower", "xw_charge_dc_w"),
+    ("xwPlusBatteryVoltage", "xw_battery_v"),
+    ("xwPlusChargerStatus", "xw_charger_status"),
+    ("kubotaChargeRateLive", "kub_charge_rate"),
 ]
 
 SCHEMA = """
@@ -84,7 +97,10 @@ CREATE TABLE IF NOT EXISTS samples (
   mep_ags_online INTEGER, kub_ags_online INTEGER,
   mep_on_reason TEXT, kub_on_reason TEXT,
   mep_start_origin TEXT, kub_start_origin TEXT,
-  poll_errors INTEGER, auto_gen_enabled INTEGER, last_update TEXT
+  poll_errors INTEGER, auto_gen_enabled INTEGER, last_update TEXT,
+  xw_gen_ac_v REAL, xw_gen_ac_a REAL, xw_gen_ac_w REAL,
+  xw_charge_dc_a REAL, xw_charge_dc_w REAL, xw_battery_v REAL,
+  xw_charger_status TEXT, kub_charge_rate INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS hourly (
@@ -207,7 +223,15 @@ MIGRATIONS = [("gen_runs", "load_w", "REAL"),
               ("samples", "kub_on_reason", "TEXT"),
               ("gen_runs", "start_origin", "TEXT"),
               ("samples", "mep_start_origin", "TEXT"),
-              ("samples", "kub_start_origin", "TEXT")]
+              ("samples", "kub_start_origin", "TEXT"),
+              ("samples", "xw_gen_ac_v", "REAL"),
+              ("samples", "xw_gen_ac_a", "REAL"),
+              ("samples", "xw_gen_ac_w", "REAL"),
+              ("samples", "xw_charge_dc_a", "REAL"),
+              ("samples", "xw_charge_dc_w", "REAL"),
+              ("samples", "xw_battery_v", "REAL"),
+              ("samples", "xw_charger_status", "TEXT"),
+              ("samples", "kub_charge_rate", "INTEGER")]
 
 
 def migrate(conn):

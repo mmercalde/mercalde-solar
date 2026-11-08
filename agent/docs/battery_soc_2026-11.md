@@ -703,3 +703,10 @@ checks that. The monitor's settings are unchanged, including its 98 % CEF.
 - **What the chart will show:** a step at an anchor is the counter's error
   being corrected, and the anchor marks show where.
 - **Errors:** a bad date or step returns 400.
+
+**Correction, 2026-11-08 (later):** the gateway's clock runs about 12
+minutes slow (see `xwplus_gen_ac_2026-11.md`). Re-running with the gateway
+shifted 12 minutes and duplicate minutes dropped changes nothing material:
+the cycles come out 774 / 781 / 707 / 795 / 668 Ah, the replay is the same,
+and the fit is CEF 0.952 and window 801 Ah. Top and cycle times in sections
+8a and 8b are gateway time, so they are about 12 minutes late.
