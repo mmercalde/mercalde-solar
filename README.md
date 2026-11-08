@@ -50,9 +50,10 @@ shunt. Positive current is charging.
 | Generator | AGS ID | Feeds | Charge rate |
 |---|---|---|---|
 | MEP-803A | 51 | Both XW Pros | 100% |
-| Kubota | 50 | XW+ 5548 only | 70% (parallel Magnum charger limit) |
+| Kubota | 50 | XW+ 5548 only | 65% (parallel Magnum charger limit; set on purpose) |
 
-Kubota is capped at 70% because of the parallel Magnum charger.
+Kubota is capped because of the parallel Magnum charger. The cap is 65%, set
+on purpose by Michael in Nov 2026: do not change it.
 
 ---
 

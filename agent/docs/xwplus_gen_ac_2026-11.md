@@ -37,7 +37,7 @@ an idle input should read.
 
 | Time | Event |
 |---|---|
-| 05:09:07 | Auto start at 52.0 V for both generators. XW+ rate cap written at **65 %**, not 70 % (0x016F = 65). |
+| 05:09:07 | Auto start at 52.0 V for both generators. XW+ rate cap written at **65 %** (0x016F = 65). |
 | 05:09:44 | AGS reports the Kubota running. |
 | 05:12 | Charge current starts. The chargers qualify the AC first. |
 | 06:13:31 | Stop at 55.84 V. The rate cap ramps 50 → 25 → 10 → 0 % by 06:15:01. |
@@ -57,7 +57,12 @@ an idle input should read.
 **Expected values for the next run.** The XW+ took 3.568 kWh of AC over
 about 63 minutes of charging, 05:12 to 06:15 including the ramp-down.
 
-- **0x00AC (power):** about **3.4 kW** at the 65 % cap. Per hourly window,
+- **0x00AC (power):** about **3.4 kW** at the 65 % cap.
+
+  The Kubota's charge rate is **65 %, set on purpose by Michael (Nov 2026).
+  Do not change it.** Older text saying 70 % is out of date: the README,
+  SPEC and `system.yaml` were updated on 2026-11-08.
+ Per hourly window,
   that is 1.388 kWh over 25 min ≈ 3.3 kW, then 2.180 kWh over about 38 min
   ≈ 3.4 kW.
 - **0x00A2 (voltage):** about **240 V**.

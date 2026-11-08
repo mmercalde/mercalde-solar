@@ -10,7 +10,7 @@
   "kubota": {
     "startVoltage": 52.3,
     "stopVoltage": 55.0,
-    "chargeRate": 70,
+    "chargeRate": 65,
     "maxRuntime": 120,
     "cooldown": 5
   },

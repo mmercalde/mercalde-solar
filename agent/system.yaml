@@ -91,7 +91,8 @@ generators:
     label: Kubota
     ags_slave: 50
     nameplate_kw: 7
-    charge_rate_pct: 70
+    # Set to 65% on purpose by Michael (Nov 2026); do not change it.
+    charge_rate_pct: 65
     feeds: [xw_plus_5548]
     assumed_charge_a: 80           # net, conservative, ~4.2 kW at 53 V
     exercise: {every_days: 3, at: "09:00", minutes: 30}
@@ -104,7 +105,8 @@ generators:
     # Magnum is doing, so anything summed from their registers understates a
     # Kubota run. Gross is measured at the shunt and at the inverters' load
     # output, so it counts whatever the Magnum put in without seeing it.
-    # The 70% charge-rate cap exists because of this parallel charger.
+    # The charge-rate cap (65%, see charge_rate_pct) exists because of this
+    # parallel charger.
     magnum: {model: Magnum MS4048, on_modbus: false}
   max_run:
     pi5_minutes: 120               # the dashboard's own cap per run

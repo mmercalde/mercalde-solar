@@ -267,7 +267,9 @@ DEFAULT_CONFIG = {
     "kubota": {
         "startVoltage": 52.3,
         "stopVoltage": 55.0,
-        "chargeRate": 70,
+        # 65% on purpose (Michael, Nov 2026), for the parallel Magnum charger.
+        # Do not change it.
+        "chargeRate": 65,
         "maxRuntime": 120,
         "cooldown": 5
     },
